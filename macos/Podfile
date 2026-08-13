@@ -1,0 +1,76 @@
+platform :osx, '10.15'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'ephemeral', 'Flutter-Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure \"flutter pub get\" is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Flutter-Generated.xcconfig, then run \"flutter pub get\""
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_macos_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_macos_build_settings(target)
+  end
+
+  # Ensure the email_core native library is built and copied into the app
+  # bundle so lib/native/email_core.dart can load it via dart:ffi.
+  project_path = File.expand_path('Runner.xcodeproj', __dir__)
+  main_project = Xcodeproj::Project.open(project_path)
+  runner_target = main_project.targets.find { |t| t.name == 'Runner' }
+  if runner_target
+    phase_name = 'Build EmailCore Library'
+    existing_phase = runner_target.shell_script_build_phases.find { |p| p.name == phase_name }
+    phase = existing_phase || runner_target.new_shell_script_build_phase(phase_name)
+    phase.shell_script = <<~SCRIPT
+      set -e
+      EMAIL_DIR="${SRCROOT}/../email"
+      BUILD_DIR="$EMAIL_DIR/build"
+      mkdir -p "$BUILD_DIR"
+      cmake -S "$EMAIL_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DVMIME_INCLUDE_DIRS=/usr/local/include > /dev/null
+      cmake --build "$BUILD_DIR" --target email_core_shared > /dev/null
+      DEST_DIR="${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}"
+      mkdir -p "$DEST_DIR"
+      cp "$BUILD_DIR/libemail_core.dylib" "$DEST_DIR/"
+
+      # Copy dependent libraries to Frameworks directory
+      FRAMEWORKS_DIR="${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/../Frameworks"
+      mkdir -p "$FRAMEWORKS_DIR"
+      cp /usr/local/lib/libvmime.1.dylib "$FRAMEWORKS_DIR/" 2>/dev/null || true
+      cp /opt/homebrew/opt/gsasl/lib/libgsasl.18.dylib "$FRAMEWORKS_DIR/" 2>/dev/null || true
+
+      # Update library paths to use @rpath
+      install_name_tool -change /usr/local/lib/libvmime.1.dylib @rpath/libvmime.1.dylib "$DEST_DIR/libemail_core.dylib" 2>/dev/null || true
+      install_name_tool -change /opt/homebrew/opt/gsasl/lib/libgsasl.18.dylib @rpath/libgsasl.18.dylib "$DEST_DIR/libemail_core.dylib" 2>/dev/null || true
+    SCRIPT
+    phase.always_out_of_date = '1'
+    main_project.save
+  end
+end
