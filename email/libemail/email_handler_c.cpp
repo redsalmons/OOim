@@ -304,12 +304,18 @@ int SetImapServer_c(int configIndex, const char* server, int port) {
         auto outlookDelegate = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate);
         if (outlookDelegate) {
             outlookDelegate->set_imap_server(server, port);
-            LOG_INFO("SetImapServer_c: Successfully set IMAP server\n");
+            LOG_INFO("SetImapServer_c: Successfully set IMAP server (Outlook)\n");
             return 0;
-        } else {
-            LOG_INFO("SetImapServer_c: Delegate is not EmailOptOutlookImpl\n");
-            return -4;
         }
+        // Cast to EmailOpt163Impl to set IMAP server (also handles QQ)
+        auto impl163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
+        if (impl163) {
+            impl163->set_imap_server(server, port);
+            LOG_INFO("SetImapServer_c: Successfully set IMAP server (163/QQ)\n");
+            return 0;
+        }
+        LOG_INFO("SetImapServer_c: Delegate type not recognized\n");
+        return -4;
     } catch (...) {
         return -5;
     }

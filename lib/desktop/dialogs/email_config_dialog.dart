@@ -56,6 +56,8 @@ class EmailAccountConfig {
     switch (type) {
       case '163.com':
         return '网易163邮箱';
+      case 'qq.com':
+        return 'QQ邮箱';
       case 'gmail.com':
         return 'Gmail';
       case 'outlook.com':
@@ -67,12 +69,14 @@ class EmailAccountConfig {
 }
 
 class EmailProviders {
-  static const List<String> supportedTypes = ['163.com', 'gmail.com', 'outlook.com'];
+  static const List<String> supportedTypes = ['163.com', 'qq.com', 'gmail.com', 'outlook.com'];
 
   static String displayNameFor(String type) {
     switch (type) {
       case '163.com':
         return '网易163邮箱';
+      case 'qq.com':
+        return 'QQ邮箱';
       case 'gmail.com':
         return 'Gmail';
       case 'outlook.com':
@@ -91,6 +95,15 @@ class EmailProviders {
           ConfigField('SMTP服务器', 'smtp_server', false, 'smtp.163.com', FieldKind.text),
           ConfigField('SMTP端口', 'smtp_port', false, '465', FieldKind.port),
           ConfigField('IMAP服务器', 'imap_server', false, 'imap.163.com', FieldKind.text),
+          ConfigField('IMAP端口', 'imap_port', false, '993', FieldKind.port),
+        ];
+      case 'qq.com':
+        return const [
+          ConfigField('邮箱地址', 'email', true, '', FieldKind.text),
+          ConfigField('授权码', 'auth_code', true, '', FieldKind.text),
+          ConfigField('SMTP服务器', 'smtp_server', false, 'smtp.qq.com', FieldKind.text),
+          ConfigField('SMTP端口', 'smtp_port', false, '465', FieldKind.port),
+          ConfigField('IMAP服务器', 'imap_server', false, 'imap.qq.com', FieldKind.text),
           ConfigField('IMAP端口', 'imap_port', false, '993', FieldKind.port),
         ];
       case 'gmail.com':
@@ -358,8 +371,8 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
         _showMessage('账户索引错误');
       }
     } else {
-      // For 163, just mark as authorized (uses auth code)
-      _writeToFile('Processing 163 account');
+      // For 163/QQ, just mark as authorized (uses auth code)
+      _writeToFile('Processing ${account.type} account');
       setState(() {
         account.authorized = true;
       });

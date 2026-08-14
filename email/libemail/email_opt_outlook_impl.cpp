@@ -939,7 +939,21 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                 {
                     "name": "X-Message-ID",
                     "value": ")" + msg_id + R"("
-                }
+                }"; 
+    
+    if (!irt.empty()) {
+        json_body += R"(,
+                {
+                    "name": "In-Reply-To",
+                    "value": ")" + irt + R"("
+                },
+                {
+                    "name": "References",
+                    "value": ")" + irt + R"("
+                }";
+    }
+    
+    json_body += R"(
             ]
         }
     })";
@@ -1310,6 +1324,7 @@ std::string EmailOptOutlookImpl::fetch_email_headers(const std::string& folder, 
         fetchAttrs.add("Reply-To");
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
+        fetchAttrs.add("X-Message-ID");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         // Ensure UID is included
@@ -1534,8 +1549,10 @@ std::string EmailOptOutlookImpl::fetch_email_headers(const std::string& folder, 
             emailJson["date"] = getHeader("Date");
             emailJson["reply_to"] = decodeHeader(getHeader("Reply-To"));
             emailJson["in_reply_to"] = decodeHeader(getHeader("In-Reply-To"));
-            emailJson["message_id"] = decodeHeader(getHeader("Message-ID"));
-            emailJson["x_message_id"] = decodeHeader(getHeader("X-Message-ID"));
+            std::string xMsgId = decodeHeader(getHeader("X-Message-ID"));
+            std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
+            emailJson["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
+            emailJson["x_message_id"] = xMsgId;
             emailJson["x_session_id"] = decodeHeader(getHeader("X-Session-ID"));
             emailJson["to_addr"] = decodeHeader(getHeader("To"));
 

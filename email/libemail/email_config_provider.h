@@ -95,6 +95,25 @@ public:
                          std::string& error_message) const override;
 };
 
+class EmailQQConfigProvider : public EmailConfigProvider {
+public:
+    std::string get_email_type() const override {
+        return "qq.com";
+    }
+    
+    std::string get_display_name() const override {
+        return "emailTypeQQ";
+    }
+    
+    std::vector<ConfigField> get_config_fields() const override;
+    
+    EmailConfig build_config(const std::map<std::string, std::string>& field_values,
+                             const std::string& master_password) const override;
+    
+    bool validate_fields(const std::map<std::string, std::string>& field_values,
+                         std::string& error_message) const override;
+};
+
 // Factory to get provider for email type
 class EmailConfigProviderFactory {
 public:

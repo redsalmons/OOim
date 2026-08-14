@@ -227,11 +227,96 @@ bool EmailOutlookConfigProvider::validate_fields(
     return true;
 }
 
+// QQ config provider - same structure as 163 but with QQ defaults
+std::vector<ConfigField> EmailQQConfigProvider::get_config_fields() const {
+    return {
+        {"emailLabel", "email", true, "", 1},
+        {"authCodeLabel", "auth_code", true, "", 2},
+        {"smtpServerLabel", "smtp_server", false, "smtp.qq.com", 3},
+        {"smtpPortLabel", "smtp_port", false, "465", 4},
+        {"imapServerLabel", "imap_server", false, "imap.qq.com", 5},
+        {"imapPortLabel", "imap_port", false, "993", 6}
+    };
+}
+
+EmailConfig EmailQQConfigProvider::build_config(
+    const std::map<std::string, std::string>& field_values,
+    const std::string& master_password) const {
+    
+    EmailConfig config;
+    config.type = get_email_type();
+    config.uid = 0;
+    
+    auto it = field_values.find("email");
+    if (it != field_values.end()) config.email = it->second;
+    
+    it = field_values.find("auth_code");
+    if (it != field_values.end()) config.auth_code = it->second;
+    
+    it = field_values.find("smtp_server");
+    if (it != field_values.end()) config.smtp_server = it->second;
+    
+    it = field_values.find("smtp_port");
+    if (it != field_values.end()) {
+        try { config.smtp_port = std::stoi(it->second); } catch (...) { config.smtp_port = 465; }
+    }
+    
+    it = field_values.find("imap_server");
+    if (it != field_values.end()) config.imap_server = it->second;
+    
+    it = field_values.find("imap_port");
+    if (it != field_values.end()) {
+        try { config.imap_port = std::stoi(it->second); } catch (...) { config.imap_port = 993; }
+    }
+    
+    std::string random_phrase = crypto_utils::generate_random_phrase();
+    std::string master_key = crypto_utils::derive_master_key(master_password);
+    CryptoAES aes;
+    aes.set_key(master_key);
+    std::vector<uint8_t> encrypted_phrase = aes.encrypt(
+        std::vector<uint8_t>(random_phrase.begin(), random_phrase.end()));
+    config.phrase = crypto_utils::base64_encode(encrypted_phrase);
+    
+    const char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    std::string id;
+    id.reserve(8);
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, sizeof(charset) - 2);
+    for (int i = 0; i < 8; ++i) id += charset[dis(gen)];
+    config.id = id + "." + config.type;
+    
+    return config;
+}
+
+bool EmailQQConfigProvider::validate_fields(
+    const std::map<std::string, std::string>& field_values,
+    std::string& error_message) const {
+    
+    auto it = field_values.find("email");
+    if (it == field_values.end() || it->second.empty()) {
+        error_message = "emailCannotBeEmpty";
+        return false;
+    }
+    
+    it = field_values.find("auth_code");
+    if (it == field_values.end() || it->second.empty()) {
+        error_message = "authCodeCannotBeEmpty";
+        return false;
+    }
+    
+    return true;
+}
+
 std::unique_ptr<EmailConfigProvider> EmailConfigProviderFactory::get_provider(
     const std::string& email_type) {
     
     if (email_type == "163.com" || email_type == "emailType163") {
         return std::make_unique<Email163ConfigProvider>();
+    }
+    
+    if (email_type == "qq.com" || email_type == "emailTypeQQ") {
+        return std::make_unique<EmailQQConfigProvider>();
     }
     
     if (email_type == "outlook.com" || email_type == "emailTypeOutlook") {
@@ -248,7 +333,7 @@ std::unique_ptr<EmailConfigProvider> EmailConfigProviderFactory::get_provider(
 }
 
 std::vector<std::string> EmailConfigProviderFactory::get_supported_types() {
-    return {"163.com", "outlook.com", "gmail.com"};
+    return {"163.com", "qq.com", "outlook.com", "gmail.com"};
 }
 
 std::vector<ConfigField> EmailGmailConfigProvider::get_config_fields() const {

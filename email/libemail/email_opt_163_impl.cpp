@@ -45,7 +45,7 @@ public:
 namespace EmailComm {
 
 EmailOpt163Impl::EmailOpt163Impl(std::shared_ptr<::oemailim::EmailHandler> email_handler)
-    : EmailOptInterface(email_handler), is_valid_(false), smtp_port_(465), current_selected_folder_("") {
+    : EmailOptInterface(email_handler), is_valid_(false), smtp_port_(465), imap_port_(993), current_selected_folder_("") {
 }
 
 EmailOpt163Impl::~EmailOpt163Impl() {
@@ -93,7 +93,9 @@ bool EmailOpt163Impl::connect_() {
         return false;
     }
 
-    LOG_INFO("163 connect_ - establishing TCP connection to imap.163.com:993...\n");
+    LOG_INFO("163 connect_ - establishing TCP connection to %s:%d...\n", 
+             imap_server_.empty() ? "imap.163.com" : imap_server_.c_str(), 
+             imap_port_ > 0 ? imap_port_ : 993);
 
     try {
         // Initialize vmime platform handler (only once)
@@ -129,7 +131,9 @@ bool EmailOpt163Impl::connect_() {
         session_->getProperties()["ssl.ca-path"] = "";
 
         // Create IMAP store with imaps:// protocol for SSL/TLS
-        vmime::utility::url store_url("imaps", "imap.163.com", 993);
+        std::string imap_host = imap_server_.empty() ? "imap.163.com" : imap_server_;
+        int imap_p = imap_port_ > 0 ? imap_port_ : 993;
+        vmime::utility::url store_url("imaps", imap_host, imap_p);
         store_ = session_->getStore(store_url);
 
         // Set authentication properties on the store
@@ -231,6 +235,11 @@ void EmailOpt163Impl::set_email(const std::string& email) {
 void EmailOpt163Impl::set_smtp_server(const std::string& server, int port) {
     smtp_server_ = server;
     smtp_port_ = port;
+}
+
+void EmailOpt163Impl::set_imap_server(const std::string& server, int port) {
+    imap_server_ = server;
+    imap_port_ = port;
 }
 
 bool EmailOpt163Impl::select_folder(const std::string& folder_name) {
@@ -793,6 +802,13 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         header->MessageId()->setValue(msg_id);
         LOG_INFO("163 send_email - manually set Message-ID: %s\n", msg_id.c_str());
 
+        // Set X-Message-ID header with the locally generated message_id
+        // This allows FetchAndStore_c to match the sent email when QQ/163 server rewrites Message-ID
+        vmime::shared_ptr<vmime::headerField> xMsgIdField =
+            vmime::headerFieldFactory::getInstance()->create("X-Message-ID", msg_id);
+        header->appendField(xMsgIdField);
+        LOG_INFO("163 send_email - set X-Message-ID: %s\n", msg_id.c_str());
+
         // Handle In-Reply-To and References for conversation threading
         if (!in_reply_to.empty() && in_reply_to != "<>" && in_reply_to != "<<> <>") {
             // Ensure In-Reply-To is wrapped in angle brackets
@@ -1057,6 +1073,7 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
         fetchAttrs.add("Reply-To");
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
+        fetchAttrs.add("X-Message-ID");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         // Ensure UID is included
@@ -1278,8 +1295,10 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
             email_obj["date"] = getHeader("Date");
             email_obj["reply_to"] = decodeHeader(getHeader("Reply-To"));
             email_obj["in_reply_to"] = decodeHeader(getHeader("In-Reply-To"));
-            email_obj["message_id"] = decodeHeader(getHeader("Message-ID"));
-            email_obj["x_message_id"] = decodeHeader(getHeader("X-Message-ID"));
+            std::string xMsgId = decodeHeader(getHeader("X-Message-ID"));
+            std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
+            email_obj["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
+            email_obj["x_message_id"] = xMsgId;
             email_obj["x_session_id"] = decodeHeader(getHeader("X-Session-ID"));
             email_obj["to_addr"] = decodeHeader(getHeader("To"));
             
@@ -1560,6 +1579,13 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         //    response, we skip readResponse() to avoid blocking. This is unlikely
         //    since the server sends tagged response only after DONE.
         conn->readResponse();
+
+        // 6. Force disconnect after IDLE to ensure clean connection state for fetch.
+        //    Raw socket reads during IDLE can corrupt vmime's internal buffer state,
+        //    causing subsequent SELECT/FETCH to time out on the same connection.
+        try { store_->disconnect(); } catch (...) {}
+        session_.reset();
+        store_.reset();
 
         return gotNotification;
     } catch (const vmime::exceptions::operation_timed_out& e) {

@@ -357,7 +357,7 @@ void childEntryPoint(SendPort supervisorPort) {
     if (configIndex == null) return;
 
     // SENT folder typically doesn't support IDLE, use polling for all providers
-    // INBOX uses IDLE for Outlook, polling for 163
+    // INBOX uses IDLE for Outlook and QQ, polling for 163
     final usePolling = accountType == '163.com' || 
                        accountType == 'emailType163';
 
@@ -431,7 +431,7 @@ void childEntryPoint(SendPort supervisorPort) {
         if (accountType == 'outlook.com') {
           native.EmailCore.refreshToken(configIndex!);
         } else {
-          // For 163, set credentials before connecting
+          // For 163/QQ, set credentials before connecting
           final credResult = native.EmailCore.setEmailCredentials(configIndex!, email!, authCode!);
           log('Download loop: setEmailCredentials result=$credResult');
         }

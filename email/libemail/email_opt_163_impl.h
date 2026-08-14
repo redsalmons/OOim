@@ -51,6 +51,9 @@ public:
     // Set SMTP server and port
     void set_smtp_server(const std::string& server, int port);
 
+    // Set IMAP server and port
+    void set_imap_server(const std::string& server, int port);
+
     // Set data directory for email storage
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
     std::string get_data_dir() const { return data_dir_; }
@@ -84,6 +87,10 @@ private:
     // SMTP server configuration
     std::string smtp_server_;
     int smtp_port_;
+
+    // IMAP server configuration
+    std::string imap_server_;
+    int imap_port_;
 
     // Data directory for email storage
     std::string data_dir_;

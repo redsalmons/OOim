@@ -126,7 +126,8 @@ int EmailHandler::OpenNewEmail(const std::string& email_id) {
     oemailim::EmailProvider provider;
 
     // Determine provider type from config.type
-    if (target_config.type == "163.com" || target_config.type == "emailType163") {
+    if (target_config.type == "163.com" || target_config.type == "emailType163" ||
+        target_config.type == "qq.com" || target_config.type == "emailTypeQQ") {
         provider = oemailim::EmailProvider::EMAIL_PROVIDER_163;
         email = std::make_shared<EmailComm::Email163>(
             target_config.smtp_server.empty() ? "smtp.163.com" : target_config.smtp_server,
@@ -175,6 +176,13 @@ int EmailHandler::OpenNewEmail(const std::string& email_id) {
                 impl163->set_auth_code(target_config.auth_code);
             }
             impl163->set_data_dir(dataDir);
+            // Set IMAP/SMTP server from config if provided
+            if (!target_config.imap_server.empty()) {
+                impl163->set_imap_server(target_config.imap_server, target_config.imap_port);
+            }
+            if (!target_config.smtp_server.empty()) {
+                impl163->set_smtp_server(target_config.smtp_server, target_config.smtp_port);
+            }
         }
     } else if (provider == oemailim::EmailProvider::EMAIL_PROVIDER_OUTLOOK) {
         auto implOutlook = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate);
@@ -234,10 +242,11 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
     oemailim::EmailProvider provider;
 
     // Determine provider type from config.type
-    if (config.type == "163.com" || config.type == "emailType163") {
+    if (config.type == "163.com" || config.type == "emailType163" ||
+        config.type == "qq.com" || config.type == "emailTypeQQ") {
         provider = oemailim::EmailProvider::EMAIL_PROVIDER_163;
         email = std::make_shared<EmailComm::Email163>(
-            config.smtp_server.empty() ? "smtp.163.com" : config.smtp_server,
+            config.smtp_server.empty() ? "imap.163.com" : config.smtp_server,
             config.smtp_port > 0 ? config.smtp_port : 465,
             config.imap_server.empty() ? "imap.163.com" : config.imap_server,
             config.imap_port > 0 ? config.imap_port : 993
@@ -283,6 +292,13 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
                 impl163->set_auth_code(config.auth_code);
             }
             impl163->set_data_dir(dataDir);
+            // Set IMAP/SMTP server from config if provided
+            if (!config.imap_server.empty()) {
+                impl163->set_imap_server(config.imap_server, config.imap_port);
+            }
+            if (!config.smtp_server.empty()) {
+                impl163->set_smtp_server(config.smtp_server, config.smtp_port);
+            }
         }
     } else if (provider == oemailim::EmailProvider::EMAIL_PROVIDER_OUTLOOK) {
         auto implOutlook = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate);
