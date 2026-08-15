@@ -186,10 +186,10 @@ int email_fetch_and_store(int configIndex, const char* folder, const char* start
 int email_insert_sent_email(const char* account, const char* sender, const char* from_addr, const char* to_addr, const char* subject, const char* date, const char* message_id, const char* in_reply_to, const char* body, const char* storageDir, char* outJson, int outSize);
 
 // Query session_id by message_id. Returns 0 on success, negative on error.
-int email_query_session_by_message_id(const char* messageId, char* outSessionId, int outSize);
+int email_query_session_by_message_id(const char* messageId, const char* account, char* outSessionId, int outSize);
 
 // Add an email to an existing session by uuid and session_id. Returns 0 on success, negative on error.
-int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, char* outJson, int outSize);
+int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, int encrypt_method, char* outJson, int outSize);
 
 // Query localemail table for stored emails by account.
 // Returns 0 on success, negative on error. outJson contains the emails JSON.
@@ -246,6 +246,24 @@ int email_update_session_read(const char* sessionId);
 // Query unread count for a session (count of records with isread=0).
 // Returns count on success, negative on error.
 int email_query_session_unread(const char* sessionId);
+
+// Code table operations (store peer's ECC public key, secretkey, and identify=MD5(pubkey))
+int email_code_insert(const char* account, const char* pubkey, const char* secretkey, const char* keypassword);
+int email_code_query_by_account(const char* account, char* outJson, int outSize);
+int email_code_query_by_identify(const char* identify, char* outJson, int outSize);
+
+// Create a new session with ECC key pair generation. Returns 0 on success.
+int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, char* outJson, int outSize);
+
+// Prepare encrypted data body for x_start_new=data messages.
+// Takes plaintext, recipient list (comma-separated), and sender account.
+// Returns encrypted JSON body string in outJson.
+int email_prepare_data_body(const char* plaintext, const char* recipients, const char* sender, char* outJson, int outSize);
+
+// Decrypt data body for x_start_new=data messages.
+// Takes encrypted JSON body and the account doing the decryption.
+// Returns plaintext in outJson.
+int email_decrypt_data_body(const char* encryptedBody, const char* account, char* outJson, int outSize);
 
 #ifdef __cplusplus
 }

@@ -11,6 +11,7 @@ import 'email_module_base.dart';
 import 'email_list_view.dart';
 import 'email_detail_view.dart';
 import 'conversation_view.dart';
+import '../../i18n/app_strings.dart';
 
 export 'email_module_base.dart';
 
@@ -159,15 +160,14 @@ class EmailModuleState extends State<EmailModule>
     _logToFile('Generating session records for all accounts...');
     try {
       final config = native.EmailCore.loadConfig(_configPath);
-      _logToFile('Config loaded: $config');
-      
-      // Generate sessions for 163 account
-      final generate163Result = native.EmailCore.generateSessions('yangbo_889@163.com');
-      _logToFile('generateSessions for 163 result: $generate163Result');
-      
-      // Generate sessions for outlook account
-      final generateOutlookResult = native.EmailCore.generateSessions('app_588@outlook.com');
-      _logToFile('generateSessions for outlook result: $generateOutlookResult');
+      if (config != null) {
+        for (final account in config.accounts) {
+          if (account.email.isNotEmpty) {
+            final result = native.EmailCore.generateSessions(account.email);
+            _logToFile('generateSessions for ${account.email} result: $result');
+          }
+        }
+      }
     } catch (e) {
       _logToFile('Error generating sessions: $e');
     }
@@ -217,10 +217,10 @@ class EmailModuleState extends State<EmailModule>
             _logToFile('Background error: ${msg.data?['error']} for ${msg.account}');
             if (msg.data?['error'] == '163_unsafe_login' && mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('163 IMAP 报告不安全登录。请在163邮箱设置中重新生成授权码。'),
+                SnackBar(
+                  content: Text(AppStrings.unsafeLogin163),
                   backgroundColor: Colors.red,
-                  duration: Duration(seconds: 10),
+                  duration: const Duration(seconds: 10),
                 ),
               );
             }
@@ -354,10 +354,10 @@ class EmailModuleState extends State<EmailModule>
         if (fetchDecoded['status'] == 'failed') {
           if (fetchDecoded['error'] == '163_unsafe_login') {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('163 IMAP 报告不安全登录。请在163邮箱设置中重新生成授权码。'),
+              SnackBar(
+                content: Text(AppStrings.unsafeLogin163),
                 backgroundColor: Colors.red,
-                duration: Duration(seconds: 10),
+                duration: const Duration(seconds: 10),
               ),
             );
           }
@@ -405,6 +405,7 @@ class EmailModuleState extends State<EmailModule>
               rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
               toAddr: e['to_addr']?.toString() ?? '',
               file: fileField,
+              account: e['account']?.toString() ?? '',
             );
           }).toList();
           
@@ -434,6 +435,7 @@ class EmailModuleState extends State<EmailModule>
                 rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
                 toAddr: e['to_addr']?.toString() ?? '',
                 file: e['file']?.toString() ?? '',
+                account: e['account']?.toString() ?? '',
               );
             }).toList());
           }
@@ -459,6 +461,17 @@ class EmailModuleState extends State<EmailModule>
     if (config == null) {
       _logToFile('reloadFromDb: config is null');
       return;
+    }
+
+    // Generate session records for all accounts
+    for (final account in config.accounts) {
+      if (account.email.isNotEmpty) {
+        try {
+          native.EmailCore.generateSessions(account.email);
+        } catch (e) {
+          _logToFile('reloadFromDb: generateSessions error for ${account.email}: $e');
+        }
+      }
     }
 
     final allEmails = <native.EmailMessage>[];
@@ -492,6 +505,7 @@ class EmailModuleState extends State<EmailModule>
                 sessionId: e['session_id']?.toString() ?? '',
                 rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
                 toAddr: e['to_addr']?.toString() ?? '',
+                file: e['file']?.toString() ?? '',
               );
             }).toList();
             allEmails.addAll(parsedEmails);
@@ -532,6 +546,8 @@ class EmailModuleState extends State<EmailModule>
                 sessionId: e['session_id']?.toString() ?? '',
                 rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
                 toAddr: e['to_addr']?.toString() ?? '',
+                file: e['file']?.toString() ?? '',
+                account: e['account']?.toString() ?? '',
               ));
             }
           }
@@ -567,6 +583,17 @@ class EmailModuleState extends State<EmailModule>
     // Yield to let UI render before heavy work
     await Future.delayed(Duration.zero);
 
+    // Generate session records for all accounts
+    for (final account in config.accounts) {
+      if (account.email.isNotEmpty) {
+        try {
+          native.EmailCore.generateSessions(account.email);
+        } catch (e) {
+          _logToFile('_loadEmailsFromDb: generateSessions error for ${account.email}: $e');
+        }
+      }
+    }
+
     List<native.EmailMessage> allEmails = [];
 
     for (final account in config.accounts) {
@@ -598,6 +625,7 @@ class EmailModuleState extends State<EmailModule>
                 rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
                 toAddr: e['to_addr']?.toString() ?? '',
                 file: e['file']?.toString() ?? '',
+                account: e['account']?.toString() ?? '',
               ));
             }
           }
@@ -641,6 +669,8 @@ class EmailModuleState extends State<EmailModule>
                 sessionId: e['session_id']?.toString() ?? '',
                 rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
                 toAddr: e['to_addr']?.toString() ?? '',
+                file: e['file']?.toString() ?? '',
+                account: e['account']?.toString() ?? '',
               ));
             }
           }

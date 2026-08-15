@@ -11,9 +11,9 @@
 #include <mutex>
 
 
-// Forward declaration for db handle and mutex from email_core.cpp
+// Forward declaration for db handle and mutex from email_core_utils.cpp
 extern "C" sqlite3* email_core_get_db();
-extern "C" std::mutex& email_core_get_db_mutex();
+std::mutex& email_core_get_db_mutex();
 
 // Forward declaration for email_query_thread_roots from email_core.cpp
 extern "C" int email_query_thread_roots(const char* account, char* outJson, int outSize);
@@ -791,6 +791,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             std::string message_id = email_data.value("message_id", "");
             std::string x_message_id = email_data.value("x_message_id", "");
             std::string x_session_id = email_data.value("x_session_id", "");
+            std::string x_start_new = email_data.value("x_start_new", "");
 
             // If X-Message-ID header exists, use it as message_id for matching
             // This allows sent emails (which have our locally generated X-Message-ID) to be matched
@@ -900,166 +901,46 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             int changes = sqlite3_changes(db);
             sqlite3_finalize(stmt);
 
-            // Only create session records if the insert actually happened (not ignored)
+            // Only count if the insert actually happened (not ignored)
             // AND only for INBOX folder emails
             if (rc == SQLITE_DONE && changes > 0 && folder == "INBOX") {
                 stored_count++;
                 
-                // Generate session_id for this email
-                std::string session_id;
-                
-                // Priority 1: Use x-session-id if present
-                if (!x_session_id.empty()) {
-                    session_id = x_session_id;
-                }
-                // Priority 2: If in_reply_to points to an existing message, use its session_id
-                // Only associate within the same account and INBOX folder
-                else if (!in_reply_to.empty()) {
-                    // Only find referenced message in the same account and INBOX folder
-                    const char* find_rowid_sql = "SELECT id FROM localemail WHERE message_id = ? AND account = ? AND folder = 'INBOX' LIMIT 1;";
-                    sqlite3_stmt* find_rowid_stmt;
-                    int find_rowid_rc = sqlite3_prepare_v2(db, find_rowid_sql, -1, &find_rowid_stmt, NULL);
-                    std::string referenced_rowid;
-                    if (find_rowid_rc == SQLITE_OK) {
-                        sqlite3_bind_text(find_rowid_stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                        sqlite3_bind_text(find_rowid_stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                        if (sqlite3_step(find_rowid_stmt) == SQLITE_ROW) {
-                            referenced_rowid = std::to_string(sqlite3_column_int64(find_rowid_stmt, 0));
-                        }
-                        sqlite3_finalize(find_rowid_stmt);
-                    }
-                    
-                    // Only search within the same account to avoid cross-account session contamination
-                    if (referenced_rowid.empty()) {
-                        // Do not search across accounts - this causes incorrect session associations
-                        // If the referenced message is not in the same account, create a new session
-                    }
-                    
-                    if (!referenced_rowid.empty()) {
-                        // Check if the referenced email has a session_id
-                        const char* check_session_sql = "SELECT session_id FROM session WHERE email_id = ? LIMIT 1;";
-                        sqlite3_stmt* check_session_stmt;
-                        int check_session_rc = sqlite3_prepare_v2(db, check_session_sql, -1, &check_session_stmt, NULL);
-                        if (check_session_rc == SQLITE_OK) {
-                            sqlite3_bind_int64(check_session_stmt, 1, std::stoll(referenced_rowid));
-                            if (sqlite3_step(check_session_stmt) == SQLITE_ROW) {
-                                session_id = reinterpret_cast<const char*>(sqlite3_column_text(check_session_stmt, 0));
-                            }
-                            sqlite3_finalize(check_session_stmt);
-                        }
-                        
-                        // If the referenced email has no session, use its rowid as session name
-                        // but do NOT insert the referenced email into session table
-                        // (it might be a Sent email — only INBOX emails get session records)
-                        if (session_id.empty()) {
-                            session_id = "session_" + referenced_rowid;
-                        }
-                    } else {
-                        // Referenced message not found in same account, generate new session
-                        int64_t my_rowid = sqlite3_last_insert_rowid(db);
-                        session_id = "session_" + std::to_string(my_rowid);
-                    }
-                }
-                // Priority 3: Check if any existing email's in_reply_to points to this email's message_id
-                // Only look within the same account and INBOX folder
-                else {
-                    const char* find_replier_sql = "SELECT id FROM localemail WHERE in_reply_to = ? AND account = ? AND folder = 'INBOX' LIMIT 1;";
-                    sqlite3_stmt* find_replier_stmt;
-                    int find_replier_rc = sqlite3_prepare_v2(db, find_replier_sql, -1, &find_replier_stmt, NULL);
-                    std::string replier_rowid;
-                    if (find_replier_rc == SQLITE_OK) {
-                        sqlite3_bind_text(find_replier_stmt, 1, message_id.c_str(), -1, SQLITE_TRANSIENT);
-                        sqlite3_bind_text(find_replier_stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                        if (sqlite3_step(find_replier_stmt) == SQLITE_ROW) {
-                            replier_rowid = std::to_string(sqlite3_column_int64(find_replier_stmt, 0));
-                        }
-                        sqlite3_finalize(find_replier_stmt);
-                    }
-                    
-                    int64_t my_rowid = sqlite3_last_insert_rowid(db);
-                    std::string my_rowid_str = std::to_string(my_rowid);
-                    if (!replier_rowid.empty()) {
-                        // Check if the replier email has a session_id
-                        const char* check_replier_session_sql = "SELECT session_id FROM session WHERE email_id = ? LIMIT 1;";
-                        sqlite3_stmt* check_replier_session_stmt;
-                        int check_replier_session_rc = sqlite3_prepare_v2(db, check_replier_session_sql, -1, &check_replier_session_stmt, NULL);
-                        if (check_replier_session_rc == SQLITE_OK) {
-                            sqlite3_bind_int64(check_replier_session_stmt, 1, std::stoll(replier_rowid));
-                            if (sqlite3_step(check_replier_session_stmt) == SQLITE_ROW) {
-                                session_id = reinterpret_cast<const char*>(sqlite3_column_text(check_replier_session_stmt, 0));
-                            }
-                            sqlite3_finalize(check_replier_session_stmt);
-                        }
-                        
-                        // If the replier email has no session, create one using this email as root
-                        if (session_id.empty()) {
-                            session_id = "session_" + my_rowid_str;
-                        }
-                    } else {
-                        // No relationships found, generate new session
-                        session_id = "session_" + my_rowid_str;
-                    }
-                }
-                
-                // Get rowid of the just-inserted email
                 int64_t my_rowid = sqlite3_last_insert_rowid(db);
-                std::string my_rowid_str = std::to_string(my_rowid);
-                
-                // Delete existing session record for this email_id, then insert
-                const char* del_session_sql = "DELETE FROM session WHERE email_id = ?;";
-                sqlite3_stmt* del_session_stmt;
-                if (sqlite3_prepare_v2(db, del_session_sql, -1, &del_session_stmt, NULL) == SQLITE_OK) {
-                    sqlite3_bind_int64(del_session_stmt, 1, my_rowid);
-                    sqlite3_step(del_session_stmt);
-                    sqlite3_finalize(del_session_stmt);
-                }
-                const char* session_sql = "INSERT OR REPLACE INTO session (session_id, email_id, visible, auto, isread) VALUES (?, ?, 1, 1, 0);";
-                sqlite3_stmt* session_stmt;
-                int session_rc = sqlite3_prepare_v2(db, session_sql, -1, &session_stmt, NULL);
-                if (session_rc == SQLITE_OK) {
-                    sqlite3_bind_text(session_stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(session_stmt, 2, my_rowid);
-                    sqlite3_step(session_stmt);
-                    sqlite3_finalize(session_stmt);
-                }
-                
-                // After inserting, check if any existing emails should join this session
-                // (emails whose in_reply_to points to this email's message_id but are not yet in this session)
-                // Only look within the same account and INBOX folder
-                if (!message_id.empty()) {
-                    const char* find_orphans_sql = "SELECT id FROM localemail WHERE in_reply_to = ? AND account = ? AND folder = 'INBOX' AND id NOT IN (SELECT email_id FROM session WHERE session_id = ?);";
-                    sqlite3_stmt* find_orphans_stmt;
-                    int find_orphans_rc = sqlite3_prepare_v2(db, find_orphans_sql, -1, &find_orphans_stmt, NULL);
-                    if (find_orphans_rc == SQLITE_OK) {
-                        sqlite3_bind_text(find_orphans_stmt, 1, message_id.c_str(), -1, SQLITE_TRANSIENT);
-                        sqlite3_bind_text(find_orphans_stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                        sqlite3_bind_text(find_orphans_stmt, 3, session_id.c_str(), -1, SQLITE_TRANSIENT);
-                        
-                        while (sqlite3_step(find_orphans_stmt) == SQLITE_ROW) {
-                            // Delete existing session record for orphan, then add to current session
-                            const char* del_orphan_sql = "DELETE FROM session WHERE email_id = ?;";
-                            sqlite3_stmt* del_orphan_stmt;
-                            if (sqlite3_prepare_v2(db, del_orphan_sql, -1, &del_orphan_stmt, NULL) == SQLITE_OK) {
-                                sqlite3_bind_int64(del_orphan_stmt, 1, sqlite3_column_int64(find_orphans_stmt, 0));
-                                sqlite3_step(del_orphan_stmt);
-                                sqlite3_finalize(del_orphan_stmt);
-                            }
-                            const char* add_orphan_sql = "INSERT OR REPLACE INTO session (session_id, email_id, visible, auto, isread) VALUES (?, ?, 1, 1, 0);";
-                            sqlite3_stmt* add_orphan_stmt;
-                            int add_orphan_rc = sqlite3_prepare_v2(db, add_orphan_sql, -1, &add_orphan_stmt, NULL);
-                            if (add_orphan_rc == SQLITE_OK) {
-                                sqlite3_bind_text(add_orphan_stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-                                sqlite3_bind_int64(add_orphan_stmt, 2, sqlite3_column_int64(find_orphans_stmt, 0));
-                                sqlite3_step(add_orphan_stmt);
-                                sqlite3_finalize(add_orphan_stmt);
+
+                LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_start_new=%s\n", 
+                         uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_start_new.c_str());
+
+                // Session is only created via X-Start-New=new in download_pending_bodies
+                // Here we only match in_reply_to to join existing sessions
+                if (x_start_new != "new" && !in_reply_to.empty()) {
+                    const char* find_session_sql =
+                        "SELECT s.session_id FROM session s "
+                        "JOIN localemail l ON s.email_id = l.id "
+                        "WHERE l.message_id = ? AND l.account = ? "
+                        "LIMIT 1;";
+                    sqlite3_stmt* find_session_stmt;
+                    if (sqlite3_prepare_v2(db, find_session_sql, -1, &find_session_stmt, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(find_session_stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_bind_text(find_session_stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
+                        if (sqlite3_step(find_session_stmt) == SQLITE_ROW) {
+                            const char* sid = (const char*)sqlite3_column_text(find_session_stmt, 0);
+                            if (sid) {
+                                std::string session_id = sid;
+                                const char* insert_session_sql = "INSERT OR IGNORE INTO session (session_id, email_id, visible, auto, isread) VALUES (?, ?, 1, 0, 0);";
+                                sqlite3_stmt* insert_session_stmt;
+                                if (sqlite3_prepare_v2(db, insert_session_sql, -1, &insert_session_stmt, NULL) == SQLITE_OK) {
+                                    sqlite3_bind_text(insert_session_stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+                                    sqlite3_bind_int64(insert_session_stmt, 2, my_rowid);
+                                    sqlite3_step(insert_session_stmt);
+                                    sqlite3_finalize(insert_session_stmt);
+                                }
+                                LOG_INFO("FetchAndStore_c: matched in_reply_to to session=%s, email_id=%lld\n", session_id.c_str(), my_rowid);
                             }
                         }
-                        sqlite3_finalize(find_orphans_stmt);
+                        sqlite3_finalize(find_session_stmt);
                     }
                 }
-                
-                LOG_INFO("FetchAndStore_c: uuid=%s, session_id=%s, in_reply_to=%s, x_session_id=%s\n", 
-                         uuid.c_str(), session_id.c_str(), in_reply_to.c_str(), x_session_id.c_str());
             }
         }
 
@@ -1214,6 +1095,10 @@ int SendEmail_c(int configIndex, const char* content) {
         auto outlookDelegate = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate);
         if (outlookDelegate) {
             outlookDelegate->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
+        }
+        auto delegate163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
+        if (delegate163) {
+            delegate163->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
         }
 
         bool ok = delegate->send_email("", content ? content : "");

@@ -5,6 +5,7 @@ import 'email_utils.dart';
 import 'email_module_base.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
+import '../../i18n/app_strings.dart';
 
 mixin EmailListViewMixin on State<EmailModule> {
   double get listWidth;
@@ -38,7 +39,7 @@ mixin EmailListViewMixin on State<EmailModule> {
           buildSearchBar(),
           Expanded(
             child: emails.isEmpty
-                ? Center(child: Text('暂无邮件', style: TextStyle(color: Colors.grey[400], fontSize: 14)))
+                ? Center(child: Text(AppStrings.noEmails, style: TextStyle(color: Colors.grey[400], fontSize: 14)))
                 : ListView(
                     children: buildGroupedEmailList(),
                   ),
@@ -55,12 +56,12 @@ mixin EmailListViewMixin on State<EmailModule> {
     {
       final sectionKey = 'conversations';
       final isCollapsed = collapsedSections.contains(sectionKey);
-      widgets.add(buildConversationSectionHeader('会话', conversationEmails.length, sectionKey, isCollapsed));
+      widgets.add(buildConversationSectionHeader(AppStrings.conversation, conversationEmails.length, sectionKey, isCollapsed));
       if (!isCollapsed) {
         // 二级分组：按接收邮箱分组
         final accountConversations = <String, List<native.EmailMessage>>{};
         for (final email in conversationEmails) {
-          final account = email.recipient.isNotEmpty ? email.recipient : '未知邮箱';
+          final account = email.account.isNotEmpty ? email.account : (email.recipient.isNotEmpty ? email.recipient : AppStrings.unknownAccount);
           accountConversations.putIfAbsent(account, () => []).add(email);
         }
 
@@ -75,7 +76,7 @@ mixin EmailListViewMixin on State<EmailModule> {
             if (convList.isEmpty) {
               widgets.add(Container(
                 padding: const EdgeInsets.fromLTRB(28, 6, 8, 6),
-                child: Text('暂无会话', style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+                child: Text(AppStrings.noConversations, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
               ));
             } else {
               for (final email in convList) {
@@ -90,7 +91,7 @@ mixin EmailListViewMixin on State<EmailModule> {
     // Group emails by account - 一级分组
     final accountEmails = <String, List<native.EmailMessage>>{};
     for (final email in emails) {
-      final account = email.recipient.isNotEmpty ? email.recipient : '未知邮箱';
+      final account = email.account.isNotEmpty ? email.account : (email.recipient.isNotEmpty ? email.recipient : AppStrings.unknownAccount);
       accountEmails.putIfAbsent(account, () => []).add(email);
     }
 
@@ -108,7 +109,7 @@ mixin EmailListViewMixin on State<EmailModule> {
         if (inboxEmails.isNotEmpty) {
           final groupKey = '$sectionKey:inbox';
           final isGroupCollapsed = collapsedGroups.contains(groupKey);
-          widgets.add(buildGroupHeader('收件箱', inboxEmails.length, groupKey, isGroupCollapsed));
+          widgets.add(buildGroupHeader(AppStrings.inbox, inboxEmails.length, groupKey, isGroupCollapsed));
           if (!isGroupCollapsed) {
             for (final email in inboxEmails) {
               final index = emails.indexWhere((e) => e.uuid == email.uuid);
@@ -122,7 +123,7 @@ mixin EmailListViewMixin on State<EmailModule> {
         if (sentEmails.isNotEmpty) {
           final groupKey = '$sectionKey:sent';
           final isGroupCollapsed = collapsedGroups.contains(groupKey);
-          widgets.add(buildGroupHeader('已发送', sentEmails.length, groupKey, isGroupCollapsed));
+          widgets.add(buildGroupHeader(AppStrings.sent, sentEmails.length, groupKey, isGroupCollapsed));
           if (!isGroupCollapsed) {
             for (final email in sentEmails) {
               final index = emails.indexWhere((e) => e.uuid == email.uuid);
@@ -279,7 +280,7 @@ mixin EmailListViewMixin on State<EmailModule> {
             refreshEmails();
           },
           decoration: InputDecoration(
-            hintText: '搜索',
+            hintText: AppStrings.search,
             hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
             prefixIcon: Icon(Icons.search, size: 18, color: Colors.grey[400]),
             prefixIconConstraints: const BoxConstraints(minWidth: 36),
@@ -342,13 +343,38 @@ mixin EmailListViewMixin on State<EmailModule> {
     var displayList = memberNames.toList();
     if (displayList.length > 3) {
       displayList = displayList.sublist(0, 3);
-      displayList.add('等${memberNames.length}人');
+      displayList.add('${memberNames.length}${AppStrings.andMore}');
     }
     final displayName = displayList.join(', ');
     final index = emails.indexWhere((e) => e.uuid == email.uuid);
     final unread = index >= 0 && unreadIndices.contains(index);
 
     return GestureDetector(
+      onSecondaryTapDown: (details) {
+        showMenu<String>(
+          context: context,
+          position: RelativeRect.fromLTRB(
+            details.globalPosition.dx,
+            details.globalPosition.dy,
+            details.globalPosition.dx,
+            details.globalPosition.dy,
+          ),
+          items: [
+            PopupMenuItem<String>(
+              value: 'delete',
+              child: Text(AppStrings.delete),
+            ),
+          ],
+        ).then((value) {
+          if (value == 'delete') {
+            native.EmailCore.hideSession(sessionId);
+            setState(() {
+              conversationEmails.removeWhere((e) =>
+                (e.sessionId.isNotEmpty ? e.sessionId : e.messageId) == sessionId);
+            });
+          }
+        });
+      },
       onTap: () {
         setState(() {
           selectedConversationMessageId = sessionId;
@@ -386,7 +412,7 @@ mixin EmailListViewMixin on State<EmailModule> {
                         ],
                       ),
                       const SizedBox(height: 2),
-                      Text(email.subject.isEmpty ? '无主题' : email.subject, style: TextStyle(fontSize: 12, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 12, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis),
                       const SizedBox(height: 2),
                       Text(previewFor(email), style: TextStyle(fontSize: 11, color: Colors.grey[500]), maxLines: 1, overflow: TextOverflow.ellipsis),
                     ],
@@ -465,7 +491,7 @@ mixin EmailListViewMixin on State<EmailModule> {
                   const SizedBox(height: 2),
                   Row(
                     children: [
-                      Expanded(child: Text(email.subject.isEmpty ? '无主题' : email.subject, style: TextStyle(fontSize: 12, fontWeight: unread ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      Expanded(child: Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 12, fontWeight: unread ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
                       if (hasAttachment(email.body))
                         Padding(padding: const EdgeInsets.only(left: 4), child: Icon(Icons.attach_file, size: 12, color: Colors.grey[500])),
                     ],

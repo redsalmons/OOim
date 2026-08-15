@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
+import '../../i18n/app_strings.dart';
 
 Future<String> fetchEmailsInIsolate(Map<String, dynamic> params) async {
   final email = params['email'] as String;
@@ -70,12 +71,11 @@ String formatTime(String timestamp) {
   final emailDate = DateTime(dt.year, dt.month, dt.day);
   final diff = today.difference(emailDate).inDays;
   if (diff == 0) {
-    return '今天 ${_systemTime(dt)}';
+    return '${AppStrings.today} ${_systemTime(dt)}';
   } else if (diff == 1) {
-    return '昨天 ${_systemTime(dt)}';
+    return '${AppStrings.yesterday} ${_systemTime(dt)}';
   } else if (diff < 7) {
-    const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-    return '${weekdays[dt.weekday - 1]} ${_systemTime(dt)}';
+    return '${AppStrings.weekdays[dt.weekday - 1]} ${_systemTime(dt)}';
   } else {
     return '${_systemDate(dt)} ${_systemTime(dt)}';
   }
@@ -92,7 +92,7 @@ String formatTimeShort(String timestamp) {
   if (diff == 0) {
     return _systemTime(dt);
   } else if (diff < 7) {
-    const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    final weekdays = AppStrings.weekdays;
     return weekdays[dt.weekday - 1];
   } else {
     return _systemDate(dt);
@@ -138,7 +138,7 @@ String extractName(String sender) {
   if (lt > 0) {
     return sender.substring(0, lt).trim();
   }
-  return sender.isEmpty ? '未知' : sender;
+  return sender.isEmpty ? AppStrings.unknown : sender;
 }
 
 Color avatarColor(String name) {

@@ -62,14 +62,28 @@ target_link_libraries(EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/
 
 # Email core library (static, used by example executable)
 add_library(email_core STATIC
-    email_core.cpp
+    email_core_utils.cpp
+    email_handler.cpp
+    email_db.cpp
+    email_session.cpp
+    email_imap.cpp
+    email_oemailim.cpp
+    email_contact.cpp
     email_core.h
+    email_core_common.h
 )
 
 # Email core shared library (used by Flutter via dart:ffi)
 add_library(email_core_shared SHARED
-    email_core.cpp
+    email_core_utils.cpp
+    email_handler.cpp
+    email_db.cpp
+    email_session.cpp
+    email_imap.cpp
+    email_oemailim.cpp
+    email_contact.cpp
     email_core.h
+    email_core_common.h
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
@@ -95,4 +109,4 @@ target_include_directories(email_core_shared PUBLIC
 
 # Link SQLite3, EmailComm, and vmime
 target_link_libraries(email_core SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib)
-target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib)
+target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib z)

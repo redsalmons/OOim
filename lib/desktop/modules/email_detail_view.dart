@@ -3,6 +3,7 @@ import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'eml_parser.dart';
+import '../../i18n/app_strings.dart';
 
 mixin EmailDetailViewMixin on State<EmailModule> {
   List<native.EmailMessage> get emails;
@@ -28,7 +29,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
       return Expanded(
         child: Container(
           color: Colors.white,
-          child: Center(child: Text('暂无邮件', style: TextStyle(color: Colors.grey[500]))),
+          child: Center(child: Text(AppStrings.noEmails, style: TextStyle(color: Colors.grey[500]))),
         ),
       );
     }
@@ -55,7 +56,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(email.subject.isEmpty ? '无主题' : email.subject, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                        Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                         const SizedBox(height: 16),
                         Row(
                           children: [
@@ -98,7 +99,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
         children: [
           IconButton(icon: const Icon(Icons.arrow_back, size: 20), onPressed: () {}),
           const SizedBox(width: 8),
-          const Text('邮件详情', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+          Text(AppStrings.emailDetail, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
           const Spacer(),
           IconButton(icon: const Icon(Icons.archive, size: 20), onPressed: () {}),
           IconButton(icon: const Icon(Icons.delete, size: 20), onPressed: () {}),
@@ -118,10 +119,10 @@ mixin EmailDetailViewMixin on State<EmailModule> {
       ),
       child: Row(
         children: [
-          _buildActionButton(Icons.reply, '回复'),
-          _buildActionButton(Icons.reply_all, '回复全部'),
-          _buildActionButton(Icons.forward, '转发'),
-          _buildActionButton(Icons.forum, '会话', onTap: () {
+          _buildActionButton(Icons.reply, AppStrings.reply),
+          _buildActionButton(Icons.reply_all, AppStrings.replyAll),
+          _buildActionButton(Icons.forward, AppStrings.forward),
+          _buildActionButton(Icons.forum, AppStrings.conversation, onTap: () {
             if (email.sessionId.isNotEmpty || email.messageId.isNotEmpty) {
               setState(() {
                 selectedConversationMessageId = email.sessionId.isNotEmpty ? email.sessionId : email.messageId;
@@ -170,7 +171,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
                 ),
               ),
               const SizedBox(width: 10),
-              Text('邮件内容下载中...', style: TextStyle(fontSize: 14, color: Colors.grey[400])),
+              Text(AppStrings.emailDownloading, style: TextStyle(fontSize: 14, color: Colors.grey[400])),
             ],
           ),
         ),
@@ -178,10 +179,10 @@ mixin EmailDetailViewMixin on State<EmailModule> {
     }
 
     // file is not empty: parse .eml file using file field
-    final emlPath = '$emailDataPath/${email.recipient}/${email.file}.eml';
+    final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
     native.EmailCore.logWrite('[EmailDetail] emlPath=$emlPath');
-    final parsed = parseEmlFile(emlPath);
-    final bodyText = parsed.textBody.isNotEmpty ? parsed.textBody : '无内容';
+    final parsed = parseEmlFile(emlPath, account: email.account);
+    final bodyText = parsed.textBody.isNotEmpty ? parsed.textBody : AppStrings.noContent;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -194,7 +195,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
               children: [
                 Icon(Icons.attach_file, size: 18, color: Colors.orange[700]),
                 const SizedBox(width: 4),
-                Text('${parsed.attachments.length} 个附件', style: TextStyle(fontSize: 13, color: Colors.orange[700])),
+                Text('${parsed.attachments.length} ${AppStrings.attachmentsCount}', style: TextStyle(fontSize: 13, color: Colors.orange[700])),
               ],
             ),
           ),
@@ -225,7 +226,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
       replyController.clear();
       saveEmails();
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('回复已发送'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.replySent), duration: const Duration(seconds: 2)),
       );
     }
   }

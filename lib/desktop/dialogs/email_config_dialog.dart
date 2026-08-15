@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import '../../native/email_core.dart' as native;
+import '../../i18n/app_strings.dart';
 
 class ConfigField {
   final String label;
@@ -55,9 +56,9 @@ class EmailAccountConfig {
   String get displayName {
     switch (type) {
       case '163.com':
-        return '网易163邮箱';
+        return AppStrings.netease163;
       case 'qq.com':
-        return 'QQ邮箱';
+        return AppStrings.qqMail;
       case 'gmail.com':
         return 'Gmail';
       case 'outlook.com':
@@ -74,9 +75,9 @@ class EmailProviders {
   static String displayNameFor(String type) {
     switch (type) {
       case '163.com':
-        return '网易163邮箱';
+        return AppStrings.netease163;
       case 'qq.com':
-        return 'QQ邮箱';
+        return AppStrings.qqMail;
       case 'gmail.com':
         return 'Gmail';
       case 'outlook.com':
@@ -89,41 +90,41 @@ class EmailProviders {
   static List<ConfigField> fieldsFor(String type) {
     switch (type) {
       case '163.com':
-        return const [
-          ConfigField('邮箱地址', 'email', true, '', FieldKind.text),
-          ConfigField('授权码', 'auth_code', true, '', FieldKind.text),
-          ConfigField('SMTP服务器', 'smtp_server', false, 'smtp.163.com', FieldKind.text),
-          ConfigField('SMTP端口', 'smtp_port', false, '465', FieldKind.port),
-          ConfigField('IMAP服务器', 'imap_server', false, 'imap.163.com', FieldKind.text),
-          ConfigField('IMAP端口', 'imap_port', false, '993', FieldKind.port),
+        return [
+          ConfigField(AppStrings.emailAddress, 'email', true, '', FieldKind.text),
+          ConfigField(AppStrings.authCode, 'auth_code', true, '', FieldKind.text),
+          ConfigField(AppStrings.smtpServer, 'smtp_server', false, 'smtp.163.com', FieldKind.text),
+          ConfigField(AppStrings.smtpPort, 'smtp_port', false, '465', FieldKind.port),
+          ConfigField(AppStrings.imapServer, 'imap_server', false, 'imap.163.com', FieldKind.text),
+          ConfigField(AppStrings.imapPort, 'imap_port', false, '993', FieldKind.port),
         ];
       case 'qq.com':
-        return const [
-          ConfigField('邮箱地址', 'email', true, '', FieldKind.text),
-          ConfigField('授权码', 'auth_code', true, '', FieldKind.text),
-          ConfigField('SMTP服务器', 'smtp_server', false, 'smtp.qq.com', FieldKind.text),
-          ConfigField('SMTP端口', 'smtp_port', false, '465', FieldKind.port),
-          ConfigField('IMAP服务器', 'imap_server', false, 'imap.qq.com', FieldKind.text),
-          ConfigField('IMAP端口', 'imap_port', false, '993', FieldKind.port),
+        return [
+          ConfigField(AppStrings.emailAddress, 'email', true, '', FieldKind.text),
+          ConfigField(AppStrings.authCode, 'auth_code', true, '', FieldKind.text),
+          ConfigField(AppStrings.smtpServer, 'smtp_server', false, 'smtp.qq.com', FieldKind.text),
+          ConfigField(AppStrings.smtpPort, 'smtp_port', false, '465', FieldKind.port),
+          ConfigField(AppStrings.imapServer, 'imap_server', false, 'imap.qq.com', FieldKind.text),
+          ConfigField(AppStrings.imapPort, 'imap_port', false, '993', FieldKind.port),
         ];
       case 'gmail.com':
-        return const [
-          ConfigField('邮箱地址', 'email', false, '', FieldKind.text),
-          ConfigField('SMTP服务器', 'smtp_server', false, 'smtp.gmail.com', FieldKind.text),
-          ConfigField('SMTP端口', 'smtp_port', false, '587', FieldKind.port),
-          ConfigField('IMAP服务器', 'imap_server', false, 'imap.gmail.com', FieldKind.text),
-          ConfigField('IMAP端口', 'imap_port', false, '993', FieldKind.port),
-          ConfigField('授权状态', 'auth_status', false, 'unauthorized', FieldKind.authStatus),
+        return [
+          ConfigField(AppStrings.emailAddress, 'email', false, '', FieldKind.text),
+          ConfigField(AppStrings.smtpServer, 'smtp_server', false, 'smtp.gmail.com', FieldKind.text),
+          ConfigField(AppStrings.smtpPort, 'smtp_port', false, '587', FieldKind.port),
+          ConfigField(AppStrings.imapServer, 'imap_server', false, 'imap.gmail.com', FieldKind.text),
+          ConfigField(AppStrings.imapPort, 'imap_port', false, '993', FieldKind.port),
+          ConfigField(AppStrings.authStatus, 'auth_status', false, 'unauthorized', FieldKind.authStatus),
         ];
       case 'outlook.com':
-        return const [
-          ConfigField('邮箱地址', 'email', false, '', FieldKind.text),
-          ConfigField('账户类型', 'account_type', false, 'personal', FieldKind.accountType),
-          ConfigField('SMTP服务器', 'smtp_server', false, 'smtp-mail.outlook.com', FieldKind.text),
-          ConfigField('SMTP端口', 'smtp_port', false, '587', FieldKind.port),
-          ConfigField('IMAP服务器', 'imap_server', false, 'outlook.office365.com', FieldKind.text),
-          ConfigField('IMAP端口', 'imap_port', false, '993', FieldKind.port),
-          ConfigField('授权状态', 'auth_status', false, 'unauthorized', FieldKind.authStatus),
+        return [
+          ConfigField(AppStrings.emailAddress, 'email', false, '', FieldKind.text),
+          ConfigField(AppStrings.accountType, 'account_type', false, 'personal', FieldKind.accountType),
+          ConfigField(AppStrings.smtpServer, 'smtp_server', false, 'smtp-mail.outlook.com', FieldKind.text),
+          ConfigField(AppStrings.smtpPort, 'smtp_port', false, '587', FieldKind.port),
+          ConfigField(AppStrings.imapServer, 'imap_server', false, 'outlook.office365.com', FieldKind.text),
+          ConfigField(AppStrings.imapPort, 'imap_port', false, '993', FieldKind.port),
+          ConfigField(AppStrings.authStatus, 'auth_status', false, 'unauthorized', FieldKind.authStatus),
         ];
       default:
         return const [];
@@ -264,7 +265,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
 
   void _addAccount() {
     if (_accounts.length >= 5) {
-      _showMessage('最多支持添加5个邮箱配置');
+      _showMessage(AppStrings.maxAccountsReached);
       return;
     }
     setState(() {
@@ -294,13 +295,13 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       if (field.required) {
         final value = _valueFor(account, field.key);
         if (value.trim().isEmpty) {
-          _showMessage('${field.label} 不能为空');
+          _showMessage('${field.label} ${AppStrings.fieldCannotBeEmpty}');
           return;
         }
       }
     }
     final ok = _persistConfig();
-    _showMessage(ok ? '配置已保存' : '保存失败，请重试', success: ok);
+    _showMessage(ok ? AppStrings.configSaved : AppStrings.saveFailed, success: ok);
   }
 
   void _authorize(EmailAccountConfig account) async {
@@ -317,7 +318,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       
       if (accountIndex >= 0) {
         _writeToFile('Calling native authority for account index: $accountIndex');
-        _showMessage('正在授权，请在浏览器中完成授权...');
+        _showMessage(AppStrings.authorizing);
         
         // Use Future.delayed to allow UI to update before blocking call
         await Future.delayed(Duration(milliseconds: 100));
@@ -329,7 +330,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
           native.EmailCore.logWrite('[Dart] oemailimAddOutlookEmail returned configIndex=$configIndex');
           if (configIndex < 0) {
             _writeToFile('oemailimAddOutlookEmail failed: $configIndex');
-            _showMessage('创建邮箱配置失败');
+            _showMessage(AppStrings.createConfigFailed);
             return;
           }
 
@@ -354,21 +355,21 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
               });
               _writeToFile('Saving email and refresh_token to config...');
               _persistConfig();
-              _showMessage('授权成功', success: true);
+              _showMessage(AppStrings.authorizeSuccess, success: true);
             } else {
               _writeToFile('Email or refresh_token is empty');
-              _showMessage('授权成功（但未获取到邮箱地址或刷新令牌）', success: true);
+              _showMessage(AppStrings.authorizeSuccessNoEmail, success: true);
             }
           } else {
-            _showMessage('授权失败，请重试');
+            _showMessage(AppStrings.authorizeFailed);
           }
         } catch (e) {
           _writeToFile('Native authority exception: $e');
-          _showMessage('授权异常: $e');
+          _showMessage('${AppStrings.authorizeException}: $e');
         }
       } else {
         _writeToFile('Account index not found');
-        _showMessage('账户索引错误');
+        _showMessage(AppStrings.accountIndexError);
       }
     } else {
       // For 163/QQ, just mark as authorized (uses auth code)
@@ -376,7 +377,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       setState(() {
         account.authorized = true;
       });
-      _showMessage('授权成功', success: true);
+      _showMessage(AppStrings.authorizeSuccess, success: true);
     }
     _writeToFile('=== _authorize completed ===');
   }
@@ -504,11 +505,11 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
             Stack(
               alignment: Alignment.center,
               children: [
-                const Align(
+                Align(
                   alignment: Alignment.center,
                   child: Text(
-                    '邮箱配置',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    AppStrings.emailConfig,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                 ),
                 Align(
@@ -537,13 +538,13 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
     if (widget.standalone) {
       return Scaffold(
         appBar: AppBar(
-          title: const Text('邮箱配置'),
+          title: Text(AppStrings.emailConfig),
           centerTitle: true,
           automaticallyImplyLeading: false,
           actions: [
             TextButton(
               onPressed: _finishConfig,
-              child: const Text('完成', style: TextStyle(color: Colors.white)),
+              child: Text(AppStrings.done, style: const TextStyle(color: Colors.white)),
             ),
             const SizedBox(width: 12),
           ],
@@ -565,9 +566,9 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
   Widget _buildLocalPathRow() {
     return Row(
       children: [
-        const SizedBox(
+        SizedBox(
           width: 120,
-          child: Text('本地数据存储位置', textAlign: TextAlign.right),
+          child: Text(AppStrings.localDataPath, textAlign: TextAlign.right),
         ),
         const SizedBox(width: 8),
         Expanded(
@@ -583,9 +584,9 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
         const SizedBox(width: 8),
         OutlinedButton(
           onPressed: () {
-            _showMessage('请手动输入本地存储路径');
+            _showMessage(AppStrings.manualPathHint);
           },
-          child: const Text('浏览'),
+          child: Text(AppStrings.browse),
         ),
       ],
     );
@@ -594,9 +595,9 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
   Widget _buildAddAccountRow() {
     return Row(
       children: [
-        const SizedBox(
+        SizedBox(
           width: 120,
-          child: Text('邮箱类型', textAlign: TextAlign.right),
+          child: Text(AppStrings.emailType, textAlign: TextAlign.right),
         ),
         const SizedBox(width: 8),
         DropdownButton<String>(
@@ -619,7 +620,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
         ElevatedButton.icon(
           onPressed: _addAccount,
           icon: const Icon(Icons.add, size: 18),
-          label: const Text('添加'),
+          label: Text(AppStrings.add),
         ),
       ],
     );
@@ -629,7 +630,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
     if (_accounts.isEmpty) {
       return Center(
         child: Text(
-          '暂无邮箱配置，请选择类型并点击添加',
+          AppStrings.noEmailConfig,
           style: TextStyle(color: Colors.grey[600]),
         ),
       );
@@ -689,12 +690,12 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
             children: [
               TextButton(
                 onPressed: () => _deleteAccount(index),
-                child: const Text('删除', style: TextStyle(color: Colors.red)),
+                child: Text(AppStrings.delete, style: const TextStyle(color: Colors.red)),
               ),
               const SizedBox(width: 8),
               ElevatedButton(
                 onPressed: () => _saveAccount(index),
-                child: const Text('保存'),
+                child: Text(AppStrings.save),
               ),
             ],
           ),
@@ -737,7 +738,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
-                  account.authorized ? '已授权' : '未授权',
+                  account.authorized ? AppStrings.authorized : AppStrings.unauthorized,
                   style: TextStyle(
                     color: account.authorized ? Colors.green : Colors.grey[700],
                   ),
@@ -750,7 +751,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
                 _writeToFile('=== 授权按钮被点击 === type=${account.type}');
                 _authorize(account);
               },
-              child: const Text('授权'),
+              child: Text(AppStrings.authorize),
             ),
           ],
         );

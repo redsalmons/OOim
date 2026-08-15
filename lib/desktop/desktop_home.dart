@@ -3,6 +3,7 @@ import 'modules/email_module.dart';
 import 'modules/contacts_module.dart';
 import 'modules/settings_module.dart';
 import 'app_theme.dart';
+import '../i18n/app_strings.dart';
 
 class DesktopHome extends StatefulWidget {
   const DesktopHome({super.key});
@@ -14,10 +15,11 @@ class DesktopHome extends StatefulWidget {
 class _DesktopHomeState extends State<DesktopHome> {
   int _selectedModule = 0;
   final GlobalKey<EmailModuleState> _emailKey = GlobalKey<EmailModuleState>();
+  final GlobalKey<ContactsModuleState> _contactsKey = GlobalKey<ContactsModuleState>();
 
   late final List<Widget> _modules = [
     EmailModule(key: _emailKey),
-    const ContactsModule(),
+    ContactsModule(key: _contactsKey),
     const SettingsModule(),
   ];
 
@@ -47,11 +49,11 @@ class _DesktopHomeState extends State<DesktopHome> {
           const SizedBox(height: 24),
           _buildSidebarAvatar(),
           const SizedBox(height: 32),
-          _buildSidebarItem(Icons.email_rounded, '邮件', 0),
+          _buildSidebarItem(Icons.email_rounded, AppStrings.mail, 0),
           const SizedBox(height: 8),
-          _buildSidebarItem(Icons.contacts_rounded, '通讯录', 1),
+          _buildSidebarItem(Icons.contacts_rounded, AppStrings.contacts, 1),
           const SizedBox(height: 8),
-          _buildSidebarItem(Icons.settings_rounded, '设置', 2),
+          _buildSidebarItem(Icons.settings_rounded, AppStrings.settings, 2),
           const Spacer(),
         ],
       ),
@@ -70,9 +72,9 @@ class _DesktopHomeState extends State<DesktopHome> {
         ),
         borderRadius: BorderRadius.circular(14),
       ),
-      child: const Center(
+      child: Center(
         child: Text(
-          '我',
+          AppStrings.me,
           style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
         ),
       ),
@@ -88,8 +90,9 @@ class _DesktopHomeState extends State<DesktopHome> {
           _selectedModule = index;
         });
         if (index == 0) {
-          print('Email icon tapped, emailKey.currentState=${_emailKey.currentState}');
           _emailKey.currentState?.reloadFromDb();
+        } else if (index == 1) {
+          _contactsKey.currentState?.reloadFromDb();
         }
       },
       child: Container(

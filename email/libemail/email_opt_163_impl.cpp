@@ -1,5 +1,6 @@
 #include "email_opt_163_impl.h"
 #include "email_core.h"
+#include "email_core_common.h"
 #include "email_handler.h"
 #include "logger.h"
 #include <nlohmann/json.hpp>
@@ -700,6 +701,8 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         std::string in_reply_to = json_content.value("in_reply_to", "");
         std::string message_id  = json_content.value("message_id", "");
         std::string session_id  = json_content.value("session_id", "");
+        std::string x_message_id = json_content.value("x_message_id", "");
+        std::string x_start_new  = json_content.value("x_start_new", "");
         
         LOG_INFO("163 send_email - parsed: recipient='%s', subject='%s', in_reply_to='%s'\n", 
                  recipient.c_str(), subject.c_str(), in_reply_to.c_str());
@@ -781,7 +784,21 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         builder.setSubject(vmime::text(subject, vmime::charset("UTF-8")));
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(body));
+
+        // For x_start_new=data, encrypt the body
+        std::string bodyToSend = body;
+        if (x_start_new == "data") {
+            char encBody[65536];
+            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), encBody, sizeof(encBody));
+            if (encRc == 0) {
+                bodyToSend = encBody;
+                LOG_INFO("163 send_email: encrypted data body, len=%zu\n", bodyToSend.size());
+            } else {
+                LOG_INFO("163 send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);
+            }
+        }
+
+        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
 
         vmime::shared_ptr<vmime::message> msg = builder.construct();
 
@@ -808,6 +825,14 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             vmime::headerFieldFactory::getInstance()->create("X-Message-ID", msg_id);
         header->appendField(xMsgIdField);
         LOG_INFO("163 send_email - set X-Message-ID: %s\n", msg_id.c_str());
+
+        // Set X-Start-New header if provided (for new session creation)
+        if (!x_start_new.empty()) {
+            vmime::shared_ptr<vmime::headerField> xStartNewField =
+                vmime::headerFieldFactory::getInstance()->create("X-Start-New", x_start_new);
+            header->appendField(xStartNewField);
+            LOG_INFO("163 send_email - set X-Start-New: %s\n", x_start_new.c_str());
+        }
 
         // Handle In-Reply-To and References for conversation threading
         if (!in_reply_to.empty() && in_reply_to != "<>" && in_reply_to != "<<> <>") {
@@ -868,20 +893,61 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                 if (ins_response.contains("uuid")) {
                     std::string email_id = ins_response["uuid"].get<std::string>();
 
-                    // Use session_id passed from Dart (current conversation's session_id)
-                    LOG_INFO("163 send_email: using session_id=%s\n", session_id.c_str());
+                    // For x_start_new=new, create session locally
+                    std::string sid = session_id;
+                    if (x_start_new == "new" && sid.empty()) {
+                        char create_json[4096];
+                        int create_rc = email_create_session(
+                            email_.c_str(), subject.c_str(), email_.c_str(),
+                            message_id.c_str(), 0, create_json, sizeof(create_json));
+                        if (create_rc == 0) {
+                            try {
+                                auto resp = nlohmann::json::parse(create_json);
+                                if (resp.value("status", "") == "success") {
+                                    sid = resp.value("session_id", "");
+                                }
+                            } catch (...) {}
+                        }
+                        LOG_INFO("163 send_email: x_start_new=new, created session_id=%s\n", sid.c_str());
+                    }
+
+                    // For x_start_new=exchange or reply, find session via in_reply_to
+                    if (sid.empty() && !in_reply_to.empty()) {
+                        const char* find_sql = "SELECT s.session_id FROM session s "
+                            "JOIN localemail l ON s.email_id = l.id "
+                            "WHERE l.message_id = ? AND l.account = ? LIMIT 1;";
+                        sqlite3* db = email_core_get_db();
+                        if (db) {
+                            sqlite3_stmt* stmt;
+                            if (sqlite3_prepare_v2(db, find_sql, -1, &stmt, NULL) == SQLITE_OK) {
+                                sqlite3_bind_text(stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
+                                sqlite3_bind_text(stmt, 2, email_.c_str(), -1, SQLITE_TRANSIENT);
+                                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                                    const char* found = (const char*)sqlite3_column_text(stmt, 0);
+                                    if (found) sid = found;
+                                }
+                                sqlite3_finalize(stmt);
+                            }
+                        }
+                        LOG_INFO("163 send_email: x_start_new=%s, found session_id=%s via in_reply_to=%s\n",
+                                 x_start_new.c_str(), sid.c_str(), in_reply_to.c_str());
+                    }
+
+                    LOG_INFO("163 send_email: using session_id=%s\n", sid.c_str());
 
                     char session_buffer[8192];
+                    int encMethod = (x_start_new == "data") ? 1 : 0;
                     int session_result = email_add_email_to_session(
-                        session_id.c_str(),
+                        sid.c_str(),
                         email_id.c_str(),
                         email_.c_str(),
+                        encMethod,
                         session_buffer,
                         sizeof(session_buffer)
                     );
 
                     if (session_result == 0) {
-                        LOG_INFO("163 send_email: added email to session %s\n", session_id.c_str());
+                        LOG_INFO("163 send_email: added email to session %s\n", sid.c_str());
                     } else {
                         LOG_INFO("163 send_email: failed to add email to session\n");
                     }
@@ -1074,6 +1140,7 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
         fetchAttrs.add("X-Message-ID");
+        fetchAttrs.add("X-Start-New");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         // Ensure UID is included
@@ -1300,6 +1367,7 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
             email_obj["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
             email_obj["x_message_id"] = xMsgId;
             email_obj["x_session_id"] = decodeHeader(getHeader("X-Session-ID"));
+            email_obj["x_start_new"] = decodeHeader(getHeader("X-Start-New"));
             email_obj["to_addr"] = decodeHeader(getHeader("To"));
             
             // Extract service receive time from the first (topmost) Received header

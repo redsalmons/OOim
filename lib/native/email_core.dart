@@ -262,14 +262,17 @@ typedef _EmailQueryThreadDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 typedef _EmailGenerateSessionsNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailGenerateSessionsDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _EmailCreateSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _EmailCreateSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _EmailCreateSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Int32);
+typedef _EmailCreateSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, int);
+
+typedef _EmailCodeQueryByAccountNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailCodeQueryByAccountDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _EmailQuerySessionIndexUuidNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailQuerySessionIndexUuidDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _EmailAddEmailToSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _EmailAddEmailToSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _EmailAddEmailToSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Int32);
+typedef _EmailAddEmailToSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, int);
 
 typedef _EmailInsertSentEmailNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailInsertSentEmailDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
@@ -343,11 +346,26 @@ typedef _EmailCountPendingDart = int Function(Pointer<Utf8>);
 typedef _EmailParseEmlNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailParseEmlDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
+typedef _EmailDecryptDataBodyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailDecryptDataBodyDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
 typedef _EmailUpdateSessionReadNative = Int32 Function(Pointer<Utf8>);
 typedef _EmailUpdateSessionReadDart = int Function(Pointer<Utf8>);
 
 typedef _EmailQuerySessionUnreadNative = Int32 Function(Pointer<Utf8>);
 typedef _EmailQuerySessionUnreadDart = int Function(Pointer<Utf8>);
+
+typedef _EmailHideSessionNative = Int32 Function(Pointer<Utf8>);
+typedef _EmailHideSessionDart = int Function(Pointer<Utf8>);
+
+typedef _ContactAddNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _ContactAddDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
+typedef _ContactQueryAllNative = Pointer<Utf8> Function();
+typedef _ContactQueryAllDart = Pointer<Utf8> Function();
+
+typedef _ContactDeleteNative = Int32 Function(Int32);
+typedef _ContactDeleteDart = int Function(int);
 
 typedef _EmailLogWriteNative = Void Function(Pointer<Utf8>);
 typedef _EmailLogWriteDart = void Function(Pointer<Utf8>);
@@ -430,6 +448,7 @@ final _emailQueryThreadRoots = _lib.lookupFunction<_EmailQueryThreadRootsNative,
 final _emailQueryThread = _lib.lookupFunction<_EmailQueryThreadNative, _EmailQueryThreadDart>('email_query_thread');
 final _emailGenerateSessions = _lib.lookupFunction<_EmailGenerateSessionsNative, _EmailGenerateSessionsDart>('email_generate_sessions');
 final _emailCreateSession = _lib.lookupFunction<_EmailCreateSessionNative, _EmailCreateSessionDart>('email_create_session');
+final _emailCodeQueryByAccount = _lib.lookupFunction<_EmailCodeQueryByAccountNative, _EmailCodeQueryByAccountDart>('email_code_query_by_account');
 final _emailQuerySessionIndexUuid = _lib.lookupFunction<_EmailQuerySessionIndexUuidNative, _EmailQuerySessionIndexUuidDart>('email_query_session_index_uuid');
 final _emailAddEmailToSession = _lib.lookupFunction<_EmailAddEmailToSessionNative, _EmailAddEmailToSessionDart>('email_add_email_to_session');
 final _emailInsertSentEmail = _lib.lookupFunction<_EmailInsertSentEmailNative, _EmailInsertSentEmailDart>('email_insert_sent_email');
@@ -443,8 +462,13 @@ final _emailLogWrite = _lib.lookupFunction<_EmailLogWriteNative, _EmailLogWriteD
 final _emailDownloadPending = _lib.lookupFunction<_EmailDownloadPendingNative, _EmailDownloadPendingDart>('email_download_pending_bodies');
 final _emailCountPending = _lib.lookupFunction<_EmailCountPendingNative, _EmailCountPendingDart>('email_count_pending_bodies');
 final _emailParseEml = _lib.lookupFunction<_EmailParseEmlNative, _EmailParseEmlDart>('email_parse_eml');
+final _emailDecryptDataBody = _lib.lookupFunction<_EmailDecryptDataBodyNative, _EmailDecryptDataBodyDart>('email_decrypt_data_body');
 final _emailUpdateSessionRead = _lib.lookupFunction<_EmailUpdateSessionReadNative, _EmailUpdateSessionReadDart>('email_update_session_read');
 final _emailQuerySessionUnread = _lib.lookupFunction<_EmailQuerySessionUnreadNative, _EmailQuerySessionUnreadDart>('email_query_session_unread');
+final _emailHideSession = _lib.lookupFunction<_EmailHideSessionNative, _EmailHideSessionDart>('email_hide_session');
+final _contactAdd = _lib.lookupFunction<_ContactAddNative, _ContactAddDart>('contact_add');
+final _contactQueryAll = _lib.lookupFunction<_ContactQueryAllNative, _ContactQueryAllDart>('contact_query_all');
+final _contactDelete = _lib.lookupFunction<_ContactDeleteNative, _ContactDeleteDart>('contact_delete');
 
 // ---------------------------------------------------------------------------
 // Idiomatic Dart data classes
@@ -506,6 +530,7 @@ class EmailMessage {
   final int rowid;
   final String toAddr;
   final String file;
+  final String account;
 
   EmailMessage({
     required this.sender,
@@ -524,6 +549,7 @@ class EmailMessage {
     this.rowid = 0,
     this.toAddr = '',
     this.file = '',
+    this.account = '',
   });
 
 }
@@ -555,6 +581,16 @@ class EmailCore {
     final appSupportDirPtr = appSupportDir.toNativeUtf8();
     try {
       final result = _emailCoreInitialize(appSupportDirPtr);
+      if (result >= 0) {
+        // Initialize database with contact table
+        final dbPath = '$appSupportDir/data/emails.db';
+        final dbPathPtr = dbPath.toNativeUtf8();
+        try {
+          _emailDbInit(dbPathPtr);
+        } finally {
+          malloc.free(dbPathPtr);
+        }
+      }
       return result >= 0;
     } finally {
       malloc.free(appSupportDirPtr);
@@ -1062,20 +1098,32 @@ class EmailCore {
     }
   }
 
-  static String createSession(String account, String subject, String members, String messageId) {
+  static String createSession(String account, String subject, String members, String messageId, {int encryptMethod = 0}) {
     final accountPtr = account.toNativeUtf8();
     final subjectPtr = subject.toNativeUtf8();
     final membersPtr = members.toNativeUtf8();
     final messageIdPtr = messageId.toNativeUtf8();
     final outJson = malloc.allocate<Utf8>(4096);
     try {
-      final result = _emailCreateSession(accountPtr, subjectPtr, membersPtr, messageIdPtr, outJson, 4096);
+      final result = _emailCreateSession(accountPtr, subjectPtr, membersPtr, messageIdPtr, encryptMethod, outJson, 4096);
       return outJson.toDartString();
     } finally {
       malloc.free(accountPtr);
       malloc.free(subjectPtr);
       malloc.free(membersPtr);
       malloc.free(messageIdPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  static String codeQueryByAccount(String account) {
+    final accountPtr = account.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      final result = _emailCodeQueryByAccount(accountPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
       malloc.free(outJson);
     }
   }
@@ -1092,13 +1140,13 @@ class EmailCore {
     }
   }
 
-  static String addEmailToSession(String sessionId, String messageId, String account) {
+  static String addEmailToSession(String sessionId, String messageId, String account, {int encryptMethod = 0}) {
     final sessionIdPtr = sessionId.toNativeUtf8();
     final messageIdPtr = messageId.toNativeUtf8();
     final accountPtr = account.toNativeUtf8();
     final outJson = malloc.allocate<Utf8>(4096);
     try {
-      final result = _emailAddEmailToSession(sessionIdPtr, messageIdPtr, accountPtr, outJson, 4096);
+      final result = _emailAddEmailToSession(sessionIdPtr, messageIdPtr, accountPtr, encryptMethod, outJson, 4096);
       return outJson.toDartString();
     } finally {
       malloc.free(sessionIdPtr);
@@ -1265,6 +1313,19 @@ class EmailCore {
     }
   }
 
+  /// Decrypts an x_start_new=data email body for the given account.
+  /// Returns 0 on success, negative on error. Output plaintext in outJson.
+  static int decryptDataBody(String encryptedBody, String account, Pointer<Utf8> outJson, int outSize) {
+    final bodyPtr = encryptedBody.toNativeUtf8();
+    final accountPtr = account.toNativeUtf8();
+    try {
+      return _emailDecryptDataBody(bodyPtr, accountPtr, outJson, outSize);
+    } finally {
+      malloc.free(bodyPtr);
+      malloc.free(accountPtr);
+    }
+  }
+
   /// Updates session isread field to 1 for all emails in a session.
   /// Returns 0 on success, negative on error.
   static int updateSessionRead(String sessionId) {
@@ -1285,6 +1346,51 @@ class EmailCore {
     } finally {
       malloc.free(sessionIdPtr);
     }
+  }
+
+  /// Hides a session by setting visible=0 for all rows with the given session_id.
+  /// Returns 0 on success, negative on error.
+  static int hideSession(String sessionId) {
+    final sessionIdPtr = sessionId.toNativeUtf8();
+    try {
+      return _emailHideSession(sessionIdPtr);
+    } finally {
+      malloc.free(sessionIdPtr);
+    }
+  }
+
+  /// Adds a contact to the database. Returns the contact id (>0) on success, negative on error.
+  static int contactAdd({required String email, required String name, required String categories, required String notes, String key = ''}) {
+    final emailPtr = email.toNativeUtf8();
+    final namePtr = name.toNativeUtf8();
+    final categoriesPtr = categories.toNativeUtf8();
+    final notesPtr = notes.toNativeUtf8();
+    final keyPtr = key.toNativeUtf8();
+    try {
+      return _contactAdd(emailPtr, namePtr, categoriesPtr, notesPtr, keyPtr);
+    } finally {
+      malloc.free(emailPtr);
+      malloc.free(namePtr);
+      malloc.free(categoriesPtr);
+      malloc.free(notesPtr);
+      malloc.free(keyPtr);
+    }
+  }
+
+  /// Queries all contacts. Returns a JSON string array, or null on error.
+  static String? contactQueryAll() {
+    final ptr = _contactQueryAll();
+    if (ptr == nullptr) return null;
+    try {
+      return ptr.toDartString();
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Deletes a contact by id. Returns 0 on success, negative on error.
+  static int contactDelete(int id) {
+    return _contactDelete(id);
   }
 }
 

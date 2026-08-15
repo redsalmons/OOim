@@ -9,6 +9,7 @@ import 'desktop/desktop_home.dart';
 import 'desktop/dialogs/email_config_dialog.dart';
 import 'desktop/app_theme.dart';
 import 'native/email_core.dart' as native;
+import 'i18n/app_strings.dart';
 
 void main(List<String> args) {
   if (args.isNotEmpty && args[0] == 'multi_window') {
@@ -144,7 +145,7 @@ class _AppRootState extends State<AppRoot> {
     window
       ..setFrame(const Offset(0, 0) & const Size(680, 560))
       ..center()
-      ..setTitle('邮箱配置')
+      ..setTitle(AppStrings.emailConfig)
       ..show();
   }
 

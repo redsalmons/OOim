@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
+import '../../i18n/app_strings.dart';
 
 class CreateSessionDialog extends StatefulWidget {
   final List<String> accounts;
@@ -25,6 +26,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
   final _membersController = TextEditingController();
   final List<String> _members = [];
   bool _creating = false;
+  int _encryptMethod = 0; // 0=none, 1=standard
 
   @override
   void initState() {
@@ -60,19 +62,19 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     final title = _titleController.text.trim();
     if (title.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入会话标题'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.pleaseEnterTitle), duration: const Duration(seconds: 2)),
       );
       return;
     }
     if (_selectedAccount.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请选择账户'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.pleaseSelectAccount), duration: const Duration(seconds: 2)),
       );
       return;
     }
     if (_members.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请添加至少一个会话成员'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.pleaseAddMember), duration: const Duration(seconds: 2)),
       );
       return;
     }
@@ -89,7 +91,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       if (mounted) {
         setState(() => _creating = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('无法加载账户配置'), duration: Duration(seconds: 2)),
+          SnackBar(content: Text(AppStrings.cannotLoadConfig), duration: const Duration(seconds: 2)),
         );
       }
       return;
@@ -100,7 +102,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       if (mounted) {
         setState(() => _creating = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('未找到选中账户的配置'), duration: Duration(seconds: 2)),
+          SnackBar(content: Text(AppStrings.accountNotFound), duration: const Duration(seconds: 2)),
         );
       }
       return;
@@ -108,27 +110,33 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
 
     // 3. Create session first (before sending email)
     final membersStr = _members.join(',');
-    final createResult = native.EmailCore.createSession(_selectedAccount, title, membersStr, messageId);
+    final createResult = native.EmailCore.createSession(_selectedAccount, title, membersStr, messageId, encryptMethod: _encryptMethod);
     native.EmailCore.logWrite('[CREATE_SESSION] createSession result: $createResult');
 
     String sessionId = '';
+    String pubkey = '';
+    String secretkey = '';
+    String sessionPassword = '';
     try {
       final decoded = jsonDecode(createResult);
       if (decoded['status'] != 'success') {
         if (mounted) {
           setState(() => _creating = false);
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('创建会话失败: ${decoded['error'] ?? '未知错误'}'), duration: const Duration(seconds: 2)),
+            SnackBar(content: Text('${AppStrings.createSessionFailed}: ${decoded['error'] ?? 'unknown'}'), duration: const Duration(seconds: 2)),
           );
         }
         return;
       }
       sessionId = decoded['session_id']?.toString() ?? '';
+      pubkey = decoded['pubkey']?.toString() ?? '';
+      secretkey = decoded['secretkey']?.toString() ?? '';
+      sessionPassword = decoded['session_password']?.toString() ?? '';
     } catch (e) {
       if (mounted) {
         setState(() => _creating = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('创建会话失败: $e'), duration: const Duration(seconds: 2)),
+          SnackBar(content: Text('${AppStrings.createSessionFailed}: $e'), duration: const Duration(seconds: 2)),
         );
       }
       return;
@@ -138,7 +146,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       if (mounted) {
         setState(() => _creating = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('创建会话失败: 未获取到 session_id'), duration: Duration(seconds: 2)),
+          SnackBar(content: Text(AppStrings.createSessionFailed), duration: const Duration(seconds: 2)),
         );
       }
       return;
@@ -150,13 +158,36 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     // Include self in recipients so self also receives a copy in INBOX
     final allRecipients = <String>{..._members, _selectedAccount};
     final recipientStr = allRecipients.join(', ');
+
+    // Build email body as JSON with session_info
+    // needkey: all session members (only for standard encryption)
+    final needKey = _encryptMethod == 1
+        ? allRecipients.toList()
+        : <String>[];
+
+    final sessionInfo = <String, dynamic>{
+      'title': title,
+      'account': _selectedAccount,
+      'decodetype': _encryptMethod,
+    };
+    if (_encryptMethod == 1) {
+      sessionInfo['needkey'] = needKey;
+    }
+
+    final emailBody = jsonEncode({
+      'text': AppStrings.startNewSession,
+      'session_info': sessionInfo,
+    });
+
     final content = jsonEncode({
       'recipient': recipientStr,
       'subject': title,
-      'body': '',
+      'body': emailBody,
       'in_reply_to': '',
       'message_id': messageId,
+      'x_message_id': messageId,
       'session_id': sessionId,
+      'x_start_new': 'new',
     });
 
     native.EmailCore.logWrite('[CREATE_SESSION] Sending email to: $recipientStr, subject: $title');
@@ -175,7 +206,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       native.EmailCore.logWrite('[CREATE_SESSION] configIndex: $ci');
 
       if (ci < 0) {
-        sendError = '创建邮箱实例失败 ($ci)';
+        sendError = '${AppStrings.createEmailInstanceFailed} ($ci)';
       } else {
         native.EmailCore.setEmailCredentials(ci, accountData.email, accountData.authCode);
         native.EmailCore.oemailimSetImapServer(ci, accountData.imapServer, accountData.imapPort);
@@ -198,7 +229,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       if (mounted) {
         setState(() => _creating = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('邮件发送失败: $sendError'), duration: const Duration(seconds: 5)),
+          SnackBar(content: Text('${AppStrings.emailSendFailed}: $sendError'), duration: const Duration(seconds: 5)),
         );
       }
       return;
@@ -212,7 +243,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     if (mounted) Navigator.of(context).pop();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('会话创建成功'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.sessionCreatedSuccess), duration: const Duration(seconds: 2)),
       );
     }
   }
@@ -227,7 +258,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('新建会话'),
+      title: Text(AppStrings.newSession),
       content: SizedBox(
         width: 440,
         child: Column(
@@ -235,12 +266,12 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // 0. 会话标题
-            const Text('会话标题', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+            Text(AppStrings.sessionTitle, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
             const SizedBox(height: 6),
             TextField(
               controller: _titleController,
               decoration: InputDecoration(
-                hintText: '输入会话标题',
+                hintText: AppStrings.enterSessionTitle,
                 hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -249,7 +280,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
             const SizedBox(height: 16),
 
             // 1. 选择账户
-            const Text('选择要使用的账户', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+            Text(AppStrings.selectAccount, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
             const SizedBox(height: 6),
             DropdownButtonFormField<String>(
               value: _selectedAccount,
@@ -267,7 +298,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
             const SizedBox(height: 16),
 
             // 2. 添加会话成员
-            const Text('会话成员', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+            Text(AppStrings.sessionMembers, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
             const SizedBox(height: 6),
             Row(
               children: [
@@ -275,7 +306,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                   child: TextField(
                     controller: _membersController,
                     decoration: InputDecoration(
-                      hintText: '输入邮箱地址',
+                      hintText: AppStrings.enterEmail,
                       hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -304,20 +335,39 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                 }).toList(),
               ),
             if (_members.isEmpty)
-              Text('暂未添加成员', style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+              Text(AppStrings.noMembers, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+            const SizedBox(height: 16),
+
+            // 3. 加密方式
+            Text(AppStrings.encryptionMethod, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+            const SizedBox(height: 6),
+            DropdownButtonFormField<int>(
+              value: _encryptMethod,
+              decoration: InputDecoration(
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+              items: [
+                DropdownMenuItem(value: 0, child: Text(AppStrings.encryptionNone)),
+                DropdownMenuItem(value: 1, child: Text(AppStrings.encryptionStandard)),
+              ],
+              onChanged: (v) {
+                if (v != null) setState(() => _encryptMethod = v);
+              },
+            ),
           ],
         ),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
+          child: Text(AppStrings.cancel),
         ),
         ElevatedButton(
           onPressed: _creating ? null : _createSession,
           child: _creating
               ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Text('创建'),
+              : Text(AppStrings.create),
         ),
       ],
     );

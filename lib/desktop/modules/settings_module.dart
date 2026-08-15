@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../dialogs/email_config_dialog.dart';
+import '../../i18n/app_strings.dart';
 
 class SettingsModule extends StatefulWidget {
   const SettingsModule({super.key});
@@ -14,7 +15,7 @@ class _SettingsModuleState extends State<SettingsModule> {
   bool _darkMode = false;
   bool _notifications = true;
   bool _autoUpdate = true;
-  String _language = '简体中文';
+  String _language = AppStrings.isZh ? '简体中文' : 'English';
   String _configPath = '';
 
   @override
@@ -41,9 +42,9 @@ class _SettingsModuleState extends State<SettingsModule> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '设置',
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+            Text(
+              AppStrings.settings,
+              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 24),
             Expanded(
@@ -52,12 +53,6 @@ class _SettingsModuleState extends State<SettingsModule> {
                   _buildAccountSection(),
                   const SizedBox(height: 24),
                   _buildAppearanceSection(),
-                  const SizedBox(height: 24),
-                  _buildNotificationSection(),
-                  const SizedBox(height: 24),
-                  _buildPrivacySection(),
-                  const SizedBox(height: 24),
-                  _buildAboutSection(),
                 ],
               ),
             ),
@@ -75,29 +70,29 @@ class _SettingsModuleState extends State<SettingsModule> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '账户',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+            Text(
+              AppStrings.account,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
             _buildAccountItem(),
             const Divider(),
             _buildSettingsItem(
               Icons.manage_accounts,
-              '账户管理',
-              '添加、编辑或删除邮箱账户',
+              AppStrings.accountManagement,
+              AppStrings.accountManagementDesc,
               () => _showAccountConfigDialog(),
             ),
             _buildSettingsItem(
               Icons.security,
-              '账户安全',
-              '密码、两步验证等',
+              AppStrings.accountSecurity,
+              AppStrings.accountSecurityDesc,
               () {},
             ),
             _buildSettingsItem(
               Icons.cloud,
-              '数据同步',
-              '管理云端数据同步',
+              AppStrings.dataSync,
+              AppStrings.dataSyncDesc,
               () {},
             ),
           ],
@@ -116,10 +111,10 @@ class _SettingsModuleState extends State<SettingsModule> {
             color: Theme.of(context).colorScheme.primary,
             borderRadius: BorderRadius.circular(18),
           ),
-          child: const Center(
+          child: Center(
             child: Text(
-              '我',
-              style: TextStyle(color: Colors.white, fontSize: 24),
+              AppStrings.me,
+              style: const TextStyle(color: Colors.white, fontSize: 24),
             ),
           ),
         ),
@@ -128,9 +123,9 @@ class _SettingsModuleState extends State<SettingsModule> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                '用户名',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+              Text(
+                AppStrings.username,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
               ),
               const SizedBox(height: 4),
               Text(
@@ -142,7 +137,7 @@ class _SettingsModuleState extends State<SettingsModule> {
         ),
         TextButton(
           onPressed: () {},
-          child: const Text('编辑'),
+          child: Text(AppStrings.edit),
         ),
       ],
     );
@@ -156,15 +151,15 @@ class _SettingsModuleState extends State<SettingsModule> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '外观',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+            Text(
+              AppStrings.appearance,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
             _buildSwitchItem(
               Icons.dark_mode,
-              '深色模式',
-              '启用深色主题',
+              AppStrings.darkMode,
+              AppStrings.darkModeDesc,
               _darkMode,
               (value) {
                 setState(() {
@@ -175,14 +170,14 @@ class _SettingsModuleState extends State<SettingsModule> {
             const Divider(),
             _buildSettingsItem(
               Icons.language,
-              '语言',
+              AppStrings.language,
               _language,
               () {},
             ),
             _buildSettingsItem(
               Icons.text_fields,
-              '字体大小',
-              '中',
+              AppStrings.fontSize,
+              AppStrings.fontSizeMedium,
               () {},
             ),
           ],

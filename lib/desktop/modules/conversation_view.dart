@@ -7,6 +7,7 @@ import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'eml_parser.dart';
+import '../../i18n/app_strings.dart';
 
 // Helper function to parse EmailMessage from JSON
 native.EmailMessage _emailMessageFromJson(Map<String, dynamic> json) {
@@ -27,6 +28,7 @@ native.EmailMessage _emailMessageFromJson(Map<String, dynamic> json) {
     rowid: json['rowid'] ?? 0,
     toAddr: json['to_addr'] ?? '',
     file: json['file'] ?? '',
+    account: json['account'] ?? '',
   );
 }
 
@@ -302,16 +304,16 @@ mixin ConversationViewMixin on State<EmailModule> {
     final thread = buildConversationThread(selectedConversationMessageId!);
 
     // Get title from thread root or from session_members
-    String conversationTitle = '无主题';
+    String conversationTitle = AppStrings.noSubject;
     List<native.EmailMessage> effectiveThread = thread;
     if (thread.isNotEmpty) {
       final rootEmail = thread.firstWhere(
         (e) => e.sessionId == selectedConversationMessageId,
         orElse: () => thread.first,
       );
-      conversationTitle = rootEmail.subject.isEmpty ? '无主题' : rootEmail.subject;
+      conversationTitle = rootEmail.subject.isEmpty ? AppStrings.noSubject : rootEmail.subject;
     } else {
-      conversationTitle = '新会话';
+      conversationTitle = AppStrings.newConversation;
     }
 
     final accountEmails = _getAccountEmails();
@@ -362,7 +364,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                               children: [
                                 Icon(Icons.chat_bubble_outline, size: 48, color: Colors.grey[400]),
                                 const SizedBox(height: 12),
-                                Text('会话已创建，等待邮件到达', style: TextStyle(fontSize: 14, color: Colors.grey[500])),
+                                Text(AppStrings.sessionCreatedWaiting, style: TextStyle(fontSize: 14, color: Colors.grey[500])),
                               ],
                             ),
                           )
@@ -446,7 +448,7 @@ mixin ConversationViewMixin on State<EmailModule> {
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
-                  Text('会话成员', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Colors.grey[600])),
+                  Text(AppStrings.conversationMembers, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Colors.grey[600])),
                   if (sessionId.isNotEmpty) ...[
                     const SizedBox(width: 8),
                     Expanded(
@@ -487,7 +489,7 @@ mixin ConversationViewMixin on State<EmailModule> {
   Widget buildMemberItem(String name, String address, String conversationAccount) {
     final isMe = conversationAccount.isNotEmpty &&
         address.toLowerCase() == conversationAccount;
-    final displayName = isMe ? '我' : name;
+    final displayName = isMe ? AppStrings.me : name;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -567,7 +569,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                     maxLines: 3,
                     minLines: 1,
                     decoration: InputDecoration(
-                      hintText: '发送消息...',
+                      hintText: AppStrings.sendMessageHint,
                       hintStyle: TextStyle(fontSize: 14, color: Colors.grey[400]),
                       border: InputBorder.none,
                       contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -590,7 +592,7 @@ mixin ConversationViewMixin on State<EmailModule> {
               native.EmailCore.logWrite('[SEND] Send button tapped');
               sendConversationReply(thread);
             },
-            child: const Text('发送', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+            child: Text(AppStrings.send, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           ),
         ],
       ),
@@ -616,7 +618,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       // The conversation account is the sender
       myEmail = thread.first.recipient;
     } else {
-      subject = selectedConversationMessageId ?? '新会话';
+      subject = selectedConversationMessageId ?? AppStrings.newConversation;
     }
 
     // Collect recipients from thread emails (senders + to_addr, including self)
@@ -639,7 +641,7 @@ mixin ConversationViewMixin on State<EmailModule> {
 
     if (recipients.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('没有可发送的收件人'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.noRecipients), duration: const Duration(seconds: 2)),
       );
       return;
     }
@@ -681,7 +683,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     final config = native.EmailCore.loadConfig(configPath);
     if (config == null || config.accounts.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法加载账户配置'), duration: Duration(seconds: 2)),
+        SnackBar(content: Text(AppStrings.cannotLoadConfig), duration: const Duration(seconds: 2)),
       );
       return;
     }
@@ -702,7 +704,7 @@ mixin ConversationViewMixin on State<EmailModule> {
 
     // Show sending indicator
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('正在发送...'), duration: Duration(seconds: 10)),
+      SnackBar(content: Text(AppStrings.sending), duration: const Duration(seconds: 10)),
     );
 
     // Run SMTP sending in a background isolate to avoid blocking UI
@@ -723,7 +725,9 @@ mixin ConversationViewMixin on State<EmailModule> {
       'body': bodyText,
       'in_reply_to': inReplyTo,
       'message_id': replyMessageId,
+      'x_message_id': replyMessageId,
       'session_id': sessionId,
+      'x_start_new': 'data',
     });
 
     () async {
@@ -742,7 +746,7 @@ mixin ConversationViewMixin on State<EmailModule> {
           native.EmailCore.logWrite('[SEND] configIndex: $ci');
         }
         if (ci < 0) {
-          errorMsg = '创建邮箱实例失败 ($ci)';
+          errorMsg = '${AppStrings.createEmailInstanceFailed} ($ci)';
         } else {
           final credResult = native.EmailCore.setEmailCredentials(ci, accountEmail, authCode);
           native.EmailCore.logWrite('[SEND] setEmailCredentials: $credResult');
@@ -762,7 +766,7 @@ mixin ConversationViewMixin on State<EmailModule> {
           }
         }
       } catch (e) {
-        errorMsg = '异常: $e';
+        errorMsg = '${AppStrings.exceptionLabel}: $e';
         native.EmailCore.logWrite('[SEND] Error: $errorMsg');
       }
 
@@ -812,12 +816,12 @@ mixin ConversationViewMixin on State<EmailModule> {
         // Notify parent to refresh emails from database
         onRefresh?.call();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('消息已发送'), duration: Duration(seconds: 1)),
+          SnackBar(content: Text(AppStrings.messageSent), duration: const Duration(seconds: 1)),
         );
       } else {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('发送失败: $errorMsg'), duration: const Duration(seconds: 10)),
+          SnackBar(content: Text('${AppStrings.sendFailed}: $errorMsg'), duration: const Duration(seconds: 10)),
         );
       }
     }();
@@ -835,9 +839,9 @@ mixin ConversationViewMixin on State<EmailModule> {
 
     if (!isDownloading) {
       // Read and parse the .eml file using file field
-      final emlPath = '$emailDataPath/${email.recipient}/${email.file}.eml';
+      final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
       native.EmailCore.logWrite('[Conversation] emlPath=$emlPath');
-      final parsed = parseEmlFile(emlPath);
+      final parsed = parseEmlFile(emlPath, account: email.account);
       bodyText = parsed.textBody;
       hasAtt = parsed.hasAttachments;
 
@@ -887,7 +891,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                       children: [
                         Icon(Icons.attach_file, size: 14, color: Colors.grey[500]),
                         const SizedBox(width: 2),
-                        Text('附件', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                        Text(AppStrings.attachment, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
                       ],
                     ),
                   ),
@@ -938,7 +942,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                                       ),
                                     ),
                                     const SizedBox(width: 8),
-                                    Text('下载中...', style: TextStyle(fontSize: 13, color: Colors.grey[400])),
+                                    Text(AppStrings.downloading, style: TextStyle(fontSize: 13, color: Colors.grey[400])),
                                   ],
                                 ),
                               ),
