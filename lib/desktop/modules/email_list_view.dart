@@ -415,7 +415,7 @@ mixin EmailListViewMixin on State<EmailModule> {
                     children: [
                       Row(
                         children: [
-                          Expanded(child: Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 13, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          Expanded(child: Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 19.5, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
                           Text(formatTime(email.timestamp), style: TextStyle(fontSize: 11, color: Colors.grey[500])),
                         ],
                       ),
