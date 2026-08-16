@@ -2,6 +2,8 @@
 #include "email_core.h"
 #include "logger.h"
 #include "email_handler_c.h"
+#include "db_connection.h"
+#include "key_repo.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -596,25 +598,13 @@ extern "C" int email_prepare_data_body(const char* plaintext, const char* recipi
     auto recipientList = parse_recipients(recipientsStr);
     nlohmann::json codeArray = nlohmann::json::array();
 
-    sqlite3* db = email_core_get_db();
+    static KeyRepo s_keyRepo;
     for (const auto& rawRecipient : recipientList) {
         std::string acct = extract_email_addr(rawRecipient);
         if (acct.empty()) continue;
 
         // Look up pubkey from code table
-        std::string pubPem;
-        if (db) {
-            const char* sql = "SELECT pubkey FROM code WHERE account = ? ORDER BY id DESC LIMIT 1;";
-            sqlite3_stmt* stmt;
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, acct.c_str(), -1, SQLITE_TRANSIENT);
-                if (sqlite3_step(stmt) == SQLITE_ROW) {
-                    const char* pub = (const char*)sqlite3_column_text(stmt, 0);
-                    if (pub) pubPem = pub;
-                }
-                sqlite3_finalize(stmt);
-            }
-        }
+        std::string pubPem = s_keyRepo.queryPubkeyByAccount(acct);
 
         if (pubPem.empty()) {
             LOG_INFO("email_prepare_data_body: no pubkey for account=%s, skipping\n", acct.c_str());
@@ -694,32 +684,9 @@ extern "C" int email_decrypt_data_body(const char* encryptedBody, const char* ac
 
         // Look up own private key from keyinfo table using account and md5 of pubkey
         std::string privPem, keyPassword;
-        sqlite3* db = email_core_get_db();
-        if (db) {
-            sqlite3_stmt* stmt;
-            const char* sql = "SELECT key, password, pub FROM keyinfo WHERE account = ? AND key != '' ORDER BY id DESC;";
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, account, -1, SQLITE_TRANSIENT);
-                LOG_INFO("email_decrypt_data_body: looking up keyinfo for account=%s, expectedMd5=%s\n", account, expectedMd5.c_str());
-                while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    const char* sk = (const char*)sqlite3_column_text(stmt, 0);
-                    const char* kp = (const char*)sqlite3_column_text(stmt, 1);
-                    const char* pub = (const char*)sqlite3_column_text(stmt, 2);
-                    std::string pubMd5 = pub ? compute_md5(std::string(pub)) : "";
-                    LOG_INFO("email_decrypt_data_body: keyinfo row, pubMd5=%s, expectedMd5=%s, match=%d\n", pubMd5.c_str(), expectedMd5.c_str(), pubMd5 == expectedMd5 ? 1 : 0);
-                    if (pub && pubMd5 == expectedMd5) {
-                        if (sk) privPem = sk;
-                        if (kp) keyPassword = kp;
-                        break;
-                    }
-                }
-                sqlite3_finalize(stmt);
-            } else {
-                LOG_INFO("email_decrypt_data_body: keyinfo prepare failed: %s\n", sqlite3_errmsg(db));
-            }
-        }
-
-        if (privPem.empty()) {
+        static KeyRepo s_keyRepo;
+        LOG_INFO("email_decrypt_data_body: looking up keyinfo for account=%s, expectedMd5=%s\n", account, expectedMd5.c_str());
+        if (!s_keyRepo.queryPrivateKeyByAccountAndMd5(account, expectedMd5, privPem, keyPassword)) {
             LOG_INFO("email_decrypt_data_body: no private key for account=%s\n", account);
             return -4;
         }

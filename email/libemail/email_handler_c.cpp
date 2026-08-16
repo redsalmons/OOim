@@ -3,17 +3,23 @@
 #include "email.h"
 #include "email_opt_163_impl.h"
 #include "email_opt_outlook_impl.h"
+#include "email_opt_gmail_impl.h"
 #include "logger.h"
+#include "db_connection.h"
+#include "email_repo.h"
+#include "session_repo.h"
 #include <string>
 #include <nlohmann/json.hpp>
 #include <cstring>
-#include <sqlite3.h>
 #include <mutex>
 
 
 // Forward declaration for db handle and mutex from email_core_utils.cpp
 extern "C" sqlite3* email_core_get_db();
 std::mutex& email_core_get_db_mutex();
+
+static EmailRepo s_emailRepo;
+static SessionRepo s_sessionRepo;
 
 // Forward declaration for email_query_thread_roots from email_core.cpp
 extern "C" int email_query_thread_roots(const char* account, char* outJson, int outSize);
@@ -737,7 +743,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
 
         std::string headersJson;
         
-        // Use the 163-specific implementation for fetch_email_headers
+        // Use the provider-specific implementation for fetch_email_headers
         auto impl163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
         if (impl163) {
             LOG_INFO("FetchAndStore_c: Using 163 implementation");
@@ -748,11 +754,17 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                 LOG_INFO("FetchAndStore_c: Using Outlook implementation");
                 headersJson = implOutlook->fetch_email_headers(folderStr, startUidStr);
             } else {
-                LOG_INFO("FetchAndStore_c: Unsupported provider type for configIndex %d", configIndex);
-                if (outJson && outSize > 0) {
-                    snprintf(outJson, outSize, R"({"status":"failed", "error":"unsupported_provider"})");
+                auto implGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate);
+                if (implGmail) {
+                    LOG_INFO("FetchAndStore_c: Using Gmail implementation");
+                    headersJson = implGmail->fetch_email_headers(folderStr, startUidStr);
+                } else {
+                    LOG_INFO("FetchAndStore_c: Unsupported provider type for configIndex %d", configIndex);
+                    if (outJson && outSize > 0) {
+                        snprintf(outJson, outSize, R"({"status":"failed", "error":"unsupported_provider"})");
+                    }
+                    return -4;
                 }
-                return -4;
             }
         }
 
@@ -767,7 +779,8 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
         }
 
         // Get the global sqlite db handle from email_core.cpp
-        sqlite3* db = email_core_get_db();
+        auto& conn = DbConnection::instance();
+        sqlite3* db = conn.get();
         if (!db) {
             if (outJson && outSize > 0) {
                 snprintf(outJson, outSize, R"({"status":"failed", "error":"database_not_initialized"})");
@@ -790,8 +803,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             std::string in_reply_to = email_data.value("in_reply_to", "");
             std::string message_id = email_data.value("message_id", "");
             std::string x_message_id = email_data.value("x_message_id", "");
-            std::string x_session_id = email_data.value("x_session_id", "");
-            std::string x_start_new = email_data.value("x_start_new", "");
+            std::string x_session_chart = email_data.value("x_session_chart", "");
 
             // If X-Message-ID header exists, use it as message_id for matching
             // This allows sent emails (which have our locally generated X-Message-ID) to be matched
@@ -827,46 +839,31 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             bool found_existing = false;
             int64_t existing_id = 0;
             if (!message_id.empty()) {
-                const char* check_msgid_sql = "SELECT id FROM localemail WHERE message_id = ? AND account = ? LIMIT 1;";
-                sqlite3_stmt* check_msgid_stmt;
-                if (sqlite3_prepare_v2(db, check_msgid_sql, -1, &check_msgid_stmt, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(check_msgid_stmt, 1, message_id.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(check_msgid_stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                    if (sqlite3_step(check_msgid_stmt) == SQLITE_ROW) {
-                        found_existing = true;
-                        existing_id = sqlite3_column_int64(check_msgid_stmt, 0);
-                    }
-                    sqlite3_finalize(check_msgid_stmt);
+                existing_id = s_emailRepo.findIdByMessageId(message_id, accountStr);
+                if (existing_id > 0) {
+                    found_existing = true;
                 }
             }
 
             if (found_existing) {
                 // Update the existing record with real data from IMAP
-                const char* update_sql = "UPDATE localemail SET uuid = ?, sender = ?, from_addr = ?, subject = ?, date = ?, bodystructure = ?, reply_to = ?, in_reply_to = ?, flags = ?, folder = ?, servicerecvtime = ?, to_addr = ? WHERE id = ?;";
-                sqlite3_stmt* update_stmt;
-                if (sqlite3_prepare_v2(db, update_sql, -1, &update_stmt, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(update_stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 2, sender.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 3, from_addr.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 4, subject.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 5, date.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 6, bodystructure.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 7, reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 8, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 9, flags.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 10, folder.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 11, servicerecvtime.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(update_stmt, 12, email_data.value("to_addr", "").c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(update_stmt, 13, existing_id);
-                    int update_rc = sqlite3_step(update_stmt);
-                    if (update_rc != SQLITE_DONE) {
-                        LOG_INFO("FetchAndStore_c: UPDATE failed, rc=%d, error=%s\n", update_rc, sqlite3_errmsg(db));
-                    } else {
-                        LOG_INFO("FetchAndStore_c: Updated id=%lld, uuid='%s' -> '%s', folder='%s'\n", (long long)existing_id, uuid.c_str(), uuid.c_str(), folder.c_str());
-                    }
-                    sqlite3_finalize(update_stmt);
+                EmailRecord updateRec;
+                updateRec.uuid = uuid;
+                updateRec.sender = sender;
+                updateRec.fromAddr = from_addr;
+                updateRec.subject = subject;
+                updateRec.date = date;
+                updateRec.bodystructure = bodystructure;
+                updateRec.replyTo = reply_to;
+                updateRec.inReplyTo = in_reply_to;
+                updateRec.flags = flags;
+                updateRec.folder = folder;
+                updateRec.servicerecvtime = servicerecvtime;
+                updateRec.toAddr = email_data.value("to_addr", "");
+                if (!s_emailRepo.updateById(existing_id, updateRec)) {
+                    LOG_INFO("FetchAndStore_c: UPDATE failed for id=%lld\n", (long long)existing_id);
                 } else {
-                    LOG_INFO("FetchAndStore_c: prepare UPDATE failed, error=%s\n", sqlite3_errmsg(db));
+                    LOG_INFO("FetchAndStore_c: Updated id=%lld, uuid='%s', folder='%s'\n", (long long)existing_id, uuid.c_str(), folder.c_str());
                 }
 
                 // No need to update session table — email_id stores localemail.id which doesn't change
@@ -875,70 +872,38 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             }
 
             // No existing record found — insert a new one
-            const char* sql = "INSERT INTO localemail "
-                              "(uuid, account, sender, from_addr, subject, date, bodystructure, reply_to, in_reply_to, message_id, flags, folder, islocal, servicerecvtime, to_addr, file) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '');";
-            sqlite3_stmt* stmt;
-            int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-            if (rc != SQLITE_OK) continue;
+            EmailRecord insertRec;
+            insertRec.uuid = uuid;
+            insertRec.account = accountStr;
+            insertRec.sender = sender;
+            insertRec.fromAddr = from_addr;
+            insertRec.subject = subject;
+            insertRec.date = date;
+            insertRec.bodystructure = bodystructure;
+            insertRec.replyTo = reply_to;
+            insertRec.inReplyTo = in_reply_to;
+            insertRec.messageId = message_id;
+            insertRec.flags = flags;
+            insertRec.folder = folder;
+            insertRec.servicerecvtime = servicerecvtime;
+            insertRec.toAddr = email_data.value("to_addr", "");
+            // No X-Session-Chart header → mark as islocal=2 (no need to download body)
+            insertRec.isLocal = x_session_chart.empty() ? 2 : 0;
+            int64_t my_rowid = s_emailRepo.insert(insertRec);
 
-            sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 3, sender.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 4, from_addr.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 5, subject.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 6, date.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 7, bodystructure.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 8, reply_to.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 9, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 10, message_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 11, flags.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 12, folder.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 13, servicerecvtime.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 14, email_data.value("to_addr", "").c_str(), -1, SQLITE_TRANSIENT);
-            
-            rc = sqlite3_step(stmt);
-            int changes = sqlite3_changes(db);
-            sqlite3_finalize(stmt);
-
-            // Only count if the insert actually happened (not ignored)
-            // AND only for INBOX folder emails
-            if (rc == SQLITE_DONE && changes > 0 && folder == "INBOX") {
+            if (my_rowid > 0 && folder == "INBOX") {
                 stored_count++;
-                
-                int64_t my_rowid = sqlite3_last_insert_rowid(db);
 
-                LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_start_new=%s\n", 
-                         uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_start_new.c_str());
+                LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_session_chart=%s\n", 
+                         uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str());
 
-                // Session is only created via X-Start-New=new in download_pending_bodies
+                // Session is only created via X-Session-Chart=new in download_pending_bodies
                 // Here we only match in_reply_to to join existing sessions
-                if (x_start_new != "new" && !in_reply_to.empty()) {
-                    const char* find_session_sql =
-                        "SELECT s.session_id FROM session s "
-                        "JOIN localemail l ON s.email_id = l.id "
-                        "WHERE l.message_id = ? AND l.account = ? "
-                        "LIMIT 1;";
-                    sqlite3_stmt* find_session_stmt;
-                    if (sqlite3_prepare_v2(db, find_session_sql, -1, &find_session_stmt, NULL) == SQLITE_OK) {
-                        sqlite3_bind_text(find_session_stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                        sqlite3_bind_text(find_session_stmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                        if (sqlite3_step(find_session_stmt) == SQLITE_ROW) {
-                            const char* sid = (const char*)sqlite3_column_text(find_session_stmt, 0);
-                            if (sid) {
-                                std::string session_id = sid;
-                                const char* insert_session_sql = "INSERT OR IGNORE INTO session (session_id, email_id, visible, auto, isread) VALUES (?, ?, 1, 0, 0);";
-                                sqlite3_stmt* insert_session_stmt;
-                                if (sqlite3_prepare_v2(db, insert_session_sql, -1, &insert_session_stmt, NULL) == SQLITE_OK) {
-                                    sqlite3_bind_text(insert_session_stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-                                    sqlite3_bind_int64(insert_session_stmt, 2, my_rowid);
-                                    sqlite3_step(insert_session_stmt);
-                                    sqlite3_finalize(insert_session_stmt);
-                                }
-                                LOG_INFO("FetchAndStore_c: matched in_reply_to to session=%s, email_id=%lld\n", session_id.c_str(), my_rowid);
-                            }
-                        }
-                        sqlite3_finalize(find_session_stmt);
+                if (x_session_chart != "new" && !in_reply_to.empty()) {
+                    std::string session_id = s_sessionRepo.querySessionByInReplyTo(in_reply_to, accountStr);
+                    if (!session_id.empty()) {
+                        s_sessionRepo.insertSessionAssoc(session_id, my_rowid);
+                        LOG_INFO("FetchAndStore_c: matched in_reply_to to session=%s, email_id=%lld\n", session_id.c_str(), my_rowid);
                     }
                 }
             }
@@ -982,30 +947,16 @@ extern "C" int EmailGetMaxUid_c(const char* account, const char* folder, char* o
     if (!account || !folder) return -2;
 
     // Use shared mutex from email_core.cpp to protect SQLite operations
-    std::lock_guard<std::mutex> lock(email_core_get_db_mutex());
+    auto& conn = DbConnection::instance();
+    std::lock_guard<std::mutex> lock(conn.mutex());
     
-    sqlite3* db = email_core_get_db();
-    if (!db) return -1;
+    if (!conn.get()) return -1;
     
-    const char* sql = "SELECT MAX(uuid) FROM localemail WHERE account = ? AND folder = ?;";
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        return -3;
+    std::string maxUid = s_emailRepo.getMaxUid(account, folder);
+    if (!maxUid.empty() && outUid && outSize > 0) {
+        snprintf(outUid, outSize, "%s", maxUid.c_str());
     }
-
-    sqlite3_bind_text(stmt, 1, account, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, folder, -1, SQLITE_TRANSIENT);
-
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        const char* maxUid = (const char*)sqlite3_column_text(stmt, 0);
-        if (maxUid && outUid && outSize > 0) {
-            snprintf(outUid, outSize, "%s", maxUid);
-        }
-    }
-
-    sqlite3_finalize(stmt);
+    
     return 0;
 }
 
@@ -1099,6 +1050,10 @@ int SendEmail_c(int configIndex, const char* content) {
         auto delegate163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
         if (delegate163) {
             delegate163->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
+        }
+        auto delegateGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate);
+        if (delegateGmail) {
+            delegateGmail->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
         }
 
         bool ok = delegate->send_email("", content ? content : "");

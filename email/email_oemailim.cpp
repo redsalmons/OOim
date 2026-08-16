@@ -2,10 +2,18 @@
 #include "email_core.h"
 #include "logger.h"
 #include "email_handler_c.h"
+#include "email_handler.h"
+#include "email_opt_163_impl.h"
+#include "email_opt_outlook_impl.h"
+#include "email_opt_gmail_impl.h"
+#include "db_connection.h"
+#include "email_repo.h"
+#include "session_repo.h"
+#include "key_repo.h"
+#include "task_repo.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
@@ -114,21 +122,8 @@ extern "C" int email_count_pending_bodies(const char* account) {
 
     LOG_INFO("[DB] count_pending_bodies: checking for account=%s\n", account);
 
-    const char* sql = "SELECT COUNT(*) FROM localemail WHERE account = ? AND islocal = 0 AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3);";
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        LOG_INFO("[DB] count_pending_bodies: prepare failed: %s\n", sqlite3_errmsg(g_db));
-        return -2;
-    }
-
-    sqlite3_bind_text(stmt, 1, account, -1, SQLITE_TRANSIENT);
-
-    int count = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        count = sqlite3_column_int(stmt, 0);
-    }
-    sqlite3_finalize(stmt);
+    static EmailRepo s_emailRepo;
+    int count = s_emailRepo.countPendingBodies(account);
 
     LOG_INFO("[DB] count_pending_bodies: found %d pending emails for account=%s\n", count, account);
     return count;
@@ -157,32 +152,20 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
     std::string accountStr(account);
     std::string storageDirStr(storageDir);
 
-    const char* sql = "SELECT uuid, folder FROM localemail WHERE account = ? AND islocal = 0 AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3) ORDER BY uuid ASC LIMIT 10;";
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        LOG_INFO("[DB] download_pending: prepare failed: %s\n", sqlite3_errmsg(g_db));
-        if (outJson && outSize > 0) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"prepare_failed"})");
-        }
-        return -3;
-    }
+    static EmailRepo s_emailRepo;
+    static SessionRepo s_sessionRepo;
+    static KeyRepo s_keyRepo;
 
-    sqlite3_bind_text(stmt, 1, accountStr.c_str(), -1, SQLITE_STATIC);
+    auto pendingRecs = s_emailRepo.queryPendingEmails(accountStr, 10);
 
     struct PendingEmail {
         std::string uuid;
         std::string folder;
     };
     std::vector<PendingEmail> pending;
-
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        PendingEmail pe;
-        pe.uuid = (const char*)sqlite3_column_text(stmt, 0);
-        pe.folder = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "INBOX";
-        pending.push_back(pe);
+    for (const auto& pr : pendingRecs) {
+        pending.push_back({pr.uuid, pr.folder});
     }
-    sqlite3_finalize(stmt);
 
     if (pending.empty()) {
         if (outJson && outSize > 0) {
@@ -206,15 +189,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         if (getResult != 0) {
             LOG_INFO("[DB] download_pending: failed to fetch uid=%s folder=%s: %d\n", pe.uuid.c_str(), pe.folder.c_str(), getResult);
             if (getResult != -10) {
-                const char* retrySql = "UPDATE localemail SET retry_count = COALESCE(retry_count, 0) + 1 WHERE uuid = ? AND account = ?;";
-                sqlite3_stmt* retryStmt;
-                rc = sqlite3_prepare_v2(g_db, retrySql, -1, &retryStmt, NULL);
-                if (rc == SQLITE_OK) {
-                    sqlite3_bind_text(retryStmt, 1, pe.uuid.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(retryStmt, 2, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_step(retryStmt);
-                    sqlite3_finalize(retryStmt);
-                }
+                s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
             }
             continue;
         }
@@ -276,9 +251,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             message_id = decodeHeader(getHeader("Message-ID"));
             in_reply_to = decodeHeader(getHeader("In-Reply-To"));
 
-            // Check X-Message-ID (priority over Message-ID) and X-Start-New
+            // Check X-Message-ID (priority over Message-ID) and X-Session-Chart
             std::string x_message_id = decodeHeader(getHeader("X-Message-ID"));
-            std::string x_start_new = decodeHeader(getHeader("X-Start-New"));
+            std::string x_session_chart = decodeHeader(getHeader("X-Session-Chart"));
             std::string eml_subject = decodeHeader(getHeader("Subject"));
             std::string eml_to = decodeHeader(getHeader("To"));
             std::string eml_from = decodeHeader(getHeader("From"));
@@ -286,12 +261,12 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 message_id = x_message_id;
             }
 
-            LOG_INFO("[DB] download_pending: parsed message_id='%s', in_reply_to='%s', x_start_new='%s' from %s\n",
-                     message_id.c_str(), in_reply_to.c_str(), x_start_new.c_str(), filePath.c_str());
+            LOG_INFO("[DB] download_pending: parsed message_id='%s', in_reply_to='%s', x_session_chart='%s' from %s\n",
+                     message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str(), filePath.c_str());
 
-            // If X-Start-New=new, parse body as JSON to extract session_info
-            if (x_start_new == "new") {
-                LOG_INFO("[DB] download_pending: X-Start-New=new, parsing body for session_info\n");
+            // If X-Session-Chart=new, parse body as JSON to extract session_info
+            if (x_session_chart == "new") {
+                LOG_INFO("[DB] download_pending: X-Session-Chart=new, parsing body for session_info\n");
                 try {
                     // Parse the full EML to extract body text
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
@@ -366,13 +341,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     // Associate this email with the session
                     if (!newSessionId.empty()) {
                         // Find localemail id from uuid
-                        const char* find_id_sql = "SELECT id FROM localemail WHERE uuid = ? AND account = ? ORDER BY id DESC LIMIT 1;";
-                        sqlite3_stmt* find_stmt;
-                        if (sqlite3_prepare_v2(g_db, find_id_sql, -1, &find_stmt, NULL) == SQLITE_OK) {
-                            sqlite3_bind_text(find_stmt, 1, pe.uuid.c_str(), -1, SQLITE_STATIC);
-                            sqlite3_bind_text(find_stmt, 2, accountStr.c_str(), -1, SQLITE_STATIC);
-                            if (sqlite3_step(find_stmt) == SQLITE_ROW) {
-                                int64_t emailId = sqlite3_column_int64(find_stmt, 0);
+                        int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe.uuid, accountStr);
+                        if (emailId > 0) {
                                 std::string emailIdStr = std::to_string(emailId);
                                 char session_result_json[4096];
                                 int add_rc = email_add_email_to_session(
@@ -385,8 +355,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 );
                                 LOG_INFO("[DB] download_pending: email_add_email_to_session session_id=%s, email_id=%s, result=%d\n",
                                          newSessionId.c_str(), emailIdStr.c_str(), add_rc);
-                            }
-                            sqlite3_finalize(find_stmt);
                         }
                     }
 
@@ -406,18 +374,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
                         // Check if we already have our own keypair in keyinfo table (primary source)
                         std::string myPubkey, myPrivPem, myKeyPassword;
-                        {
-                            const char* ki_sql = "SELECT pub FROM keyinfo WHERE account = ? AND key != '' ORDER BY id DESC LIMIT 1;";
-                            sqlite3_stmt* ki_stmt;
-                            if (sqlite3_prepare_v2(g_db, ki_sql, -1, &ki_stmt, NULL) == SQLITE_OK) {
-                                sqlite3_bind_text(ki_stmt, 1, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                                if (sqlite3_step(ki_stmt) == SQLITE_ROW) {
-                                    const char* pub = (const char*)sqlite3_column_text(ki_stmt, 0);
-                                    if (pub) myPubkey = pub;
-                                }
-                                sqlite3_finalize(ki_stmt);
-                            }
-                        }
+                        myPubkey = s_keyRepo.queryLatestPubkeyFromKeyInfo(accountStr);
 
                         // Fallback: check code table
                         if (myPubkey.empty()) {
@@ -439,16 +396,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 myPubkey = genPub;
                                 myPrivPem = genPriv;
                                 email_code_insert(accountStr.c_str(), myPubkey.c_str(), myPrivPem.c_str(), myKeyPassword.c_str());
-                                const char* keyinfo_sql = "INSERT INTO keyinfo (pub, key, password, session_id, account) VALUES (?, ?, ?, 0, ?);";
-                                sqlite3_stmt* keyinfo_stmt;
-                                if (sqlite3_prepare_v2(g_db, keyinfo_sql, -1, &keyinfo_stmt, NULL) == SQLITE_OK) {
-                                    sqlite3_bind_text(keyinfo_stmt, 1, genPub.c_str(), -1, SQLITE_TRANSIENT);
-                                    sqlite3_bind_text(keyinfo_stmt, 2, genPriv.c_str(), -1, SQLITE_TRANSIENT);
-                                    sqlite3_bind_text(keyinfo_stmt, 3, myKeyPassword.c_str(), -1, SQLITE_TRANSIENT);
-                                    sqlite3_bind_text(keyinfo_stmt, 4, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-                                    sqlite3_step(keyinfo_stmt);
-                                    sqlite3_finalize(keyinfo_stmt);
-                                }
+                                s_keyRepo.insertKeyInfo(genPub, genPriv, myKeyPassword, 0, accountStr);
                                 LOG_INFO("[DB] download_pending: generated new keypair for self, pubkey_len=%zu\n", myPubkey.size());
                             } else {
                                 LOG_INFO("[DB] download_pending: failed to generate keypair for self\n");
@@ -481,7 +429,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             exchangeContent["message_id"] = "";
                             exchangeContent["session_id"] = "";
                             exchangeContent["x_message_id"] = "";
-                            exchangeContent["x_start_new"] = "exchange";
+                            exchangeContent["x_session_chart"] = "exchange";
 
                             std::string exchangeStr = exchangeContent.dump();
                             int sendRc = SendEmail_c(configIndex, exchangeStr.c_str());
@@ -494,9 +442,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 }
             }
 
-            // If X-Start-New=exchange, save received pubkey to code table
-            if (x_start_new == "exchange") {
-                LOG_INFO("[DB] download_pending: X-Start-New=exchange, parsing body for session_info\n");
+            // If X-Session-Chart=exchange, save received pubkey to code table
+            if (x_session_chart == "exchange") {
+                LOG_INFO("[DB] download_pending: X-Session-Chart=exchange, parsing body for session_info\n");
                 try {
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                     msg->parse(emlContent);
@@ -531,13 +479,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             foundSid = existingSid;
                         }
                         if (!foundSid.empty()) {
-                            const char* find_id_sql = "SELECT id FROM localemail WHERE uuid = ? AND account = ? ORDER BY id DESC LIMIT 1;";
-                            sqlite3_stmt* find_stmt;
-                            if (sqlite3_prepare_v2(g_db, find_id_sql, -1, &find_stmt, NULL) == SQLITE_OK) {
-                                sqlite3_bind_text(find_stmt, 1, pe.uuid.c_str(), -1, SQLITE_STATIC);
-                                sqlite3_bind_text(find_stmt, 2, accountStr.c_str(), -1, SQLITE_STATIC);
-                                if (sqlite3_step(find_stmt) == SQLITE_ROW) {
-                                    int64_t emailId = sqlite3_column_int64(find_stmt, 0);
+                            int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe.uuid, accountStr);
+                            if (emailId > 0) {
                                     std::string emailIdStr = std::to_string(emailId);
                                     char session_result_json[4096];
                                     int add_rc = email_add_email_to_session(
@@ -550,8 +493,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                     );
                                     LOG_INFO("[DB] download_pending: exchange email added to session=%s, email_id=%s, result=%d\n",
                                              foundSid.c_str(), emailIdStr.c_str(), add_rc);
-                                }
-                                sqlite3_finalize(find_stmt);
                             }
                         } else {
                             LOG_INFO("[DB] download_pending: exchange email - could not find session for in_reply_to=%s\n", in_reply_to.c_str());
@@ -562,9 +503,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 }
             }
 
-            // If X-Start-New=data, decrypt the body
-            if (x_start_new == "data") {
-                LOG_INFO("[DB] download_pending: X-Start-New=data, decrypting body\n");
+            // If X-Session-Chart=data, decrypt the body
+            if (x_session_chart == "data") {
+                LOG_INFO("[DB] download_pending: X-Session-Chart=data, decrypting body\n");
                 try {
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                     msg->parse(emlContent);
@@ -596,18 +537,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             LOG_INFO("[DB] download_pending: failed to parse .eml file: %s\n", e.what());
         }
 
-        const char* updateSql = "UPDATE localemail SET islocal = 1, message_id = ?, in_reply_to = ?, file = ? WHERE uuid = ? AND account = ?;";
-        sqlite3_stmt* updateStmt;
-        rc = sqlite3_prepare_v2(g_db, updateSql, -1, &updateStmt, NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_text(updateStmt, 1, message_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(updateStmt, 2, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(updateStmt, 3, pe.uuid.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(updateStmt, 4, pe.uuid.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(updateStmt, 5, accountStr.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(updateStmt);
-            sqlite3_finalize(updateStmt);
-        }
+        s_emailRepo.updateAfterDownload(pe.uuid, accountStr, message_id, in_reply_to, pe.uuid);
 
         downloaded++;
         results.push_back({{"uuid", pe.uuid}, {"folder", pe.folder}, {"file", filePath}});
@@ -791,4 +721,210 @@ extern "C" int email_parse_eml(const char* filePath, char* outJson, int outSize)
         snprintf(outJson, outSize, R"({"status":"failed","error":"unknown_exception"})");
         return -6;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task table operations for queued email sending
+// ---------------------------------------------------------------------------
+
+extern "C" int email_task_insert(const char* account, const char* recipient,
+                                 const char* subject, const char* body,
+                                 const char* in_reply_to, const char* message_id,
+                                 const char* x_message_id, const char* session_id,
+                                 const char* x_session_chart) {
+    if (!account || !recipient || !subject || !body) {
+        LOG_INFO("[Task] insert failed: null parameters (account=%p, recipient=%p, subject=%p, body=%p)\n",
+                account, recipient, subject, body);
+        return -1;
+    }
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) {
+        LOG_INFO("[Task] insert failed: database not initialized\n");
+        return -2;
+    }
+
+    static TaskRepo s_taskRepo;
+    int64_t id = s_taskRepo.insert(account, recipient, subject, body,
+                                    in_reply_to ? in_reply_to : "",
+                                    message_id ? message_id : "",
+                                    x_message_id ? x_message_id : "",
+                                    session_id ? session_id : "",
+                                    x_session_chart ? x_session_chart : "data");
+    if (id == 0) {
+        LOG_INFO("[Task] insert failed: id=0 returned from repo\n");
+        return -3;
+    }
+    LOG_INFO("[Task] inserted id=%lld for account=%s\n", (long long)id, account);
+    return (int)id;
+}
+
+extern "C" int email_task_query_pending(const char* account, char* outJson, int outSize) {
+    if (!account || !outJson || outSize <= 0) return -1;
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"database_not_initialized"})");
+        return -2;
+    }
+
+    static TaskRepo s_taskRepo;
+    auto tasks = s_taskRepo.queryPending(account, 10);
+
+    json result = json::array();
+    for (const auto& t : tasks) {
+        result.push_back({
+            {"id", t.id},
+            {"account", t.account},
+            {"recipient", t.recipient},
+            {"subject", t.subject},
+            {"body", t.body},
+            {"in_reply_to", t.inReplyTo},
+            {"message_id", t.messageId},
+            {"x_message_id", t.xMessageId},
+            {"session_id", t.sessionId},
+            {"x_session_chart", t.xSessionChart},
+            {"status", t.status},
+            {"created_at", t.createdAt}
+        });
+    }
+
+    std::string out = result.dump();
+    if ((int)out.size() >= outSize) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"buffer_too_small"})");
+        return -3;
+    }
+    snprintf(outJson, outSize, "%s", out.c_str());
+    return 0;
+}
+
+extern "C" int email_task_mark_sent(int taskId) {
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) return -1;
+
+    static TaskRepo s_taskRepo;
+    if (s_taskRepo.markSent(taskId)) {
+        LOG_INFO("[Task] marked sent id=%d\n", taskId);
+        return 0;
+    }
+    return -2;
+}
+
+extern "C" int email_task_mark_failed(int taskId) {
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) return -1;
+
+    static TaskRepo s_taskRepo;
+    if (s_taskRepo.markFailed(taskId)) {
+        LOG_INFO("[Task] marked failed id=%d\n", taskId);
+        return 0;
+    }
+    return -2;
+}
+
+extern "C" int email_task_delete(int taskId) {
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) return -1;
+
+    static TaskRepo s_taskRepo;
+    if (s_taskRepo.deleteTask(taskId)) {
+        LOG_INFO("[Task] deleted id=%d\n", taskId);
+        return 0;
+    }
+    return -2;
+}
+
+extern "C" int email_task_process_pending(int configIndex, const char* account, char* outJson, int outSize) {
+    if (!account || !outJson || outSize <= 0) return -1;
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"database_not_initialized"})");
+        return -2;
+    }
+
+    static TaskRepo s_taskRepo;
+    auto tasks = s_taskRepo.queryPending(account, 10);
+    if (tasks.empty()) {
+        snprintf(outJson, outSize, R"({"status":"success","sent":0})");
+        return 0;
+    }
+
+    int sentCount = 0;
+    json sentTasks = json::array();
+
+    for (const auto& t : tasks) {
+        LOG_INFO("[Task] processing id=%lld for account=%s, message_id='%s'\n", (long long)t.id, account, t.messageId.c_str());
+
+        // Set SMTP server from the Email object
+        auto emailObj = oemailim::EmailHandler::g_EmailConfigIndices[configIndex];
+        if (emailObj) {
+            auto delegate = emailObj->get_delegate();
+            if (delegate) {
+                auto outlookDelegate = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate);
+                if (outlookDelegate) {
+                    outlookDelegate->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
+                }
+                auto delegate163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
+                if (delegate163) {
+                    delegate163->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
+                }
+                auto delegateGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate);
+                if (delegateGmail) {
+                    delegateGmail->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
+                }
+            }
+        }
+
+        // Organize email content JSON
+        json emailContent = {
+            {"recipient", t.recipient},
+            {"subject", t.subject},
+            {"body", t.body},
+            {"in_reply_to", t.inReplyTo},
+            {"message_id", t.messageId},
+            {"x_message_id", t.xMessageId},
+            {"session_id", t.sessionId},
+            {"x_session_chart", t.xSessionChart}
+        };
+
+        // Note: encryption is handled by send_email() when x_session_chart=="data"
+        // Do NOT encrypt here - it would cause double encryption
+
+        std::string emailStr = emailContent.dump();
+        int sendRc = SendEmail_c(configIndex, emailStr.c_str());
+        if (sendRc == 0) {
+            s_taskRepo.deleteTask(t.id);
+            sentCount++;
+            sentTasks.push_back({{"id", t.id}, {"message_id", t.messageId}});
+            LOG_INFO("[Task] sent successfully and deleted id=%lld\n", (long long)t.id);
+        } else {
+            s_taskRepo.markFailed(t.id);
+            LOG_INFO("[Task] send failed id=%lld, rc=%d\n", (long long)t.id, sendRc);
+        }
+    }
+
+    json result = {
+        {"status", "success"},
+        {"sent", sentCount},
+        {"tasks", sentTasks}
+    };
+    std::string out = result.dump();
+    LOG_INFO("[Task] returning result: %s\n", out.c_str());
+    if ((int)out.size() >= outSize) {
+        snprintf(outJson, outSize, R"({"status":"success","sent":%d})", sentCount);
+        return 0;
+    }
+    snprintf(outJson, outSize, "%s", out.c_str());
+    return 0;
+}
+
+// Migration: Update islocal for existing emails
+extern "C" int email_migrate_islocal() {
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) return -1;
+
+    static EmailRepo s_emailRepo;
+    if (s_emailRepo.migrateIslocalForNoSessionChart()) {
+        LOG_INFO("[Migration] islocal migration completed\n");
+        return 0;
+    }
+    return -2;
 }

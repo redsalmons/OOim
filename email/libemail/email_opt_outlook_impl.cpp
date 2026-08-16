@@ -2,6 +2,8 @@
 #include "email_opt_outlook_impl.h"
 #include "email_core.h"
 #include "email_core_common.h"
+#include "db_connection.h"
+#include "session_repo.h"
 #include <nlohmann/json.hpp>
 #include "email_opt_interface.h"
 #include "email_handler.h"
@@ -817,7 +819,7 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
     
     // Parse content as JSON: { "recipient": "...", "subject": "...", "body": "...", "in_reply_to": "..." }
     std::string recipient_str, subject_str, body_str, in_reply_to_str, message_id_str, session_id_str;
-    std::string x_message_id_str, x_start_new_str;
+    std::string x_message_id_str, x_session_chart_str;
     try {
         auto j = nlohmann::json::parse(content);
         recipient_str = j.value("recipient", "");
@@ -827,7 +829,7 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
         message_id_str = j.value("message_id", "");
         session_id_str = j.value("session_id", "");
         x_message_id_str = j.value("x_message_id", "");
-        x_start_new_str = j.value("x_start_new", "");
+        x_session_chart_str = j.value("x_session_chart", "");
     } catch (const std::exception& e) {
         last_error_ = std::string("send_email: invalid JSON content: ") + e.what();
         LOG_INFO("Outlook send_email: %s\n", last_error_.c_str());
@@ -843,8 +845,8 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
     LOG_INFO("Outlook send_email: account_type=%s, to=%s, subject=%s\n",
             account_type_.c_str(), recipient_str.c_str(), subject_str.c_str());
 
-    // For x_start_new=data, encrypt the body
-    if (x_start_new_str == "data") {
+    // For x_session_chart=data, encrypt the body
+    if (x_session_chart_str == "data") {
         char encBody[65536];
         int encRc = email_prepare_data_body(body_str.c_str(), recipient_str.c_str(), email_.c_str(), encBody, sizeof(encBody));
         if (encRc == 0) {
@@ -859,16 +861,16 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
     LOG_INFO("Outlook send_email: session_id=%s\n", session_id_str.c_str());
 
     if (account_type_ == "personal") {
-        return send_email_via_graph_api(recipient_str, subject_str, body_str, in_reply_to_str, message_id_str, session_id_str, x_message_id_str, x_start_new_str);
+        return send_email_via_graph_api(recipient_str, subject_str, body_str, in_reply_to_str, message_id_str, session_id_str, x_message_id_str, x_session_chart_str);
     } else {
-        return send_email_via_vmime_smtp(recipient_str, subject_str, body_str, in_reply_to_str, message_id_str, session_id_str, x_message_id_str, x_start_new_str);
+        return send_email_via_vmime_smtp(recipient_str, subject_str, body_str, in_reply_to_str, message_id_str, session_id_str, x_message_id_str, x_session_chart_str);
     }
 }
 
 bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient, const std::string& subject, 
                                                      const std::string& body, const std::string& in_reply_to, 
                                                      const std::string& message_id, const std::string& session_id,
-                                                     const std::string& x_message_id, const std::string& x_start_new) {
+                                                     const std::string& x_message_id, const std::string& x_session_chart) {
     LOG_INFO("Outlook send_email_via_graph_api: sending via Microsoft Graph API\n");
     
     // Refresh Graph token with proper scope
@@ -910,8 +912,8 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     if (!x_message_id.empty()) {
         email_msg += "X-MESSAGE-ID: " + x_message_id + "\r\n";
     }
-    if (!x_start_new.empty()) {
-        email_msg += "X-Start-New: " + x_start_new + "\r\n";
+    if (!x_session_chart.empty()) {
+        email_msg += "X-Session-Chart: " + x_session_chart + "\r\n";
     }
     email_msg += "MIME-Version: 1.0\r\n";
     email_msg += "Content-Type: text/html; charset=utf-8\r\n";
@@ -984,11 +986,11 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                 }";
     }
     
-    if (!x_start_new.empty()) {
+    if (!x_session_chart.empty()) {
         json_body += R"(,
                 {
-                    "name": "X-Start-New",
-                    "value": ")" + x_start_new + R"("
+                    "name": "X-Session-Chart",
+                    "value": ")" + x_session_chart + R"("
                 }";
     }
     
@@ -1071,9 +1073,9 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
             if (response.contains("uuid")) {
                 std::string email_id = response["uuid"].get<std::string>();
                 
-                // For x_start_new=new, create session locally
+                // For x_session_chart=new, create session locally
                 std::string sid = session_id;
-                if (x_start_new == "new" && sid.empty()) {
+                if (x_session_chart == "new" && sid.empty()) {
                     char create_json[4096];
                     int create_rc = email_create_session(
                         email_.c_str(), subject.c_str(), email_.c_str(),
@@ -1086,27 +1088,13 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                             }
                         } catch (...) {}
                     }
-                    LOG_INFO("Outlook send_email_via_graph_api: x_start_new=new, created session_id=%s\n", sid.c_str());
+                    LOG_INFO("Outlook send_email_via_graph_api: x_session_chart=new, created session_id=%s\n", sid.c_str());
                 }
 
                 // For exchange or reply, find session via in_reply_to
                 if (sid.empty() && !in_reply_to.empty()) {
-                    const char* find_sql = "SELECT s.session_id FROM session s "
-                        "JOIN localemail l ON s.email_id = l.id "
-                        "WHERE l.message_id = ? AND l.account = ? LIMIT 1;";
-                    sqlite3* db = email_core_get_db();
-                    if (db) {
-                        sqlite3_stmt* stmt;
-                        if (sqlite3_prepare_v2(db, find_sql, -1, &stmt, NULL) == SQLITE_OK) {
-                            sqlite3_bind_text(stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                            sqlite3_bind_text(stmt, 2, email_.c_str(), -1, SQLITE_TRANSIENT);
-                            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                                const char* found = (const char*)sqlite3_column_text(stmt, 0);
-                                if (found) sid = found;
-                            }
-                            sqlite3_finalize(stmt);
-                        }
-                    }
+                    static SessionRepo s_sessionRepo;
+                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
                     LOG_INFO("Outlook send_email_via_graph_api: found session_id=%s via in_reply_to=%s\n",
                              sid.c_str(), in_reply_to.c_str());
                 }
@@ -1115,7 +1103,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                 
                 // Add email to session
                 char session_buffer[8192];
-                int encMethod = (x_start_new == "data") ? 1 : 0;
+                int encMethod = (x_session_chart == "data") ? 1 : 0;
                 int session_result = email_add_email_to_session(
                     sid.c_str(),
                     email_id.c_str(),
@@ -1158,7 +1146,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
 bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient, const std::string& subject, 
                                                       const std::string& body, const std::string& in_reply_to, 
                                                       const std::string& message_id, const std::string& session_id,
-                                                      const std::string& x_message_id, const std::string& x_start_new) {
+                                                      const std::string& x_message_id, const std::string& x_session_chart) {
     LOG_INFO("Outlook send_email_via_vmime_smtp: sending via vmime SMTP with XOAUTH2\n");
     
     try {
@@ -1253,15 +1241,15 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
             msg->getHeader()->References()->setValue(irt);
         }
         
-        // Add custom headers: X-MESSAGE-ID and X-Start-New
+        // Add custom headers: X-MESSAGE-ID and X-Session-Chart
         if (!x_message_id.empty()) {
             vmime::shared_ptr<vmime::headerField> xMsgIdField =
                 vmime::headerFieldFactory::getInstance()->create("X-Message-ID", x_message_id);
             msg->getHeader()->appendField(xMsgIdField);
         }
-        if (!x_start_new.empty()) {
+        if (!x_session_chart.empty()) {
             vmime::shared_ptr<vmime::headerField> xStartNewField =
-                vmime::headerFieldFactory::getInstance()->create("X-Start-New", x_start_new);
+                vmime::headerFieldFactory::getInstance()->create("X-Session-Chart", x_session_chart);
             msg->getHeader()->appendField(xStartNewField);
         }
         
@@ -1301,9 +1289,9 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                 if (response.contains("uuid")) {
                     std::string email_id = response["uuid"].get<std::string>();
                     
-                    // For x_start_new=new, create session locally
+                    // For x_session_chart=new, create session locally
                     std::string sid = session_id;
-                    if (x_start_new == "new" && sid.empty()) {
+                    if (x_session_chart == "new" && sid.empty()) {
                         char create_json[4096];
                         int create_rc = email_create_session(
                             email_.c_str(), subject.c_str(), email_.c_str(),
@@ -1316,27 +1304,13 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                                 }
                             } catch (...) {}
                         }
-                        LOG_INFO("Outlook send_email_via_vmime_smtp: x_start_new=new, created session_id=%s\n", sid.c_str());
+                        LOG_INFO("Outlook send_email_via_vmime_smtp: x_session_chart=new, created session_id=%s\n", sid.c_str());
                     }
 
                     // For exchange or reply, find session via in_reply_to
                     if (sid.empty() && !in_reply_to.empty()) {
-                        const char* find_sql = "SELECT s.session_id FROM session s "
-                            "JOIN localemail l ON s.email_id = l.id "
-                            "WHERE l.message_id = ? AND l.account = ? LIMIT 1;";
-                        sqlite3* db = email_core_get_db();
-                        if (db) {
-                            sqlite3_stmt* stmt;
-                            if (sqlite3_prepare_v2(db, find_sql, -1, &stmt, NULL) == SQLITE_OK) {
-                                sqlite3_bind_text(stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                                sqlite3_bind_text(stmt, 2, email_.c_str(), -1, SQLITE_TRANSIENT);
-                                if (sqlite3_step(stmt) == SQLITE_ROW) {
-                                    const char* found = (const char*)sqlite3_column_text(stmt, 0);
-                                    if (found) sid = found;
-                                }
-                                sqlite3_finalize(stmt);
-                            }
-                        }
+                        static SessionRepo s_sessionRepo2;
+                        sid = s_sessionRepo2.querySessionByInReplyTo(in_reply_to, email_);
                         LOG_INFO("Outlook send_email_via_vmime_smtp: found session_id=%s via in_reply_to=%s\n",
                                  sid.c_str(), in_reply_to.c_str());
                     }
@@ -1345,7 +1319,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                     
                     // Add email to session
                     char session_buffer[8192];
-                    int encMethod = (x_start_new == "data") ? 1 : 0;
+                    int encMethod = (x_session_chart == "data") ? 1 : 0;
                     int session_result = email_add_email_to_session(
                         sid.c_str(),
                         email_id.c_str(),
@@ -1459,7 +1433,7 @@ std::string EmailOptOutlookImpl::fetch_email_headers(const std::string& folder, 
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
         fetchAttrs.add("X-Message-ID");
-        fetchAttrs.add("X-Start-New");
+        fetchAttrs.add("X-Session-Chart");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         // Ensure UID is included
@@ -1688,8 +1662,7 @@ std::string EmailOptOutlookImpl::fetch_email_headers(const std::string& folder, 
             std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
             emailJson["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
             emailJson["x_message_id"] = xMsgId;
-            emailJson["x_session_id"] = decodeHeader(getHeader("X-Session-ID"));
-            emailJson["x_start_new"] = decodeHeader(getHeader("X-Start-New"));
+            emailJson["x_session_chart"] = decodeHeader(getHeader("X-Session-Chart"));
             emailJson["to_addr"] = decodeHeader(getHeader("To"));
 
             response["emails"].push_back(emailJson);

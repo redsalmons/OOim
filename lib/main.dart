@@ -96,6 +96,11 @@ class _AppRootState extends State<AppRoot> {
     final initResult = native.EmailCore.initializeLibemail(appDir.path);
     native.EmailCore.logWrite('[Dart] Libemail initialization result: $initResult');
 
+    // Migration: Update islocal for existing emails
+    native.EmailCore.logWrite('[Dart] Running islocal migration...');
+    final migrateResult = native.EmailCore.migrateIslocal();
+    native.EmailCore.logWrite('[Dart] Islocal migration result: $migrateResult');
+
     _checkConfig();
   }
 

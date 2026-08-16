@@ -3,6 +3,7 @@
 #include "email_opt_gmail_impl.h"
 #include "email_opt_outlook_impl.h"
 #include "email_outlook.h"
+#include "email_google.h"
 #include "config_loader.h"
 #include "email_config_provider.h"
 #include "logger.h"
@@ -146,8 +147,14 @@ int EmailHandler::OpenNewEmail(const std::string& email_id) {
         );
         delegate = std::make_shared<EmailComm::EmailOptOutlookImpl>(g_instance);
     } else if (target_config.type == "gmail.com" || target_config.type == "emailTypeGmail") {
-        // Temporarily disabled - requires additional dependencies
-        return -1;
+        provider = oemailim::EmailProvider::EMAIL_PROVIDER_GMAIL;
+        email = std::make_shared<EmailComm::EmailGoogle>(
+            target_config.smtp_server.empty() ? "smtp.gmail.com" : target_config.smtp_server,
+            target_config.smtp_port > 0 ? target_config.smtp_port : 587,
+            target_config.imap_server.empty() ? "imap.gmail.com" : target_config.imap_server,
+            target_config.imap_port > 0 ? target_config.imap_port : 993
+        );
+        delegate = std::make_shared<EmailComm::EmailOptGmailImpl>(g_instance);
     } else {
         return -1; // Unknown provider type
     }
@@ -262,8 +269,14 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
         );
         delegate = std::make_shared<EmailComm::EmailOptOutlookImpl>(g_instance);
     } else if (config.type == "gmail.com" || config.type == "emailTypeGmail") {
-        // Temporarily disabled - requires additional dependencies
-        return;
+        provider = oemailim::EmailProvider::EMAIL_PROVIDER_GMAIL;
+        email = std::make_shared<EmailComm::EmailGoogle>(
+            config.smtp_server.empty() ? "smtp.gmail.com" : config.smtp_server,
+            config.smtp_port > 0 ? config.smtp_port : 587,
+            config.imap_server.empty() ? "imap.gmail.com" : config.imap_server,
+            config.imap_port > 0 ? config.imap_port : 993
+        );
+        delegate = std::make_shared<EmailComm::EmailOptGmailImpl>(g_instance);
     } else {
         return; // Unknown provider type
     }
@@ -315,13 +328,24 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
             implOutlook->set_data_dir(dataDir);
         }
     } else if (provider == oemailim::EmailProvider::EMAIL_PROVIDER_GMAIL) {
-        // Gmail temporarily disabled - requires additional dependencies
-        // auto implGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate);
-        // if (implGmail) {
-        //     if (!config.refresh_token.empty()) {
-        //         implGmail->set_refresh_token(config.refresh_token);
-        //     }
-        // }
+        auto implGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate);
+        if (implGmail) {
+            if (!config.email.empty()) {
+                implGmail->set_email(config.email);
+            }
+            if (!config.refresh_token.empty()) {
+                implGmail->set_refresh_token(config.refresh_token);
+            } else if (!config.auth_code.empty()) {
+                implGmail->set_refresh_token(config.auth_code);
+            }
+            implGmail->set_data_dir(dataDir);
+            if (!config.imap_server.empty()) {
+                implGmail->set_imap_server(config.imap_server, config.imap_port);
+            }
+            if (!config.smtp_server.empty()) {
+                implGmail->set_smtp_server(config.smtp_server, config.smtp_port);
+            }
+        }
     }
 
     // Add the email to the global vector

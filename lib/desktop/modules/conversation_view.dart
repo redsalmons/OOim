@@ -719,51 +719,34 @@ mixin ConversationViewMixin on State<EmailModule> {
     final sessionId = selectedConversationMessageId;
     // Generate a message_id for this reply
     final replyMessageId = '<${DateTime.now().millisecondsSinceEpoch}.${DateTime.now().microsecond}@${accountEmail.split('@').last}>';
-    final content = jsonEncode({
-      'recipient': recipientStr,
-      'subject': subject,
-      'body': bodyText,
-      'in_reply_to': inReplyTo,
-      'message_id': replyMessageId,
-      'x_message_id': replyMessageId,
-      'session_id': sessionId,
-      'x_start_new': 'data',
-    });
+
+    // Insert send task into task table for async processing
+    final taskId = native.EmailCore.taskInsert(
+      account: accountEmail,
+      recipient: recipientStr,
+      subject: subject,
+      body: bodyText,
+      inReplyTo: inReplyTo,
+      messageId: replyMessageId,
+      xMessageId: replyMessageId,
+      sessionId: sessionId ?? '',
+      xSessionChart: 'data',
+    );
 
     () async {
       bool ok = false;
       String errorMsg = '';
       try {
-        // Yield to let UI update (show snackbar) before blocking FFI calls
+        // Yield to let UI update (show snackbar)
         await Future.delayed(const Duration(milliseconds: 50));
-        native.EmailCore.logWrite('[SEND] Starting FFI calls...');
-        int ci;
-        if (accountType == 'outlook.com') {
-          ci = native.EmailCore.oemailimAddOutlookEmail();
-          native.EmailCore.logWrite('[SEND] oemailimAddOutlookEmail result: $ci');
-        } else {
-          ci = native.EmailCore.oemailimOpenNewEmail(accountId);
-          native.EmailCore.logWrite('[SEND] configIndex: $ci');
-        }
-        if (ci < 0) {
-          errorMsg = '${AppStrings.createEmailInstanceFailed} ($ci)';
-        } else {
-          final credResult = native.EmailCore.setEmailCredentials(ci, accountEmail, authCode);
-          native.EmailCore.logWrite('[SEND] setEmailCredentials: $credResult');
-          native.EmailCore.oemailimSetImapServer(ci, imapServer, imapPort);
-          native.EmailCore.oemailimSetSmtpServer(ci, smtpServer, smtpPort);
-          final rtResult = native.EmailCore.setRefreshToken(ci, authCode);
-          native.EmailCore.logWrite('[SEND] setRefreshToken: $rtResult');
+        native.EmailCore.logWrite('[SEND] Task inserted with id: $taskId');
 
-          native.EmailCore.logWrite('[SEND] Sending via SMTP...');
-          final sendResult = native.EmailCore.sendViaConfigRaw(ci, content);
-          native.EmailCore.logWrite('[SEND] sendViaConfig result: $sendResult');
-          ok = sendResult == 0;
-          if (!ok) {
-            final lastError = native.EmailCore.getLastError(ci);
-            errorMsg = 'sendViaConfig (code=$sendResult): $lastError';
-            native.EmailCore.logWrite('[SEND] lastError: $lastError');
-          }
+        if (taskId > 0) {
+          ok = true;
+          native.EmailCore.logWrite('[SEND] Task queued successfully');
+        } else {
+          errorMsg = '${AppStrings.sendFailed} (task_id=$taskId)';
+          native.EmailCore.logWrite('[SEND] Task insert failed: $taskId');
         }
       } catch (e) {
         errorMsg = '${AppStrings.exceptionLabel}: $e';
@@ -771,57 +754,22 @@ mixin ConversationViewMixin on State<EmailModule> {
       }
 
       if (ok) {
-        // C++ side already inserted the email into DB and session.
-        // Just reload the conversation from database to show the new email.
-        native.EmailCore.logWrite('[SEND] Send succeeded, sessionId=$sessionId, replyMessageId=$replyMessageId');
-        if (sessionId != null) {
-          try {
-            // Immediately reload the current conversation from database
-            if (!mounted) return;
-            native.EmailCore.logWrite('[SEND] Reloading conversation from database, sessionId=$sessionId');
-            final threadResult = native.EmailCore.queryThread(sessionId!);
-            native.EmailCore.logWrite('[SEND] queryThread raw result: $threadResult');
-            final threadDecoded = jsonDecode(threadResult);
-            native.EmailCore.logWrite('[SEND] queryThread decoded: $threadDecoded');
-            if (threadDecoded['status'] == 'success') {
-              final threadEmails = (threadDecoded['emails'] as List)
-                  .map((e) => _emailMessageFromJson(e as Map<String, dynamic>))
-                  .toList();
-              native.EmailCore.logWrite('[SEND] Thread emails count: ${threadEmails.length}');
-              for (int i = 0; i < threadEmails.length; i++) {
-                final email = threadEmails[i];
-                native.EmailCore.logWrite('[SEND] Email[$i]: uuid=${email.uuid}, messageId=${email.messageId}, sender=${email.sender}, recipient=${email.recipient}, rowid=${email.rowid}');
-              }
-              final sentEmailInThread = threadEmails.any((e) => e.messageId == replyMessageId);
-              native.EmailCore.logWrite('[SEND] Sent email found in thread: $sentEmailInThread (looking for messageId=$replyMessageId)');
-              
-              conversationEmails.clear();
-              conversationEmails.addAll(threadEmails);
-              native.EmailCore.logWrite('[SEND] Reloaded conversation with ${threadEmails.length} emails');
-              setState(() {});
-            } else {
-              native.EmailCore.logWrite('[SEND] queryThread failed with status: ${threadDecoded['status']}');
-            }
-          } catch (e) {
-            native.EmailCore.logWrite('[SEND] Failed to reload conversation: $e');
-          }
-        } else {
-          native.EmailCore.logWrite('[SEND] sessionId is null, skipping reload');
-        }
+        // Task queued successfully. Wait for email_sent notification from SendTask isolate
+        native.EmailCore.logWrite('[SEND] Task queued, waiting for email_sent notification');
+        // The actual email will be sent by SendTask isolate and notification will trigger reload
         if (!mounted) return;
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         replyController.clear();
         droppedFiles.clear();
         setState(() {});
-        // Notify parent to refresh emails from database
-        onRefresh?.call();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(AppStrings.messageSent), duration: const Duration(seconds: 1)),
         );
       } else {
         if (!mounted) return;
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${AppStrings.sendFailed}: $errorMsg'), duration: const Duration(seconds: 10)),
+          SnackBar(content: Text(errorMsg), duration: const Duration(seconds: 3)),
         );
       }
     }();

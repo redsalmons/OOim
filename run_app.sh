@@ -1,5 +1,16 @@
 #!/bin/bash
 
+# Kill existing app and lingering processes first
+echo "Killing existing app and processes..."
+pkill -9 -f oim.app 2>/dev/null
+pkill -9 -f "flutter" 2>/dev/null
+pkill -9 -f "dart" 2>/dev/null
+sleep 2
+# Remove Flutter startup lock files
+rm -f /Users/steven/Cascade/OIM/.dart_tool/hooks_runner/*/.lock 2>/dev/null
+rm -f /Users/steven/Cascade/OIM/.dart_tool/hooks_runner/shared/objective_c/.lock 2>/dev/null
+rm -f /Users/steven/Cascade/OIM/build/macos/CompilationCache.noindex/generic/lock 2>/dev/null
+
 # Build email_core library
 echo "Building email_core library..."
 cd /Users/steven/Cascade/OIM/email
@@ -17,11 +28,6 @@ if [ $? -ne 0 ]; then
     echo "Build failed: Flutter app"
     exit 1
 fi
-
-# Kill existing app first
-echo "Killing existing app..."
-pkill -9 -f oim.app
-sleep 2
 
 # Copy dependent libraries
 echo "Copying dependent libraries..."

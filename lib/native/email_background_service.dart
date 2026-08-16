@@ -18,7 +18,7 @@ class SupervisorCommand {
 
 /// Messages sent from supervisor to UI
 class SupervisorMessage {
-  final String type; // 'new_emails', 'child_started', 'child_exited', 'error', 'log'
+  final String type; // 'new_emails', 'child_started', 'child_exited', 'error', 'log', 'email_sent', 'bodies_downloaded'
   final String? account;
   final Map<String, dynamic>? data;
   SupervisorMessage(this.type, {this.account, this.data});
@@ -148,12 +148,14 @@ void supervisorEntryPoint(SendPort mainSendPort) {
         stopChild('$email:INBOX');
         stopChild('$email:Sent');
         stopChild('$email:Download');
+        stopChild('$email:SendTask');
         accountAuthCodes.remove(email);
       } else if (accountAuthCodes[email] != newAuthCodes[email]) {
         log('Account $email credentials changed, restarting children');
         stopChild('$email:INBOX');
         stopChild('$email:Sent');
         stopChild('$email:Download');
+        stopChild('$email:SendTask');
         accountAuthCodes[email] = newAuthCodes[email]!;
       }
     }
@@ -230,6 +232,7 @@ void supervisorEntryPoint(SendPort mainSendPort) {
         // Sent folder watch disabled for all accounts
         // startChild(account.email, account.authCode, account.type, 'Sent', sentConfigIndex);
         startChild(account.email, account.authCode, account.type, 'Download', downloadConfigIndex, storageDir: configPath?.replaceAll('/config/oim.conf', '/data'));
+        startChild(account.email, account.authCode, account.type, 'SendTask', sentConfigIndex);
       }
     }
 
@@ -472,6 +475,54 @@ void childEntryPoint(SendPort supervisorPort) {
     }
   }
 
+  Future<void> runSendTaskLoop() async {
+    if (configIndex == null || email == null) return;
+
+    log('SendTask loop started for $email, configIndex: $configIndex');
+
+    while (!shouldStop) {
+      try {
+        // Set credentials for SMTP
+        if (accountType == 'outlook.com' || accountType == 'gmail.com') {
+          native.EmailCore.refreshToken(configIndex!);
+        } else {
+          native.EmailCore.setEmailCredentials(configIndex!, email!, authCode!);
+        }
+
+        // Process pending send tasks
+        final result = native.EmailCore.taskProcessPending(configIndex!, email!);
+        log('SendTask loop: taskProcessPending for account=$email, configIndex=$configIndex, result=$result');
+
+        try {
+          final decoded = jsonDecode(result);
+          if (decoded['status'] == 'success') {
+            final sent = decoded['sent'] ?? 0;
+            if (sent > 0) {
+              log('SendTask: sent $sent emails');
+              final tasks = decoded['tasks'] as List? ?? [];
+              for (final task in tasks) {
+                notify('email_sent', {
+                  'account': email,
+                  'task_id': task['id'],
+                  'message_id': task['message_id'],
+                });
+              }
+            }
+          } else {
+            log('SendTask error: ${decoded['error']}');
+          }
+        } catch (e) {
+          log('SendTask: failed to parse result: $e');
+        }
+      } catch (e) {
+        log('SendTask loop exception: $e');
+      }
+
+      // Wait 2 seconds before next check
+      await Future.delayed(const Duration(seconds: 2));
+    }
+  }
+
   receivePort.listen((msg) async {
     if (msg is Map<String, dynamic>) {
       switch (msg['type']) {
@@ -493,6 +544,14 @@ void childEntryPoint(SendPort supervisorPort) {
             log('setEmailCredentials result (Download): $credResult');
 
             await runDownloadLoop();
+            notify('child_exited', {'account': email});
+            break;
+          }
+
+          // SendTask mode: poll task table every 2 seconds and send emails
+          if (folder == 'SendTask') {
+            log('SendTask mode starting for $email');
+            await runSendTaskLoop();
             notify('child_exited', {'account': email});
             break;
           }

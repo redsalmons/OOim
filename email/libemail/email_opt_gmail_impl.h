@@ -50,11 +50,28 @@ public:
     // Set refresh token directly
     void set_refresh_token(const std::string& token);
 
-    // IMAP operations (stubs - IMAP layer removed)
+    // Set email address
+    void set_email(const std::string& email) { email_ = email; }
+
+    // IMAP operations
     bool select_folder(const std::string& folder_name) override;
     std::vector<std::string> fetch_emails_since_uid(const std::string& folder, const std::string& start_uid) override;
     std::string get_email(const std::string& folder, const std::string& uid) override;
     bool send_email(const std::string& folder, const std::string& content) override;
+    std::string fetch_email_headers(const std::string& folder, const std::string& start_uid) override;
+
+    // Set SMTP server and port
+    void set_smtp_server(const std::string& server, int port) { smtp_server_ = server; smtp_port_ = port; }
+
+    // Set IMAP server and port
+    void set_imap_server(const std::string& server, int port) { imap_server_ = server; imap_port_ = port; }
+
+    // Set data directory
+    void set_data_dir(const std::string& dir) { data_dir_ = dir; }
+    std::string get_data_dir() const { return data_dir_; }
+
+    // Discover the Sent folder name
+    std::string find_sent_folder() override { return "Sent"; }
 
 protected:
     bool launch_browser(const std::string& url) override;
@@ -71,6 +88,17 @@ private:
     std::string refresh_token_;
     std::string last_error_;
     bool is_valid_;
+
+    // SMTP server configuration
+    std::string smtp_server_;
+    int smtp_port_;
+
+    // IMAP server configuration
+    std::string imap_server_;
+    int imap_port_;
+
+    // Data directory for email storage
+    std::string data_dir_;
 
     // IMAP layer removed - no longer using ImapOptGmail or ImapOauth
     // std::shared_ptr<oemail::ImapOauth> imap_auth_;

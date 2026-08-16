@@ -11,6 +11,7 @@ import 'email_module_base.dart';
 import 'email_list_view.dart';
 import 'email_detail_view.dart';
 import 'conversation_view.dart';
+import 'eml_parser.dart';
 import '../../i18n/app_strings.dart';
 
 export 'email_module_base.dart';
@@ -182,6 +183,10 @@ class EmailModuleState extends State<EmailModule>
   Future<void> _initLibemail() async {
     _logToFile('_initLibemail START');
 
+    // Clear EML cache to force fresh parsing with updated decryption logic
+    clearEmlCache();
+    _logToFile('Cleared EML cache');
+
     // Clear memory data to force reload from database with file field
     _emails.clear();
     _conversationEmails.clear();
@@ -208,6 +213,11 @@ class EmailModuleState extends State<EmailModule>
         switch (msg.type) {
           case 'new_emails':
             _logToFile('Background: new emails for ${msg.account}, count=${msg.data?['count']}');
+            await _loadEmailsFromDb();
+            break;
+          case 'email_sent':
+            _logToFile('Background: email sent for ${msg.account}, message_id=${msg.data?['message_id']}');
+            clearEmlCache(); // Clear cache to force re-parsing with decryption for newly sent emails
             await _loadEmailsFromDb();
             break;
           case 'log':

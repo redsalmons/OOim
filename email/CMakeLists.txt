@@ -41,6 +41,7 @@ add_library(EmailComm STATIC
     libemail/email_handler_c.cpp
     libemail/email_opt_163_impl.cpp
     libemail/email_opt_outlook_impl.cpp
+    libemail/email_opt_gmail_impl.cpp
     libemail/config_loader.cpp
     libemail/email_config_provider.cpp
     libemail/compress_zlib.cpp
@@ -51,6 +52,7 @@ add_library(EmailComm STATIC
 target_include_directories(EmailComm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/libemail
+    ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/cppasyncworker-src
     ${VMIME_INCLUDE_DIRS}
@@ -71,6 +73,12 @@ add_library(email_core STATIC
     email_contact.cpp
     email_core.h
     email_core_common.h
+    persistence/db_connection.cpp
+    persistence/email_repo.cpp
+    persistence/session_repo.cpp
+    persistence/key_repo.cpp
+    persistence/contact_repo.cpp
+    persistence/task_repo.cpp
 )
 
 # Email core shared library (used by Flutter via dart:ffi)
@@ -84,6 +92,12 @@ add_library(email_core_shared SHARED
     email_contact.cpp
     email_core.h
     email_core_common.h
+    persistence/db_connection.cpp
+    persistence/email_repo.cpp
+    persistence/session_repo.cpp
+    persistence/key_repo.cpp
+    persistence/contact_repo.cpp
+    persistence/task_repo.cpp
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
@@ -94,6 +108,7 @@ set_target_properties(email_core_shared PROPERTIES
 # Include directories
 target_include_directories(email_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
@@ -101,6 +116,7 @@ target_include_directories(email_core PUBLIC
 )
 target_include_directories(email_core_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
@@ -110,3 +126,11 @@ target_include_directories(email_core_shared PUBLIC
 # Link SQLite3, EmailComm, and vmime
 target_link_libraries(email_core SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib)
 target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib z)
+
+# Sign the shared library on macOS to prevent code signing crashes
+if(APPLE)
+    add_custom_command(TARGET email_core_shared POST_BUILD
+        COMMAND codesign --force --sign - $<TARGET_FILE:email_core_shared>
+        COMMENT "Ad-hoc signing libemail_core.dylib"
+    )
+endif()

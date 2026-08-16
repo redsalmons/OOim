@@ -370,6 +370,25 @@ typedef _ContactDeleteDart = int Function(int);
 typedef _EmailLogWriteNative = Void Function(Pointer<Utf8>);
 typedef _EmailLogWriteDart = void Function(Pointer<Utf8>);
 
+// Task table operations
+typedef _EmailTaskInsertNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _EmailTaskInsertDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
+typedef _EmailTaskQueryPendingNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailTaskQueryPendingDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _EmailTaskMarkSentNative = Int32 Function(Int32);
+typedef _EmailTaskMarkSentDart = int Function(int);
+
+typedef _EmailTaskMarkFailedNative = Int32 Function(Int32);
+typedef _EmailTaskMarkFailedDart = int Function(int);
+
+typedef _EmailTaskProcessPendingNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailTaskProcessPendingDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _EmailMigrateIslocalNative = Int32 Function();
+typedef _EmailMigrateIslocalDart = int Function();
+
 // ---------------------------------------------------------------------------
 // Library loading
 // ---------------------------------------------------------------------------
@@ -469,6 +488,14 @@ final _emailHideSession = _lib.lookupFunction<_EmailHideSessionNative, _EmailHid
 final _contactAdd = _lib.lookupFunction<_ContactAddNative, _ContactAddDart>('contact_add');
 final _contactQueryAll = _lib.lookupFunction<_ContactQueryAllNative, _ContactQueryAllDart>('contact_query_all');
 final _contactDelete = _lib.lookupFunction<_ContactDeleteNative, _ContactDeleteDart>('contact_delete');
+
+final _emailTaskInsert = _lib.lookupFunction<_EmailTaskInsertNative, _EmailTaskInsertDart>('email_task_insert');
+final _emailTaskQueryPending = _lib.lookupFunction<_EmailTaskQueryPendingNative, _EmailTaskQueryPendingDart>('email_task_query_pending');
+final _emailTaskMarkSent = _lib.lookupFunction<_EmailTaskMarkSentNative, _EmailTaskMarkSentDart>('email_task_mark_sent');
+final _emailTaskMarkFailed = _lib.lookupFunction<_EmailTaskMarkFailedNative, _EmailTaskMarkFailedDart>('email_task_mark_failed');
+final _emailTaskProcessPending = _lib.lookupFunction<_EmailTaskProcessPendingNative, _EmailTaskProcessPendingDart>('email_task_process_pending');
+
+final _emailMigrateIslocal = _lib.lookupFunction<_EmailMigrateIslocalNative, _EmailMigrateIslocalDart>('email_migrate_islocal');
 
 // ---------------------------------------------------------------------------
 // Idiomatic Dart data classes
@@ -1313,7 +1340,7 @@ class EmailCore {
     }
   }
 
-  /// Decrypts an x_start_new=data email body for the given account.
+  /// Decrypts an x_session_chart=data email body for the given account.
   /// Returns 0 on success, negative on error. Output plaintext in outJson.
   static int decryptDataBody(String encryptedBody, String account, Pointer<Utf8> outJson, int outSize) {
     final bodyPtr = encryptedBody.toNativeUtf8();
@@ -1391,6 +1418,86 @@ class EmailCore {
   /// Deletes a contact by id. Returns 0 on success, negative on error.
   static int contactDelete(int id) {
     return _contactDelete(id);
+  }
+
+  /// Inserts a send task into the task table with basic email info. Returns task id (>0) on success, negative on error.
+  static int taskInsert({
+    required String account,
+    required String recipient,
+    required String subject,
+    required String body,
+    String inReplyTo = '',
+    String messageId = '',
+    String xMessageId = '',
+    String sessionId = '',
+    String xSessionChart = 'data',
+  }) {
+    final accountPtr = account.toNativeUtf8();
+    final recipientPtr = recipient.toNativeUtf8();
+    final subjectPtr = subject.toNativeUtf8();
+    final bodyPtr = body.toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
+    final messageIdPtr = messageId.toNativeUtf8();
+    final xMessageIdPtr = xMessageId.toNativeUtf8();
+    final sessionIdPtr = sessionId.toNativeUtf8();
+    final xSessionChartPtr = xSessionChart.toNativeUtf8();
+    try {
+      return _emailTaskInsert(accountPtr, recipientPtr, subjectPtr, bodyPtr,
+                               inReplyToPtr, messageIdPtr, xMessageIdPtr,
+                               sessionIdPtr, xSessionChartPtr);
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(recipientPtr);
+      malloc.free(subjectPtr);
+      malloc.free(bodyPtr);
+      malloc.free(inReplyToPtr);
+      malloc.free(messageIdPtr);
+      malloc.free(xMessageIdPtr);
+      malloc.free(sessionIdPtr);
+      malloc.free(xSessionChartPtr);
+    }
+  }
+
+  /// Queries pending tasks for an account. Returns JSON array string.
+  static String taskQueryPending(String account) {
+    final accountPtr = account.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _emailTaskQueryPending(accountPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Marks a task as sent. Returns 0 on success, negative on error.
+  static int taskMarkSent(int taskId) {
+    return _emailTaskMarkSent(taskId);
+  }
+
+  /// Marks a task as failed. Returns 0 on success, negative on error.
+  static int taskMarkFailed(int taskId) {
+    return _emailTaskMarkFailed(taskId);
+  }
+
+  /// Processes pending send tasks for an account using the given configIndex.
+  /// Returns JSON with status, sent count, and task details.
+  static String taskProcessPending(int configIndex, String account) {
+    final accountPtr = account.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _emailTaskProcessPending(configIndex, accountPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Migration: Update islocal for existing emails. Returns 0 on success, negative on error.
+  static int migrateIslocal() {
+    return _emailMigrateIslocal();
   }
 }
 

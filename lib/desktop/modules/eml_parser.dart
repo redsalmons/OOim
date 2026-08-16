@@ -27,8 +27,12 @@ class EmlAttachment {
 
 final Map<String, EmlParsedContent> _emlCache = {};
 
+void clearEmlCache() {
+  _emlCache.clear();
+}
+
 EmlParsedContent parseEmlFile(String filePath, {String? account}) {
-  // Clear cache if file path format changed (from uuid to file field)
+  // Clear cache if it grows too large
   if (_emlCache.length > 1000) {
     _emlCache.clear();
   }
@@ -36,6 +40,7 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
   if (_emlCache.containsKey(cacheKey)) {
     return _emlCache[cacheKey]!;
   }
+  native.EmailCore.logWrite('[EML] cache miss for $cacheKey, parsing...');
 
   try {
     final jsonStr = native.EmailCore.parseEml(filePath);
@@ -52,22 +57,37 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
     final hasAtt = decoded['has_attachments'] as bool? ?? false;
     final attList = decoded['attachments'] as List? ?? [];
 
-    // Check if body is encrypted data (JSON with "text" and "session_info.code")
+    // Check if body is encrypted data (JSON with "text" and "session_info")
     if (textBody.isNotEmpty && textBody.contains('"text"') && textBody.contains('"session_info"')) {
       try {
         final bodyJson = jsonDecode(textBody);
         if (bodyJson is Map && bodyJson.containsKey('text') && bodyJson.containsKey('session_info')) {
-          // This is an encrypted data body - try to decrypt
-          if (account != null && account.isNotEmpty) {
-            final outBuf = malloc.allocate<Utf8>(65536);
-            try {
-              final rc = native.EmailCore.decryptDataBody(textBody, account, outBuf, 65536);
-              if (rc == 0) {
-                textBody = outBuf.toDartString();
+          final sessionInfo = bodyJson['session_info'] as Map? ?? {};
+          // Only "data" type has "code" field in session_info → needs decryption
+          // "new" and "exchange" types have other fields → just show the text field
+          if (sessionInfo.containsKey('code')) {
+            // This is an encrypted data body - try to decrypt
+            if (account != null && account.isNotEmpty) {
+              final outBuf = malloc.allocate<Utf8>(65536);
+              try {
+                final rc = native.EmailCore.decryptDataBody(textBody, account, outBuf, 65536);
+                native.EmailCore.logWrite('[EML] decryptDataBody rc=$rc, account=$account');
+                if (rc == 0) {
+                  textBody = outBuf.toDartString();
+                  native.EmailCore.logWrite('[EML] decrypt success');
+                } else {
+                  native.EmailCore.logWrite('[EML] decrypt failed, rc=$rc');
+                }
+              } finally {
+                malloc.free(outBuf);
               }
-            } finally {
-              malloc.free(outBuf);
+            } else {
+              native.EmailCore.logWrite('[EML] decrypt skipped: account is null or empty');
             }
+          } else {
+            // exchange or new type - just extract the text field
+            textBody = bodyJson['text'] as String? ?? '';
+            native.EmailCore.logWrite('[EML] using text field directly (exchange/new type)');
           }
         }
       } catch (_) {

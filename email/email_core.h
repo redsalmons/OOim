@@ -265,6 +265,21 @@ int email_prepare_data_body(const char* plaintext, const char* recipients, const
 // Returns plaintext in outJson.
 int email_decrypt_data_body(const char* encryptedBody, const char* account, char* outJson, int outSize);
 
+// Task table operations for queued email sending
+int email_task_insert(const char* account, const char* recipient,
+                     const char* subject, const char* body,
+                     const char* in_reply_to, const char* message_id,
+                     const char* x_message_id, const char* session_id,
+                     const char* x_session_chart);
+int email_task_query_pending(const char* account, char* outJson, int outSize);
+int email_task_mark_sent(int taskId);
+int email_task_mark_failed(int taskId);
+int email_task_delete(int taskId);
+int email_task_process_pending(int configIndex, const char* account, char* outJson, int outSize);
+
+// Migration: Update islocal for existing emails
+int email_migrate_islocal();
+
 #ifdef __cplusplus
 }
 #endif

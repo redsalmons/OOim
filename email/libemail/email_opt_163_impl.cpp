@@ -1,6 +1,8 @@
 #include "email_opt_163_impl.h"
 #include "email_core.h"
 #include "email_core_common.h"
+#include "db_connection.h"
+#include "session_repo.h"
 #include "email_handler.h"
 #include "logger.h"
 #include <nlohmann/json.hpp>
@@ -702,7 +704,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         std::string message_id  = json_content.value("message_id", "");
         std::string session_id  = json_content.value("session_id", "");
         std::string x_message_id = json_content.value("x_message_id", "");
-        std::string x_start_new  = json_content.value("x_start_new", "");
+        std::string x_session_chart  = json_content.value("x_session_chart", "");
         
         LOG_INFO("163 send_email - parsed: recipient='%s', subject='%s', in_reply_to='%s'\n", 
                  recipient.c_str(), subject.c_str(), in_reply_to.c_str());
@@ -785,9 +787,9 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         builder.setSubject(vmime::text(subject, vmime::charset("UTF-8")));
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
 
-        // For x_start_new=data, encrypt the body
+        // For x_session_chart=data, encrypt the body
         std::string bodyToSend = body;
-        if (x_start_new == "data") {
+        if (x_session_chart == "data") {
             char encBody[65536];
             int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), encBody, sizeof(encBody));
             if (encRc == 0) {
@@ -826,12 +828,12 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         header->appendField(xMsgIdField);
         LOG_INFO("163 send_email - set X-Message-ID: %s\n", msg_id.c_str());
 
-        // Set X-Start-New header if provided (for new session creation)
-        if (!x_start_new.empty()) {
+        // Set X-Session-Chart header if provided (for new session creation)
+        if (!x_session_chart.empty()) {
             vmime::shared_ptr<vmime::headerField> xStartNewField =
-                vmime::headerFieldFactory::getInstance()->create("X-Start-New", x_start_new);
+                vmime::headerFieldFactory::getInstance()->create("X-Session-Chart", x_session_chart);
             header->appendField(xStartNewField);
-            LOG_INFO("163 send_email - set X-Start-New: %s\n", x_start_new.c_str());
+            LOG_INFO("163 send_email - set X-Session-Chart: %s\n", x_session_chart.c_str());
         }
 
         // Handle In-Reply-To and References for conversation threading
@@ -880,7 +882,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             date_str,
             msg_id.c_str(),
             in_reply_to.c_str(),
-            body.c_str(),
+            bodyToSend.c_str(),
             data_dir_.c_str(),
             json_buffer,
             sizeof(json_buffer)
@@ -893,9 +895,9 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                 if (ins_response.contains("uuid")) {
                     std::string email_id = ins_response["uuid"].get<std::string>();
 
-                    // For x_start_new=new, create session locally
+                    // For x_session_chart=new, create session locally
                     std::string sid = session_id;
-                    if (x_start_new == "new" && sid.empty()) {
+                    if (x_session_chart == "new" && sid.empty()) {
                         char create_json[4096];
                         int create_rc = email_create_session(
                             email_.c_str(), subject.c_str(), email_.c_str(),
@@ -908,35 +910,21 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                                 }
                             } catch (...) {}
                         }
-                        LOG_INFO("163 send_email: x_start_new=new, created session_id=%s\n", sid.c_str());
+                        LOG_INFO("163 send_email: x_session_chart=new, created session_id=%s\n", sid.c_str());
                     }
 
-                    // For x_start_new=exchange or reply, find session via in_reply_to
+                    // For x_session_chart=exchange or reply, find session via in_reply_to
                     if (sid.empty() && !in_reply_to.empty()) {
-                        const char* find_sql = "SELECT s.session_id FROM session s "
-                            "JOIN localemail l ON s.email_id = l.id "
-                            "WHERE l.message_id = ? AND l.account = ? LIMIT 1;";
-                        sqlite3* db = email_core_get_db();
-                        if (db) {
-                            sqlite3_stmt* stmt;
-                            if (sqlite3_prepare_v2(db, find_sql, -1, &stmt, NULL) == SQLITE_OK) {
-                                sqlite3_bind_text(stmt, 1, in_reply_to.c_str(), -1, SQLITE_TRANSIENT);
-                                sqlite3_bind_text(stmt, 2, email_.c_str(), -1, SQLITE_TRANSIENT);
-                                if (sqlite3_step(stmt) == SQLITE_ROW) {
-                                    const char* found = (const char*)sqlite3_column_text(stmt, 0);
-                                    if (found) sid = found;
-                                }
-                                sqlite3_finalize(stmt);
-                            }
-                        }
-                        LOG_INFO("163 send_email: x_start_new=%s, found session_id=%s via in_reply_to=%s\n",
-                                 x_start_new.c_str(), sid.c_str(), in_reply_to.c_str());
+                        static SessionRepo s_sessionRepo;
+                        sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
+                        LOG_INFO("163 send_email: x_session_chart=%s, found session_id=%s via in_reply_to=%s\n",
+                                 x_session_chart.c_str(), sid.c_str(), in_reply_to.c_str());
                     }
 
                     LOG_INFO("163 send_email: using session_id=%s\n", sid.c_str());
 
                     char session_buffer[8192];
-                    int encMethod = (x_start_new == "data") ? 1 : 0;
+                    int encMethod = (x_session_chart == "data") ? 1 : 0;
                     int session_result = email_add_email_to_session(
                         sid.c_str(),
                         email_id.c_str(),
@@ -1140,7 +1128,7 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
         fetchAttrs.add("X-Message-ID");
-        fetchAttrs.add("X-Start-New");
+        fetchAttrs.add("X-Session-Chart");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         // Ensure UID is included
@@ -1366,8 +1354,7 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
             std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
             email_obj["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
             email_obj["x_message_id"] = xMsgId;
-            email_obj["x_session_id"] = decodeHeader(getHeader("X-Session-ID"));
-            email_obj["x_start_new"] = decodeHeader(getHeader("X-Start-New"));
+            email_obj["x_session_chart"] = decodeHeader(getHeader("X-Session-Chart"));
             email_obj["to_addr"] = decodeHeader(getHeader("To"));
             
             // Extract service receive time from the first (topmost) Received header
@@ -1399,9 +1386,8 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
             std::string uuid_str = email_obj.contains("uuid") && !email_obj["uuid"].is_null() ? email_obj["uuid"].get<std::string>() : "";
             std::string msg_id_str = email_obj.contains("message_id") && !email_obj["message_id"].is_null() ? email_obj["message_id"].get<std::string>() : "";
             std::string reply_to_str = email_obj.contains("in_reply_to") && !email_obj["in_reply_to"].is_null() ? email_obj["in_reply_to"].get<std::string>() : "";
-            std::string x_session_id_str = email_obj.contains("x_session_id") && !email_obj["x_session_id"].is_null() ? email_obj["x_session_id"].get<std::string>() : "";
-            LOG_INFO("163 fetch_email_headers - uuid=%s, message_id='%s', in_reply_to='%s', x_session_id='%s'\n", 
-                     uuid_str.c_str(), msg_id_str.c_str(), reply_to_str.c_str(), x_session_id_str.c_str());
+            LOG_INFO("163 fetch_email_headers - uuid=%s, message_id='%s', in_reply_to='%s'\n", 
+                     uuid_str.c_str(), msg_id_str.c_str(), reply_to_str.c_str());
 
             if (!email_obj.is_null() && !email_obj.empty() && !email_obj["uuid"].is_null()) {
                 emails_array.push_back(email_obj);
