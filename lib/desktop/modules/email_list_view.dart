@@ -349,6 +349,14 @@ mixin EmailListViewMixin on State<EmailModule> {
     final index = emails.indexWhere((e) => e.uuid == email.uuid);
     final unread = index >= 0 && unreadIndices.contains(index);
 
+    // Find the last message time in the thread
+    String lastMessageTime = email.timestamp;
+    if (thread.isNotEmpty) {
+      final sortedThread = List<native.EmailMessage>.from(thread)
+        ..sort((a, b) => a.rowid.compareTo(b.rowid));
+      lastMessageTime = sortedThread.last.timestamp;
+    }
+
     return GestureDetector(
       onSecondaryTapDown: (details) {
         showMenu<String>(
@@ -407,12 +415,12 @@ mixin EmailListViewMixin on State<EmailModule> {
                     children: [
                       Row(
                         children: [
-                          Expanded(child: Text(displayName, style: TextStyle(fontSize: 13, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          Expanded(child: Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 13, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
                           Text(formatTime(email.timestamp), style: TextStyle(fontSize: 11, color: Colors.grey[500])),
                         ],
                       ),
                       const SizedBox(height: 2),
-                      Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 12, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      Text(displayName, style: TextStyle(fontSize: 12, color: Colors.grey[600]), maxLines: 1, overflow: TextOverflow.ellipsis),
                       const SizedBox(height: 2),
                       Text(previewFor(email), style: TextStyle(fontSize: 11, color: Colors.grey[500]), maxLines: 1, overflow: TextOverflow.ellipsis),
                     ],

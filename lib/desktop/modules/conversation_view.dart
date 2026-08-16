@@ -191,11 +191,28 @@ mixin ConversationViewMixin on State<EmailModule> {
 
   Widget buildAvatar(String name) {
     final displayName = name.isEmpty ? '?' : name[0];
+    final bgColor = avatarColor(name);
     return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(color: avatarColor(name), borderRadius: BorderRadius.circular(16)),
-      child: Center(child: Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500))),
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [bgColor, bgColor.withValues(alpha: 0.75)],
+        ),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: bgColor.withValues(alpha: 0.3),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Center(
+        child: Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600)),
+      ),
     );
   }
 
@@ -521,7 +538,6 @@ mixin ConversationViewMixin on State<EmailModule> {
       ),
       child: Row(
         children: [
-          IconButton(icon: Icon(Icons.emoji_emotions_outlined, size: 24, color: Colors.grey[600]), onPressed: () {}),
           Expanded(
             child: DropTarget(
               onDragDone: (detail) {
@@ -554,27 +570,61 @@ mixin ConversationViewMixin on State<EmailModule> {
                 setState(() => _isDragging = false);
               },
               child: Container(
-                constraints: const BoxConstraints(maxHeight: 160),
+                constraints: const BoxConstraints(maxHeight: 200),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: _isDragging ? const Color(0xFF07C160) : Colors.transparent,
-                    width: 2,
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: _isDragging ? const Color(0xFF07C160) : Colors.grey[300]!,
+                      width: 1,
+                    ),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Theme(
+                        data: Theme.of(context).copyWith(
+                          hoverColor: Colors.transparent,
+                          highlightColor: Colors.transparent,
+                        ),
+                        child: TextField(
+                          controller: replyController,
+                          maxLines: 5,
+                          minLines: 2,
+                          decoration: InputDecoration(
+                            hintText: AppStrings.sendMessageHint,
+                            hintStyle: TextStyle(fontSize: 14, color: Colors.grey[400]),
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4, bottom: 4),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: IconButton(
+                            icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
+                            onPressed: () {},
+                            constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+                            padding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                child: SingleChildScrollView(
-                  child: TextField(
-                    controller: replyController,
-                    maxLines: 3,
-                    minLines: 1,
-                    decoration: InputDecoration(
-                      hintText: AppStrings.sendMessageHint,
-                      hintStyle: TextStyle(fontSize: 14, color: Colors.grey[400]),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                      isDense: true,
-                    ),
                   ),
                 ),
               ),
@@ -809,139 +859,223 @@ mixin ConversationViewMixin on State<EmailModule> {
     }
 
     // Determine if we should show downloading indicator
-    // islocal=0, file not empty: show content + downloading indicator
-    // islocal=1, file not empty: show content only
-    // islocal=0, file empty: show downloading indicator only
-    // islocal=1, file empty: should not happen (downloaded emails should have file)
     bool showDownloadingIndicator = (email.isLocal == 0 && !isDownloading) || isDownloading;
 
+    const bubbleColorMe = Color(0xFF95EC69);
+    const bubbleColorOther = Colors.white;
+    final bubbleColor = isMe ? bubbleColorMe : bubbleColorOther;
+
     return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.only(bottom: 20),
       child: Row(
         mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!isMe) ...[buildAvatar(displayName), const SizedBox(width: 8)],
+          if (!isMe) ...[buildAvatar(displayName), const SizedBox(width: 10)],
           Flexible(
             child: Column(
               crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 if (!isMe)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 4, left: 4),
-                    child: Text(displayName, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+                    padding: const EdgeInsets.only(bottom: 5, left: 2),
+                    child: Text(displayName, style: TextStyle(fontSize: 12, color: Colors.grey[500], fontWeight: FontWeight.w400)),
                   ),
                 if (hasAtt)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 4, left: 4, right: 4),
+                    padding: const EdgeInsets.only(bottom: 5, left: 2, right: 2),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.attach_file, size: 14, color: Colors.grey[500]),
-                        const SizedBox(width: 2),
-                        Text(AppStrings.attachment, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                        Icon(Icons.attach_file, size: 14, color: Colors.grey[400]),
+                        const SizedBox(width: 3),
+                        Text(AppStrings.attachment, style: TextStyle(fontSize: 11, color: Colors.grey[400])),
                       ],
                     ),
                   ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  textDirection: isMe ? TextDirection.rtl : TextDirection.ltr,
-                  children: [
-                    CustomPaint(
-                      size: const Size(8, 14),
-                      painter: _BubbleTailPainter(
-                        color: isMe ? const Color(0xFF95EC69) : Colors.white,
-                        isMe: isMe,
-                      ),
-                    ),
-                    Flexible(
-                      child: Container(
-                        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.5),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: isMe ? const Color(0xFF95EC69) : Colors.white,
-                          borderRadius: BorderRadius.circular(12),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.06),
-                              blurRadius: 4,
-                              offset: const Offset(0, 1),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (bodyText.isNotEmpty)
-                              Text(bodyText, style: const TextStyle(fontSize: 14, height: 1.4, color: Colors.black87)),
-                            if (showDownloadingIndicator)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.grey[400],
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(AppStrings.downloading, style: TextStyle(fontSize: 13, color: Colors.grey[400])),
-                                  ],
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
+                _ChatBubble(
+                  isMe: isMe,
+                  color: bubbleColor,
+                  maxWidth: MediaQuery.of(context).size.width * 0.5,
+                  bodyText: bodyText,
+                  showDownloadingIndicator: showDownloadingIndicator,
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
-                  child: Text(formatTimeShort(email.timestamp), style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+                  padding: const EdgeInsets.only(top: 5, left: 2, right: 2),
+                  child: Text(formatTimeShort(email.timestamp), style: TextStyle(fontSize: 10, color: Colors.grey[400], fontWeight: FontWeight.w300)),
                 ),
               ],
             ),
           ),
-          if (isMe) ...[const SizedBox(width: 8), buildAvatar(displayName)],
+          if (isMe) ...[const SizedBox(width: 10), buildAvatar(displayName)],
         ],
       ),
     );
   }
 }
 
-class _BubbleTailPainter extends CustomPainter {
+class _ChatBubble extends StatelessWidget {
+  final bool isMe;
+  final Color color;
+  final double maxWidth;
+  final String bodyText;
+  final bool showDownloadingIndicator;
+
+  const _ChatBubble({
+    required this.isMe,
+    required this.color,
+    required this.maxWidth,
+    required this.bodyText,
+    required this.showDownloadingIndicator,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const tailWidth = 8.0;
+    const tailHeight = 16.0;
+    const radius = 8.0;
+    const padH = 14.0;
+    const padV = 11.0;
+
+    return LimitedBox(
+      maxWidth: maxWidth + tailWidth + padH * 2,
+      child: CustomPaint(
+        painter: _BubbleShapePainter(
+          color: color,
+          isMe: isMe,
+          tailWidth: tailWidth,
+          tailHeight: tailHeight,
+          radius: radius,
+        ),
+        child: Padding(
+          padding: EdgeInsets.only(
+            left: isMe ? padH : padH + tailWidth,
+            right: isMe ? padH + tailWidth : padH,
+            top: padV,
+            bottom: padV,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (bodyText.isNotEmpty)
+                SelectableText(
+                  bodyText,
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.5,
+                    color: isMe ? const Color(0xFF1A1A1A) : const Color(0xFF333333),
+                  ),
+                ),
+              if (showDownloadingIndicator)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.grey[400],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(AppStrings.downloading, style: TextStyle(fontSize: 13, color: Colors.grey[400])),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BubbleShapePainter extends CustomPainter {
   final Color color;
   final bool isMe;
+  final double tailWidth;
+  final double tailHeight;
+  final double radius;
 
-  _BubbleTailPainter({required this.color, required this.isMe});
+  _BubbleShapePainter({
+    required this.color,
+    required this.isMe,
+    required this.tailWidth,
+    required this.tailHeight,
+    required this.radius,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = color
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
 
+    final shadowPaint = Paint()
+      ..color = Colors.black.withValues(alpha: 0.08)
+      ..style = PaintingStyle.fill
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
+
+    final w = size.width;
+    final h = size.height;
+    final r = radius;
+    final tw = tailWidth;
+    final th = tailHeight;
+
+    // The bubble rect (accounting for tail space on one side)
+    final bubbleLeft = isMe ? tw : 0.0;
+    final bubbleRight = isMe ? w : w - tw;
+    final bubbleTop = 0.0;
+    final bubbleBottom = h;
+
+    // Build the path: rounded rect + triangular tail
     final path = Path();
+
     if (isMe) {
-      path.moveTo(0, 0);
-      path.lineTo(size.width, size.height / 2 - 2);
-      path.lineTo(0, size.height);
-      path.lineTo(2, size.height / 2);
+      // Tail at top-right corner, smooth
+      path.moveTo(bubbleLeft + r, bubbleTop);
+      path.lineTo(bubbleRight - r - th * 0.6, bubbleTop);
+      // Smooth tail curving out to the right and back
+      path.quadraticBezierTo(bubbleRight + tw * 0.3, bubbleTop, bubbleRight + tw, bubbleTop + 3);
+      path.quadraticBezierTo(bubbleRight + tw * 0.4, bubbleTop + r + 4, bubbleRight, bubbleTop + r + 6);
+      path.lineTo(bubbleRight, bubbleBottom - r);
+      path.quadraticBezierTo(bubbleRight, bubbleBottom, bubbleRight - r, bubbleBottom);
+      path.lineTo(bubbleLeft + r, bubbleBottom);
+      path.quadraticBezierTo(bubbleLeft, bubbleBottom, bubbleLeft, bubbleBottom - r);
+      path.lineTo(bubbleLeft, bubbleTop + r);
+      path.quadraticBezierTo(bubbleLeft, bubbleTop, bubbleLeft + r, bubbleTop);
     } else {
-      path.moveTo(size.width, 0);
-      path.lineTo(0, size.height / 2 - 2);
-      path.lineTo(size.width, size.height);
-      path.lineTo(size.width - 2, size.height / 2);
+      // Tail at top-left corner, smooth
+      path.moveTo(bubbleLeft + r, bubbleTop);
+      path.lineTo(bubbleRight - r, bubbleTop);
+      path.quadraticBezierTo(bubbleRight, bubbleTop, bubbleRight, bubbleTop + r);
+      path.lineTo(bubbleRight, bubbleBottom - r);
+      path.quadraticBezierTo(bubbleRight, bubbleBottom, bubbleRight - r, bubbleBottom);
+      path.lineTo(bubbleLeft + r, bubbleBottom);
+      path.quadraticBezierTo(bubbleLeft, bubbleBottom, bubbleLeft, bubbleBottom - r);
+      path.lineTo(bubbleLeft, bubbleTop + r + 6);
+      // Smooth tail curving out to the left and back
+      path.quadraticBezierTo(bubbleLeft - tw * 0.4, bubbleTop + r + 4, bubbleLeft - tw, bubbleTop + 3);
+      path.quadraticBezierTo(bubbleLeft - tw * 0.3, bubbleTop, bubbleLeft + r, bubbleTop);
     }
     path.close();
+
+    // Draw shadow first (slightly offset)
+    canvas.save();
+    canvas.translate(0, 2);
+    canvas.drawPath(path, shadowPaint);
+    canvas.restore();
+
+    // Draw the bubble
     canvas.drawPath(path, paint);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _BubbleShapePainter oldDelegate) =>
+      color != oldDelegate.color || isMe != oldDelegate.isMe;
 }
