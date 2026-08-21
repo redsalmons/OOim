@@ -65,6 +65,7 @@ int email_db_init(const char* path) {
         // Add session_uuid column safely
         sqlite3_exec(g_db, "ALTER TABLE keyinfo ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN message_id TEXT;", NULL, NULL, NULL);
 
         // File transfer tables
         const char* sql_file_transfer = "CREATE TABLE IF NOT EXISTS file_transfer ("
@@ -79,6 +80,7 @@ int email_db_init(const char* path) {
                                         "total_chunks INTEGER NOT NULL,"
                                         "chunk_size INTEGER NOT NULL,"
                                         "status INTEGER DEFAULT 0,"
+                                        "message_id TEXT,"
                                         "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                         "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                         ");";
@@ -249,6 +251,7 @@ int email_db_init(const char* path) {
         // Add session_uuid column safely
         sqlite3_exec(g_db, "ALTER TABLE keyinfo ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN message_id TEXT;", NULL, NULL, NULL);
     }
 
     // Task table for queued email sending
@@ -288,6 +291,7 @@ int email_db_init(const char* path) {
                                     "total_chunks INTEGER NOT NULL,"
                                     "chunk_size INTEGER NOT NULL,"
                                     "status INTEGER DEFAULT 0,"
+                                    "message_id TEXT,"
                                     "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                     "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                     ");";

@@ -875,10 +875,10 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
 
     // For x_session_chart=data, encrypt the body
     if (x_session_chart_str == "data") {
-        char encBody[65536];
-        int encRc = email_prepare_data_body(body_str.c_str(), recipient_str.c_str(), email_.c_str(), sid.c_str(), encBody, sizeof(encBody));
+        std::vector<char> encBody(2 * 1024 * 1024);
+        int encRc = email_prepare_data_body(body_str.c_str(), recipient_str.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
         if (encRc == 0) {
-            body_str = encBody;
+            body_str = encBody.data();
             LOG_INFO("Outlook send_email: encrypted data body, len=%zu\n", body_str.size());
         } else {
             LOG_INFO("Outlook send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);

@@ -608,10 +608,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
                     std::string bodyText = textBody.empty() ? htmlBody : textBody;
 
-                    char decrypted[65536];
-                    int decRc = email_decrypt_data_body(bodyText.c_str(), accountStr.c_str(), decrypted, sizeof(decrypted));
+                    // File chunk messages can be large (512KB chunk -> ~690KB JSON plaintext)
+                    std::vector<char> decrypted(2 * 1024 * 1024);
+                    int decRc = email_decrypt_data_body(bodyText.c_str(), accountStr.c_str(), decrypted.data(), (int)decrypted.size());
                     if (decRc == 0) {
-                        std::string decryptedStr(decrypted);
+                        std::string decryptedStr(decrypted.data());
                         LOG_INFO("[DB] download_pending: data decrypted, plaintext_len=%zu\n", decryptedStr.size());
 
                         // Parse decrypted plaintext to check msg_type
@@ -634,20 +635,17 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 std::string fileMd5 = fileJson.value("file_md5", "");
                                 int totalChunks = fileJson.value("total_chunks", 0);
                                 int chunkSize = fileJson.value("chunk_size", 0);
+                                std::string text = fileJson.value("text", "");
 
-                                // Find session_id for this email
                                 std::string sid;
                                 if (!in_reply_to.empty()) {
-                                    char sidBuf[512];
-                                    sidBuf[0] = '\0';
-                                    email_query_session_by_message_id(in_reply_to.c_str(), accountStr.c_str(), sidBuf, sizeof(sidBuf));
-                                    sid = sidBuf;
+                                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, accountStr);
                                 }
                                 if (sid.empty() && !message_id.empty()) {
-                                    char sidBuf[512];
-                                    sidBuf[0] = '\0';
-                                    email_query_session_by_message_id(message_id.c_str(), accountStr.c_str(), sidBuf, sizeof(sidBuf));
-                                    sid = sidBuf;
+                                    char sidBuf[256];
+                                    if (email_query_session_by_message_id(message_id.c_str(), accountStr.c_str(), sidBuf, sizeof(sidBuf)) == 0) {
+                                        sid = sidBuf;
+                                    }
                                 }
 
                                 // Determine sender from From header
@@ -657,22 +655,14 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 int ftRc = email_file_transfer_receive_file(
                                     fileId.c_str(), sid.c_str(), accountStr.c_str(), sender.c_str(),
                                     fileName.c_str(), fileSize, fileMd5.c_str(),
-                                    totalChunks, chunkSize, ftResult, sizeof(ftResult));
+                                    totalChunks, chunkSize, message_id.c_str(),
+                                    ftResult, sizeof(ftResult));
                                 LOG_INFO("[DB] download_pending: file_transfer_receive_file rc=%d, result=%s\n", ftRc, ftResult);
                             } catch (const std::exception& e) {
                                 LOG_INFO("[DB] download_pending: failed to parse file message: %s\n", e.what());
                             }
 
-                            // Replace eml content with the text from the file message (or placeholder)
-                            {
-                                auto fileJson = json::parse(decryptedStr);
-                                std::string fileText = fileJson.value("text", "");
-                                emlContent.clear();
-                                emlContent += "Content-Type: text/plain; charset=utf-8\r\n";
-                                emlContent += "Content-Transfer-Encoding: 8bit\r\n";
-                                emlContent += "\r\n";
-                                emlContent += fileText.empty() ? "[File transfer metadata]" : fileText;
-                            }
+                            // Do NOT replace emlContent; keep original encrypted .eml so eml_parser can build file cards
 
                         } else if (msgType == "truck") {
                             // File chunk message
@@ -698,12 +688,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 LOG_INFO("[DB] download_pending: failed to parse truck message: %s\n", e.what());
                             }
 
-                            // Replace eml content with a placeholder
-                            emlContent.clear();
-                            emlContent += "Content-Type: text/plain; charset=utf-8\r\n";
-                            emlContent += "Content-Transfer-Encoding: 8bit\r\n";
-                            emlContent += "\r\n";
-                            emlContent += "[File chunk data]";
+                            // Do NOT replace emlContent; keep original encrypted .eml (conversation_view will skip truck messages)
 
                         } else {
                             // Regular text message (backward compatible)
@@ -941,6 +926,94 @@ extern "C" int email_parse_eml(const char* filePath, char* outJson, int outSize)
     } catch (...) {
         snprintf(outJson, outSize, R"({"status":"failed","error":"unknown_exception"})");
         return -6;
+    }
+}
+
+// Helper: extract attachment by index and write to file
+static bool extractAttachmentToFile(vmime::shared_ptr<vmime::bodyPart> part,
+                                     int targetIndex, int& currentIndex,
+                                     const std::string& outputPath) {
+    auto body = part->getBody();
+    vmime::mediaType ct = body->getContentType();
+
+    if (ct.getType() == vmime::mediaTypes::MULTIPART) {
+        auto parts = body->getPartList();
+        for (size_t i = 0; i < parts.size(); i++) {
+            if (extractAttachmentToFile(parts[i], targetIndex, currentIndex, outputPath))
+                return true;
+        }
+        return false;
+    }
+
+    bool isAttachment = false;
+    std::string filename;
+
+    if (part->getHeader()->hasField(vmime::fields::CONTENT_DISPOSITION)) {
+        auto cdf = part->getHeader()->findField<vmime::contentDispositionField>(vmime::fields::CONTENT_DISPOSITION);
+        if (cdf) {
+            auto disp = cdf->getValue<vmime::contentDisposition>();
+            if (disp && disp->getName() != vmime::contentDispositionTypes::INLINE) {
+                isAttachment = true;
+                auto cdfField = vmime::dynamicCast<vmime::contentDispositionField>(cdf);
+                if (cdfField && cdfField->hasFilename()) {
+                    filename = cdfField->getFilename().getBuffer();
+                }
+            }
+        }
+    }
+
+    auto mainType = ct.getType();
+    auto subType = ct.getSubType();
+
+    if (mainType != vmime::mediaTypes::TEXT && !isAttachment) {
+        isAttachment = true;
+    }
+
+    if (!isAttachment) return false;
+
+    if (currentIndex == targetIndex) {
+        std::string data;
+        vmime::utility::outputStreamStringAdapter osa(data);
+        body->getContents()->extract(osa);
+        osa.flush();
+        std::ofstream out(outputPath, std::ios::binary);
+        if (!out.is_open()) return false;
+        out.write(data.data(), (std::streamsize)data.size());
+        out.close();
+        return true;
+    }
+
+    currentIndex++;
+    return false;
+}
+
+extern "C" int email_save_attachment(const char* emlPath, int attachmentIndex, const char* outputPath) {
+    if (!emlPath || !outputPath || attachmentIndex < 0) return -1;
+
+    try {
+        std::ifstream file(emlPath, std::ios::binary);
+        if (!file.is_open()) return -2;
+
+        std::ostringstream oss;
+        oss << file.rdbuf();
+        std::string content = oss.str();
+        file.close();
+
+        vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
+        msg->parse(content);
+
+        int currentIndex = 0;
+        if (extractAttachmentToFile(msg, attachmentIndex, currentIndex, outputPath)) {
+            LOG_INFO("email_save_attachment: saved attachment %d from %s to %s\n",
+                     attachmentIndex, emlPath, outputPath);
+            return 0;
+        }
+        return -3;
+    } catch (const std::exception& e) {
+        LOG_INFO("email_save_attachment: exception: %s\n", e.what());
+        return -4;
+    } catch (...) {
+        return -5;
     }
 }
 

@@ -346,6 +346,9 @@ typedef _EmailCountPendingDart = int Function(Pointer<Utf8>);
 typedef _EmailParseEmlNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailParseEmlDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
+typedef _EmailSaveAttachmentNative = Int32 Function(Pointer<Utf8>, Int32, Pointer<Utf8>);
+typedef _EmailSaveAttachmentDart = int Function(Pointer<Utf8>, int, Pointer<Utf8>);
+
 typedef _EmailDecryptDataBodyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailDecryptDataBodyDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
@@ -494,6 +497,7 @@ final _emailLogWrite = _lib.lookupFunction<_EmailLogWriteNative, _EmailLogWriteD
 final _emailDownloadPending = _lib.lookupFunction<_EmailDownloadPendingNative, _EmailDownloadPendingDart>('email_download_pending_bodies');
 final _emailCountPending = _lib.lookupFunction<_EmailCountPendingNative, _EmailCountPendingDart>('email_count_pending_bodies');
 final _emailParseEml = _lib.lookupFunction<_EmailParseEmlNative, _EmailParseEmlDart>('email_parse_eml');
+final _emailSaveAttachment = _lib.lookupFunction<_EmailSaveAttachmentNative, _EmailSaveAttachmentDart>('email_save_attachment');
 final _emailDecryptDataBody = _lib.lookupFunction<_EmailDecryptDataBodyNative, _EmailDecryptDataBodyDart>('email_decrypt_data_body');
 final _emailUpdateSessionRead = _lib.lookupFunction<_EmailUpdateSessionReadNative, _EmailUpdateSessionReadDart>('email_update_session_read');
 final _emailQuerySessionUnread = _lib.lookupFunction<_EmailQuerySessionUnreadNative, _EmailQuerySessionUnreadDart>('email_query_session_unread');
@@ -1355,6 +1359,19 @@ class EmailCore {
     } finally {
       malloc.free(filePathPtr);
       malloc.free(outJson);
+    }
+  }
+
+  /// Saves an attachment from an EML file to the specified output path.
+  /// Returns 0 on success, negative on error.
+  static int saveAttachment(String emlPath, int attachmentIndex, String outputPath) {
+    final emlPathPtr = emlPath.toNativeUtf8();
+    final outputPathPtr = outputPath.toNativeUtf8();
+    try {
+      return _emailSaveAttachment(emlPathPtr, attachmentIndex, outputPathPtr);
+    } finally {
+      malloc.free(emlPathPtr);
+      malloc.free(outputPathPtr);
     }
   }
 

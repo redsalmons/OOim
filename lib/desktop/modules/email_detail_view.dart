@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
 import 'email_module_base.dart';
@@ -191,17 +193,73 @@ mixin EmailDetailViewMixin on State<EmailModule> {
         if (parsed.hasAttachments)
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.attach_file, size: 18, color: Colors.orange[700]),
-                const SizedBox(width: 4),
-                Text('${parsed.attachments.length} ${AppStrings.attachmentsCount}', style: TextStyle(fontSize: 13, color: Colors.orange[700])),
+                Row(
+                  children: [
+                    Icon(Icons.attach_file, size: 18, color: Colors.orange[700]),
+                    const SizedBox(width: 4),
+                    Text('${parsed.attachments.length} ${AppStrings.attachmentsCount}', style: TextStyle(fontSize: 13, color: Colors.orange[700])),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ...List.generate(parsed.attachments.length, (i) {
+                  final att = parsed.attachments[i];
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      children: [
+                        Icon(Icons.insert_drive_file, size: 16, color: Colors.grey[600]),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(att.filename, style: TextStyle(fontSize: 13), overflow: TextOverflow.ellipsis),
+                        ),
+                        if (att.size > 0)
+                          Text('${(att.size / 1024).toStringAsFixed(1)} KB', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          onPressed: () => _saveAttachment(emlPath, i, att.filename),
+                          icon: Icon(Icons.save_alt, size: 14),
+                          label: Text(AppStrings.isZh ? '另存为' : 'Save As', style: TextStyle(fontSize: 12)),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            minimumSize: const Size(0, 28),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
               ],
             ),
           ),
         SelectableText(bodyText, style: const TextStyle(fontSize: 14, height: 1.6)),
       ],
     );
+  }
+
+  Future<void> _saveAttachment(String emlPath, int index, String filename) async {
+    Directory dir;
+    try {
+      dir = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      dir = Directory('${Platform.environment['HOME']}/Documents');
+    }
+    final saveDir = Directory('${dir.path}/Attachments');
+    if (!saveDir.existsSync()) saveDir.createSync(recursive: true);
+
+    final outputPath = '${saveDir.path}/$filename';
+    final result = native.EmailCore.saveAttachment(emlPath, index, outputPath);
+    if (result == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.isZh ? '已保存到: $outputPath' : 'Saved to: $outputPath'), duration: const Duration(seconds: 2)),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.isZh ? '保存失败 (code: $result)' : 'Save failed (code: $result)'), duration: const Duration(seconds: 2)),
+      );
+    }
   }
 
   Widget _buildAvatar(String name) {

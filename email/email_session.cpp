@@ -52,9 +52,7 @@ extern "C" int email_create_session(const char* account, const char* subject, co
 
     // Generate a unique session_id without inserting into session table
     // The session row will be created later by email_add_email_to_session
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    std::string session_id = "session_" + std::to_string(ms) + "_" + std::to_string(rand() % 10000);
+    std::string session_id = "session_" + std::to_string(rand() % 10000);
     LOG_INFO("[DB] email_create_session: generated session_id=%s\n", session_id.c_str());
 
     if (encrypt_method == 1) {
@@ -302,8 +300,7 @@ extern "C" int email_query_session_index_uuid(const char* sessionId, char* outJs
         return -1;
     }
 
-    int64_t emailId = s_sessionRepo.queryFirstEmailId(sessionId ? sessionId : "");
-    std::string indexUuid = std::to_string(emailId);
+    std::string indexUuid = s_sessionRepo.queryFirstMessageId(sessionId ? sessionId : "");
 
     json response;
     response["status"] = "success";

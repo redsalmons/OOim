@@ -69,6 +69,14 @@ post_install do |installer|
       # Update library paths to use @rpath
       install_name_tool -change /usr/local/lib/libvmime.1.dylib @rpath/libvmime.1.dylib "$DEST_DIR/libemail_core.dylib" 2>/dev/null || true
       install_name_tool -change /opt/homebrew/opt/gsasl/lib/libgsasl.18.dylib @rpath/libgsasl.18.dylib "$DEST_DIR/libemail_core.dylib" 2>/dev/null || true
+
+      # Also copy to Frameworks directory (dart:ffi loads from @rpath which includes Frameworks)
+      cp "$DEST_DIR/libemail_core.dylib" "$FRAMEWORKS_DIR/" 2>/dev/null || true
+
+      # Re-sign all dylibs after install_name_tool modifications (which invalidate signatures)
+      codesign --force --sign - "$DEST_DIR/libemail_core.dylib" 2>/dev/null || true
+      codesign --force --sign - "$FRAMEWORKS_DIR/libemail_core.dylib" 2>/dev/null || true
+      for f in "$FRAMEWORKS_DIR"/*.dylib; do codesign --force --sign - "$f" 2>/dev/null || true; done
     SCRIPT
     phase.always_out_of_date = '1'
     main_project.save

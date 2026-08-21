@@ -30,6 +30,9 @@ public:
     // Query first email_id for a session
     int64_t queryFirstEmailId(const std::string& sessionId);
 
+    // Query first email's message_id for a session
+    std::string queryFirstMessageId(const std::string& sessionId);
+
     // Mark session as read
     bool updateRead(const std::string& sessionId);
 

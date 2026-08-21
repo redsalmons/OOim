@@ -574,10 +574,10 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         // For x_session_chart=data, encrypt the body
         std::string bodyToSend = body;
         if (x_session_chart == "data") {
-            char encBody[65536];
-            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody, sizeof(encBody));
+            std::vector<char> encBody(2 * 1024 * 1024);
+            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
             if (encRc == 0) {
-                bodyToSend = encBody;
+                bodyToSend = encBody.data();
                 LOG_INFO("Gmail send_email: encrypted data body, len=%zu\n", bodyToSend.size());
             } else {
                 LOG_INFO("Gmail send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);

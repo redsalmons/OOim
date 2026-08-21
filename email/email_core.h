@@ -239,6 +239,10 @@ int email_count_pending_bodies(const char* account);
 // Returns 0 on success, negative on error. outJson contains the parsed result.
 int email_parse_eml(const char* filePath, char* outJson, int outSize);
 
+// Save a specific attachment from an EML file to a target path.
+// Returns 0 on success, negative on error.
+int email_save_attachment(const char* emlPath, int attachmentIndex, const char* outputPath);
+
 // Update session isread field to 1 for all emails in a session.
 // Returns 0 on success, negative on error.
 int email_update_session_read(const char* sessionId);
@@ -308,6 +312,7 @@ int email_file_transfer_receive_file(const char* fileId, const char* sessionId,
                                       const char* account, const char* sender,
                                       const char* fileName, long long fileSize,
                                       const char* fileMd5, int totalChunks, int chunkSize,
+                                      const char* messageId,
                                       char* outJson, int outSize);
 
 // Process a received "truck" chunk message (store chunk, auto-reassemble if complete).

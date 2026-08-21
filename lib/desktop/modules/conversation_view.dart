@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
 import 'email_module_base.dart';
@@ -958,12 +959,21 @@ mixin ConversationViewMixin on State<EmailModule> {
 
   Widget buildChatBubble(ThreadItem item, bool isMe) {
     final firstEmail = item.emails.first;
+
+    // Hide all file transfer messages (file metadata and chunks) from conversation
+    if (firstEmail.messageId.startsWith('<file_') ||
+        firstEmail.messageId.startsWith('<truck_')) {
+      return const SizedBox.shrink();
+    }
+
     final displayName = extractName(firstEmail.sender);
 
     String bodyText = '';
     bool hasAtt = false;
     bool isDownloading = firstEmail.file.isEmpty;
     bool showDownloadingIndicator = false;
+    String savedEmlPath = '';
+    List<EmlAttachment> savedAttachments = [];
 
     bool isFileBatch = item.isFileBatch;
     List<FileCardInfo> fileCards = [];
@@ -1005,10 +1015,12 @@ mixin ConversationViewMixin on State<EmailModule> {
       bool isFileMessage = false;
       if (!isDownloading) {
         final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
+        savedEmlPath = emlPath;
         final parsed = parseEmlFile(emlPath, account: email.account);
         bodyText = parsed.textBody;
         hasAtt = parsed.hasAttachments;
         isFileMessage = parsed.isFileMessage;
+        savedAttachments = parsed.attachments;
         if (isFileMessage) {
           fileCards.add(FileCardInfo(
             fileName: parsed.fileName,
@@ -1025,6 +1037,25 @@ mixin ConversationViewMixin on State<EmailModule> {
 
       if (!hasAtt && email.body.isNotEmpty) {
         hasAtt = hasAttachment(email.body);
+      }
+
+      // Fallback: if hasAtt is true (from bodystructure) but savedAttachments is empty
+      // (because isDownloading was true or parser cleared attachments for encrypted messages),
+      // try parsing the EML file directly if it exists on disk.
+      if (hasAtt && savedAttachments.isEmpty && email.file.isNotEmpty) {
+        final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
+        final file = File(emlPath);
+        if (file.existsSync()) {
+          savedEmlPath = emlPath;
+          final parsed = parseEmlFile(emlPath, account: email.account);
+          savedAttachments = parsed.attachments;
+          if (savedAttachments.isEmpty) {
+            // Parser may have cleared attachments for encrypted messages.
+            // Re-parse without account to bypass encrypted-body handling.
+            final rawParsed = parseEmlFile(emlPath);
+            savedAttachments = rawParsed.attachments;
+          }
+        }
       }
 
       showDownloadingIndicator = (email.isLocal == 0 && !isDownloading) || isDownloading;
@@ -1050,7 +1081,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                     padding: const EdgeInsets.only(bottom: 5, left: 2),
                     child: Text(displayName, style: TextStyle(fontSize: 12, color: Colors.grey[500], fontWeight: FontWeight.w400)),
                   ),
-                if (hasAtt)
+                if (hasAtt) ...[
                   Padding(
                     padding: const EdgeInsets.only(bottom: 5, left: 2, right: 2),
                     child: Row(
@@ -1062,6 +1093,35 @@ mixin ConversationViewMixin on State<EmailModule> {
                       ],
                     ),
                   ),
+                  if (savedEmlPath.isNotEmpty && savedAttachments.isNotEmpty)
+                    ...List.generate(savedAttachments.length, (i) {
+                      final att = savedAttachments[i];
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 3, left: 2, right: 2),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.insert_drive_file, size: 14, color: Colors.grey[500]),
+                            const SizedBox(width: 4),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 150),
+                              child: Text(att.filename, style: TextStyle(fontSize: 11, color: Colors.grey[600]), overflow: TextOverflow.ellipsis),
+                            ),
+                            const SizedBox(width: 6),
+                            TextButton.icon(
+                              onPressed: () => _saveAttachment(savedEmlPath, i, att.filename),
+                              icon: Icon(Icons.save_alt, size: 12),
+                              label: Text(AppStrings.isZh ? '另存为' : 'Save As', style: TextStyle(fontSize: 11)),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                minimumSize: const Size(0, 24),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                ],
                 _ChatBubble(
                   isMe: isMe,
                   color: bubbleColor,
@@ -1069,6 +1129,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                   bodyText: bodyText,
                   showDownloadingIndicator: showDownloadingIndicator,
                   fileCards: fileCards,
+                  onSaveFile: (context, fileId, fileName) => _saveFileTransfer(context, fileId, fileName),
                 ),
                 Padding(
                   padding: const EdgeInsets.only(top: 5, left: 2, right: 2),
@@ -1082,6 +1143,62 @@ mixin ConversationViewMixin on State<EmailModule> {
       ),
     );
   }
+
+  Future<void> _saveFileTransfer(BuildContext context, String fileId, String fileName) async {
+    if (fileId.isEmpty) return;
+
+    Directory dir;
+    try {
+      dir = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      dir = Directory('${Platform.environment['HOME']}/Documents');
+    }
+    final saveDir = Directory('${dir.path}/SavedFiles');
+    if (!saveDir.existsSync()) saveDir.createSync(recursive: true);
+
+    final result = native.EmailCore.fileTransferReassemble(fileId, saveDir.path);
+    try {
+      final decoded = jsonDecode(result);
+      if (decoded['status'] == 'success') {
+        final outputPath = decoded['output_path']?.toString() ?? '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppStrings.isZh ? '已保存到: $outputPath' : 'Saved to: $outputPath'), duration: const Duration(seconds: 2)),
+        );
+      } else {
+        final error = decoded['error']?.toString() ?? 'unknown';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppStrings.isZh ? '保存失败: $error' : 'Save failed: $error'), duration: const Duration(seconds: 2)),
+        );
+      }
+    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.isZh ? '保存失败' : 'Save failed'), duration: const Duration(seconds: 2)),
+      );
+    }
+  }
+
+  Future<void> _saveAttachment(String emlPath, int index, String filename) async {
+    Directory dir;
+    try {
+      dir = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      dir = Directory('${Platform.environment['HOME']}/Documents');
+    }
+    final saveDir = Directory('${dir.path}/Attachments');
+    if (!saveDir.existsSync()) saveDir.createSync(recursive: true);
+
+    final outputPath = '${saveDir.path}/$filename';
+    final result = native.EmailCore.saveAttachment(emlPath, index, outputPath);
+    if (result == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.isZh ? '已保存到: $outputPath' : 'Saved to: $outputPath'), duration: const Duration(seconds: 2)),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.isZh ? '保存失败 (code: $result)' : 'Save failed (code: $result)'), duration: const Duration(seconds: 2)),
+      );
+    }
+  }
 }
 
 class _ChatBubble extends StatelessWidget {
@@ -1091,6 +1208,7 @@ class _ChatBubble extends StatelessWidget {
   final String bodyText;
   final bool showDownloadingIndicator;
   final List<FileCardInfo> fileCards;
+  final void Function(BuildContext, String, String)? onSaveFile;
 
   const _ChatBubble({
     required this.isMe,
@@ -1099,6 +1217,7 @@ class _ChatBubble extends StatelessWidget {
     required this.bodyText,
     required this.showDownloadingIndicator,
     this.fileCards = const [],
+    this.onSaveFile,
   });
 
   @override
@@ -1140,7 +1259,7 @@ class _ChatBubble extends StatelessWidget {
                   ),
                 ),
               for (final card in fileCards)
-                _buildFileCard(card, isMe),
+                _buildFileCard(context, card, isMe),
               if (!isMe && showDownloadingIndicator)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
@@ -1167,7 +1286,7 @@ class _ChatBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildFileCard(FileCardInfo card, bool isMe) {
+  Widget _buildFileCard(BuildContext context, FileCardInfo card, bool isMe) {
     final fileName = card.fileName;
     final fileSize = card.fileSize;
     final totalChunks = card.totalChunks;
@@ -1206,7 +1325,9 @@ class _ChatBubble extends StatelessWidget {
       sizeStr = '$fileSize B';
     }
 
-    final bool isComplete = transferStatus == 1;
+    final bool isComplete = isMe
+        ? (transferStatus == 1)
+        : (totalChunks > 0 && receivedChunks >= totalChunks);
     final bool isFailed = transferStatus == 2;
     final double progress = totalChunks > 0 ? receivedChunks / totalChunks : 0.0;
 
@@ -1273,6 +1394,16 @@ class _ChatBubble extends StatelessWidget {
                   Icon(Icons.check_circle, size: 14, color: Colors.green[600]),
                   const SizedBox(width: 4),
                   Text('Received', style: TextStyle(fontSize: 11, color: Colors.green[600])),
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: () => onSaveFile?.call(context, card.fileId, card.fileName),
+                    icon: Icon(Icons.save_alt, size: 14),
+                    label: Text(AppStrings.isZh ? '另存为' : 'Save As', style: TextStyle(fontSize: 11)),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      minimumSize: const Size(0, 24),
+                    ),
+                  ),
                 ],
               ),
             ),

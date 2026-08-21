@@ -136,6 +136,29 @@ int64_t SessionRepo::queryFirstEmailId(const std::string& sessionId) {
     return result;
 }
 
+std::string SessionRepo::queryFirstMessageId(const std::string& sessionId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || sessionId.empty()) return "";
+
+    const char* sql =
+        "SELECT l.message_id FROM session s "
+        "INNER JOIN localemail l ON l.id = s.email_id "
+        "WHERE s.session_id = ? AND l.message_id != '' "
+        "ORDER BY s.id ASC LIMIT 1;";
+    sqlite3_stmt* stmt;
+    std::string result;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* mid = (const char*)sqlite3_column_text(stmt, 0);
+            if (mid) result = mid;
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
 bool SessionRepo::updateRead(const std::string& sessionId) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();

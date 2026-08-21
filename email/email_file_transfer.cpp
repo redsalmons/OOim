@@ -219,10 +219,10 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
         std::string chunkB64 = base64_encode(chunkData.data(), chunkData.size());
         std::string chunkMd5 = compute_md5(std::string(chunkData.begin(), chunkData.end()));
 
-        char truckMsgJson[65536];
+        std::vector<char> truckMsgJson(2 * 1024 * 1024);
         int rc = email_prepare_truck_message(fileId.c_str(), i,
                                              chunkB64.c_str(), chunkMd5.c_str(),
-                                             truckMsgJson, sizeof(truckMsgJson));
+                                             truckMsgJson.data(), (int)truckMsgJson.size());
         if (rc != 0) {
             LOG_INFO("email_file_split_and_send: failed to prepare truck message %d, rc=%d\n", i, rc);
             continue;
@@ -230,7 +230,7 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
 
         std::string msgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" +
                             accountStr.substr(accountStr.find('@') + 1) + ">";
-        s_taskRepo.insert(accountStr, recipientStr, subjectStr, truckMsgJson,
+        s_taskRepo.insert(accountStr, recipientStr, subjectStr, truckMsgJson.data(),
                           inReplyToStr, msgId, msgId, sessionIdStr, "data");
         LOG_INFO("email_file_split_and_send: created chunk %d task, msg_id=%s, chunk_b64_len=%zu\n",
                  i, msgId.c_str(), chunkB64.size());
@@ -261,6 +261,7 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
                                                   const char* account, const char* sender,
                                                   const char* fileName, int64_t fileSize,
                                                   const char* fileMd5, int totalChunks, int chunkSize,
+                                                  const char* messageId,
                                                   char* outJson, int outSize) {
     if (!fileId || !account || !fileName) {
         if (outJson && outSize > 0) {
@@ -270,17 +271,26 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
     }
 
     std::string fileIdStr(fileId);
+    std::string messageIdStr(messageId ? messageId : "");
 
     // Check if already exists
     FileTransferRecord existing;
     if (s_fileTransferRepo.queryByFileId(fileIdStr, existing)) {
         LOG_INFO("email_file_transfer_receive_file: file_id=%s already exists, skipping\n", fileIdStr.c_str());
 
+        // Update message_id if provided (it may be empty for the original send record)
+        if (!messageIdStr.empty()) {
+            s_fileTransferRepo.updateMessageId(fileIdStr, messageIdStr);
+            LOG_INFO("email_file_transfer_receive_file: updated message_id=%s for file_id=%s\n",
+                     messageIdStr.c_str(), fileIdStr.c_str());
+        }
+
         // If this is the sender downloading their own sent file message, mark as complete
         std::string accountStr(account ? account : "");
         std::string senderStr(sender ? sender : "");
-        if (existing.status == 0 && existing.sender == accountStr &&
-            (senderStr == accountStr || senderStr.find(accountStr) != std::string::npos)) {
+        if (!accountStr.empty() &&
+            existing.sender == accountStr &&
+            senderStr == accountStr) {
             LOG_INFO("email_file_transfer_receive_file: sender %s downloading own sent message, updating status to complete\n", accountStr.c_str());
             s_fileTransferRepo.updateStatus(fileIdStr, 1);
         }
@@ -306,6 +316,7 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
     rec.fileMd5 = fileMd5 ? fileMd5 : "";
     rec.totalChunks = totalChunks;
     rec.chunkSize = chunkSize;
+    rec.messageId = messageIdStr;
     rec.status = 0;
 
     if (!s_fileTransferRepo.insertFileTransfer(rec)) {
@@ -316,8 +327,8 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
         return -2;
     }
 
-    LOG_INFO("email_file_transfer_receive_file: created record for file_id=%s, name=%s, chunks=%d\n",
-             fileIdStr.c_str(), fileName, totalChunks);
+    LOG_INFO("email_file_transfer_receive_file: created record for file_id=%s, name=%s, chunks=%d, message_id=%s\n",
+             fileIdStr.c_str(), fileName, totalChunks, messageIdStr.c_str());
 
     if (outJson && outSize > 0) {
         json resp;
@@ -458,6 +469,7 @@ extern "C" int email_file_transfer_query(const char* fileId, char* outJson, int 
     resp["chunk_size"] = rec.chunkSize;
     resp["transfer_status"] = rec.status;
     resp["received_chunks"] = receivedCount;
+    resp["message_id"] = rec.messageId;
     resp["created_at"] = rec.createdAt;
     resp["updated_at"] = rec.updatedAt;
 
@@ -484,6 +496,7 @@ extern "C" int email_file_transfer_query_pending(const char* account, char* outJ
         item["total_chunks"] = rec.totalChunks;
         item["received_chunks"] = receivedCount;
         item["transfer_status"] = rec.status;
+        item["message_id"] = rec.messageId;
         item["created_at"] = rec.createdAt;
         arr.push_back(item);
     }

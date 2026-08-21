@@ -17,6 +17,7 @@ struct FileTransferRecord {
     int totalChunks = 0;
     int chunkSize = 0;
     int status = 0;  // 0=pending, 1=complete, 2=failed
+    std::string messageId;
     std::string createdAt;
     std::string updatedAt;
 };
@@ -38,6 +39,9 @@ public:
 
     // Query file_transfer by file_id. Returns true if found.
     bool queryByFileId(const std::string& fileId, FileTransferRecord& out);
+
+    // Update message_id for a file_transfer record.
+    bool updateMessageId(const std::string& fileId, const std::string& messageId);
 
     // Query pending (status=0) file_transfers for an account.
     std::vector<FileTransferRecord> queryPendingByAccount(const std::string& account);
