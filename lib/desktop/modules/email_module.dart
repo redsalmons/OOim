@@ -130,6 +130,17 @@ class EmailModuleState extends State<EmailModule>
         }
       }
     });
+
+    // Periodically refresh conversation view for file transfer progress updates
+    Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_isConversationView) {
+        setState(() {});
+      }
+    });
   }
 
   Future<void> _initPaths() async {

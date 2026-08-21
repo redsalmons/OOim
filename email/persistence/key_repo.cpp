@@ -7,9 +7,7 @@
 
 // --- code table ---
 
-bool KeyRepo::upsertCode(const std::string& account, const std::string& pubkey,
-    const std::string& secretkey, const std::string& keypassword) {
-
+bool KeyRepo::upsertCode(const std::string& account, const std::string& pubkey, const std::string& secretkey, const std::string& sessionUuid) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
     if (!db || account.empty()) return false;
@@ -17,11 +15,12 @@ bool KeyRepo::upsertCode(const std::string& account, const std::string& pubkey,
     std::string identify = compute_md5(pubkey);
 
     // Check if record exists
-    const char* check_sql = "SELECT id FROM code WHERE account = ?;";
+    const char* check_sql = "SELECT id FROM code WHERE account = ? AND session_uuid = ?;";
     sqlite3_stmt* check_stmt;
     bool exists = false;
     if (sqlite3_prepare_v2(db, check_sql, -1, &check_stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(check_stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(check_stmt, 2, sessionUuid.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(check_stmt) == SQLITE_ROW) {
             exists = true;
         }
@@ -29,30 +28,57 @@ bool KeyRepo::upsertCode(const std::string& account, const std::string& pubkey,
     }
 
     if (exists) {
-        const char* sql = "UPDATE code SET pubkey = ?, secretkey = ?, identify = ?, keypassword = ? WHERE account = ?;";
+        const char* sql = "UPDATE code SET pubkey = ?, secretkey = ?, identify = ? WHERE account = ? AND session_uuid = ?;";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
         sqlite3_bind_text(stmt, 1, pubkey.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, secretkey.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, identify.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, keypassword.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, account.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, account.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, sessionUuid.c_str(), -1, SQLITE_TRANSIENT);
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return rc == SQLITE_DONE;
     } else {
-        const char* sql = "INSERT INTO code (account, pubkey, secretkey, identify, keypassword) VALUES (?, ?, ?, ?, ?);";
+        const char* sql = "INSERT INTO code (account, pubkey, secretkey, identify, session_uuid) VALUES (?, ?, ?, ?, ?);";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
         sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, pubkey.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, secretkey.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 4, identify.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, keypassword.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, sessionUuid.c_str(), -1, SQLITE_TRANSIENT);
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return rc == SQLITE_DONE;
     }
+}
+
+std::string KeyRepo::queryPubkeyByAccountAndSession(const std::string& account, const std::string& sessionUuid) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return "";
+
+    if (!sessionUuid.empty()) {
+        const char* sql = "SELECT pubkey FROM code WHERE account = ? AND session_uuid = ? ORDER BY id DESC LIMIT 1;";
+        sqlite3_stmt* stmt;
+        std::string result;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, sessionUuid.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* pub = (const char*)sqlite3_column_text(stmt, 0);
+                if (pub) result = pub;
+            }
+            sqlite3_finalize(stmt);
+        }
+        if (!result.empty()) {
+            return result;
+        }
+    }
+
+    // Fallback to latest pubkey if not found by session
+    return queryPubkeyByAccount(account);
 }
 
 std::string KeyRepo::queryPubkeyByAccount(const std::string& account) {
@@ -123,20 +149,20 @@ CodeRecord KeyRepo::queryCodeByIdentify(const std::string& identify) {
 // --- keyinfo table ---
 
 bool KeyRepo::insertKeyInfo(const std::string& pub, const std::string& key,
-    const std::string& password, int sessionId, const std::string& account) {
+    const std::string& password, const std::string& sessionUuid, const std::string& account) {
 
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
     if (!db) return false;
 
-    const char* sql = "INSERT INTO keyinfo (pub, key, password, session_id, account) VALUES (?, ?, ?, ?, ?);";
+    const char* sql = "INSERT INTO keyinfo (pub, key, password, session_uuid, account) VALUES (?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
 
     sqlite3_bind_text(stmt, 1, pub.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, password.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 4, sessionId);
+    sqlite3_bind_text(stmt, 4, sessionUuid.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, account.c_str(), -1, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(stmt);
@@ -186,6 +212,32 @@ bool KeyRepo::queryPrivateKeyByAccountAndMd5(const std::string& account,
                 found = true;
                 break;
             }
+        }
+        sqlite3_finalize(stmt);
+    }
+    return found;
+}
+
+bool KeyRepo::queryKeyInfoBySession(const std::string& sessionUuid,
+    std::string& outPubkey, std::string& outPrivPem, std::string& outKeyPassword) {
+
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "SELECT pub, key, password FROM keyinfo WHERE session_uuid = ? AND key != '' ORDER BY id DESC LIMIT 1;";
+    sqlite3_stmt* stmt;
+    bool found = false;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, sessionUuid.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* pub = (const char*)sqlite3_column_text(stmt, 0);
+            const char* key = (const char*)sqlite3_column_text(stmt, 1);
+            const char* pwd = (const char*)sqlite3_column_text(stmt, 2);
+            if (pub) outPubkey = pub;
+            if (key) outPrivPem = key;
+            if (pwd) outKeyPassword = pwd;
+            found = true;
         }
         sqlite3_finalize(stmt);
     }

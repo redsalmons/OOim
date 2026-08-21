@@ -845,10 +845,38 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
     LOG_INFO("Outlook send_email: account_type=%s, to=%s, subject=%s\n",
             account_type_.c_str(), recipient_str.c_str(), subject_str.c_str());
 
+    // Resolve session ID early for potential body encryption
+    std::string sid = session_id_str;
+    if (x_session_chart_str == "new" && sid.empty()) {
+        char create_json[4096];
+        int create_rc = email_create_session(
+            email_.c_str(), subject_str.c_str(), email_.c_str(),
+            message_id_str.c_str(), 0, create_json, sizeof(create_json));
+        if (create_rc == 0) {
+            try {
+                auto resp = nlohmann::json::parse(create_json);
+                if (resp.value("status", "") == "success") {
+                    sid = resp.value("session_id", "");
+                }
+            } catch (...) {}
+        }
+        LOG_INFO("Outlook send_email_via_graph_api: x_session_chart=new, created session_id=%s\n", sid.c_str());
+    }
+
+    // For exchange or reply, find session via in_reply_to
+    if (sid.empty() && !in_reply_to_str.empty()) {
+        static SessionRepo s_sessionRepo;
+        sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to_str, email_);
+        LOG_INFO("Outlook send_email_via_graph_api: x_session_chart=%s, found session_id=%s via in_reply_to=%s\n",
+                 x_session_chart_str.c_str(), sid.c_str(), in_reply_to_str.c_str());
+    }
+
+    LOG_INFO("Outlook send_email_via_graph_api: using session_id=%s\n", sid.c_str());
+
     // For x_session_chart=data, encrypt the body
     if (x_session_chart_str == "data") {
         char encBody[65536];
-        int encRc = email_prepare_data_body(body_str.c_str(), recipient_str.c_str(), email_.c_str(), encBody, sizeof(encBody));
+        int encRc = email_prepare_data_body(body_str.c_str(), recipient_str.c_str(), email_.c_str(), sid.c_str(), encBody, sizeof(encBody));
         if (encRc == 0) {
             body_str = encBody;
             LOG_INFO("Outlook send_email: encrypted data body, len=%zu\n", body_str.size());
@@ -1073,8 +1101,16 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
             if (response.contains("uuid")) {
                 std::string email_id = response["uuid"].get<std::string>();
                 
-                // For x_session_chart=new, create session locally
+                // For exchange or reply, find session via in_reply_to
                 std::string sid = session_id;
+                if (sid.empty() && !in_reply_to.empty()) {
+                    static SessionRepo s_sessionRepo;
+                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
+                    LOG_INFO("Outlook send_email_via_graph_api: found session_id=%s via in_reply_to=%s\n",
+                             sid.c_str(), in_reply_to.c_str());
+                }
+
+                // For x_session_chart=new, create session locally
                 if (x_session_chart == "new" && sid.empty()) {
                     char create_json[4096];
                     int create_rc = email_create_session(
@@ -1089,14 +1125,6 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                         } catch (...) {}
                     }
                     LOG_INFO("Outlook send_email_via_graph_api: x_session_chart=new, created session_id=%s\n", sid.c_str());
-                }
-
-                // For exchange or reply, find session via in_reply_to
-                if (sid.empty() && !in_reply_to.empty()) {
-                    static SessionRepo s_sessionRepo;
-                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
-                    LOG_INFO("Outlook send_email_via_graph_api: found session_id=%s via in_reply_to=%s\n",
-                             sid.c_str(), in_reply_to.c_str());
                 }
 
                 LOG_INFO("Outlook send_email_via_graph_api: using session_id=%s\n", sid.c_str());

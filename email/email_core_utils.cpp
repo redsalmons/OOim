@@ -248,6 +248,52 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
     return result;
 }
 
+// Verify signature with ECC public key
+bool verify_with_ecc_public_key(const std::string& pubPem, const std::string& data, const std::string& signatureB64) {
+    BIO* bio = BIO_new_mem_buf(pubPem.data(), (int)pubPem.size());
+    if (!bio) return false;
+
+    EVP_PKEY* pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    if (!pkey) {
+        LOG_INFO("verify_with_ecc_public_key: failed to load public key\n");
+        return false;
+    }
+
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    if (EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pkey) != 1) {
+        LOG_INFO("verify_with_ecc_public_key: DigestVerifyInit failed\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    if (EVP_DigestVerifyUpdate(mdctx, data.data(), data.size()) != 1) {
+        LOG_INFO("verify_with_ecc_public_key: DigestVerifyUpdate failed\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    std::vector<uint8_t> sig = base64_decode(signatureB64);
+    int ret = EVP_DigestVerifyFinal(mdctx, sig.data(), sig.size());
+    
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(pkey);
+
+    if (ret == 1) {
+        return true;
+    } else {
+        LOG_INFO("verify_with_ecc_public_key: DigestVerifyFinal failed or invalid signature\n");
+        return false;
+    }
+}
+
 // ECC encrypt with public key (ECIES-like: generate ECDH shared secret, use as AES key)
 std::string ecc_encrypt_with_public_key(const std::string& pubPem, const std::string& plaintext) {
     if (pubPem.empty() || plaintext.empty()) return "";
@@ -543,12 +589,13 @@ static std::string extract_email_addr(const std::string& input) {
 }
 
 // Prepare encrypted data body for x_start_new=data messages
-extern "C" int email_prepare_data_body(const char* plaintext, const char* recipients, const char* sender, char* outJson, int outSize) {
+extern "C" int email_prepare_data_body(const char* plaintext, const char* recipients, const char* sender, const char* sessionUuid, char* outJson, int outSize) {
     if (!plaintext || !recipients || !outJson || outSize <= 0) return -1;
 
     std::string textStr(plaintext);
     std::string recipientsStr(recipients);
     std::string senderStr(sender ? sender : "");
+    std::string sessionUuidStr(sessionUuid ? sessionUuid : "");
 
     // Generate 12-char random password
     std::string aesPassword = generate_random_password(12);
@@ -604,7 +651,7 @@ extern "C" int email_prepare_data_body(const char* plaintext, const char* recipi
         if (acct.empty()) continue;
 
         // Look up pubkey from code table
-        std::string pubPem = s_keyRepo.queryPubkeyByAccount(acct);
+        std::string pubPem = s_keyRepo.queryPubkeyByAccountAndSession(acct, sessionUuidStr);
 
         if (pubPem.empty()) {
             LOG_INFO("email_prepare_data_body: no pubkey for account=%s, skipping\n", acct.c_str());

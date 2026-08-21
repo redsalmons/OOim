@@ -543,11 +543,39 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         builder.setSubject(vmime::text(subject, vmime::charset("UTF-8")));
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
 
+        // Resolve session ID early for potential body encryption
+        std::string sid = session_id;
+        if (x_session_chart == "new" && sid.empty()) {
+            char create_json[4096];
+            int create_rc = email_create_session(
+                email_.c_str(), subject.c_str(), email_.c_str(),
+                message_id.c_str(), 0, create_json, sizeof(create_json));
+            if (create_rc == 0) {
+                try {
+                    auto resp = nlohmann::json::parse(create_json);
+                    if (resp.value("status", "") == "success") {
+                        sid = resp.value("session_id", "");
+                    }
+                } catch (...) {}
+            }
+            LOG_INFO("Gmail send_email: x_session_chart=new, created session_id=%s\n", sid.c_str());
+        }
+
+        // For exchange or reply, find session via in_reply_to
+        if (sid.empty() && !in_reply_to.empty()) {
+            static SessionRepo s_sessionRepo;
+            sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
+            LOG_INFO("Gmail send_email: x_session_chart=%s, found session_id=%s via in_reply_to=%s\n",
+                     x_session_chart.c_str(), sid.c_str(), in_reply_to.c_str());
+        }
+
+        LOG_INFO("Gmail send_email: using session_id=%s\n", sid.c_str());
+
         // For x_session_chart=data, encrypt the body
         std::string bodyToSend = body;
         if (x_session_chart == "data") {
             char encBody[65536];
-            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), encBody, sizeof(encBody));
+            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody, sizeof(encBody));
             if (encRc == 0) {
                 bodyToSend = encBody;
                 LOG_INFO("Gmail send_email: encrypted data body, len=%zu\n", bodyToSend.size());
@@ -617,34 +645,6 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                 nlohmann::json ins_response = nlohmann::json::parse(json_buffer);
                 if (ins_response.contains("uuid")) {
                     std::string email_id = ins_response["uuid"].get<std::string>();
-
-                    // For x_session_chart=new, create session locally
-                    std::string sid = session_id;
-                    if (x_session_chart == "new" && sid.empty()) {
-                        char create_json[4096];
-                        int create_rc = email_create_session(
-                            email_.c_str(), subject.c_str(), email_.c_str(),
-                            message_id.c_str(), 0, create_json, sizeof(create_json));
-                        if (create_rc == 0) {
-                            try {
-                                auto resp = nlohmann::json::parse(create_json);
-                                if (resp.value("status", "") == "success") {
-                                    sid = resp.value("session_id", "");
-                                }
-                            } catch (...) {}
-                        }
-                        LOG_INFO("Gmail send_email: x_session_chart=new, created session_id=%s\n", sid.c_str());
-                    }
-
-                    // For exchange or reply, find session via in_reply_to
-                    if (sid.empty() && !in_reply_to.empty()) {
-                        static SessionRepo s_sessionRepo;
-                        sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
-                        LOG_INFO("Gmail send_email: found session_id=%s via in_reply_to=%s\n",
-                                 sid.c_str(), in_reply_to.c_str());
-                    }
-
-                    LOG_INFO("Gmail send_email: using session_id=%s\n", sid.c_str());
 
                     char session_buffer[8192];
                     int encMethod = (x_session_chart == "data") ? 1 : 0;

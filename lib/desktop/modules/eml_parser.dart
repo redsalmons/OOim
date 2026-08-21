@@ -8,12 +8,28 @@ class EmlParsedContent {
   final String htmlBody;
   final List<EmlAttachment> attachments;
   final bool hasAttachments;
+  final bool isFileMessage;
+  final String fileName;
+  final int fileSize;
+  final String fileId;
+  final String batchId;
+  final int totalChunks;
+  final int receivedChunks;
+  final int transferStatus; // 0=pending, 1=complete, 2=failed
 
   EmlParsedContent({
     this.textBody = '',
     this.htmlBody = '',
     this.attachments = const [],
     this.hasAttachments = false,
+    this.isFileMessage = false,
+    this.fileName = '',
+    this.fileSize = 0,
+    this.fileId = '',
+    this.batchId = '',
+    this.totalChunks = 0,
+    this.receivedChunks = 0,
+    this.transferStatus = 0,
   });
 }
 
@@ -73,16 +89,71 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
                 final rc = native.EmailCore.decryptDataBody(textBody, account, outBuf, 65536);
                 native.EmailCore.logWrite('[EML] decryptDataBody rc=$rc, account=$account');
                 if (rc == 0) {
-                  textBody = outBuf.toDartString();
+                  final decryptedText = outBuf.toDartString();
                   native.EmailCore.logWrite('[EML] decrypt success');
+                  // Check if decrypted content is a file/truck JSON message
+                  try {
+                    final decryptedJson = jsonDecode(decryptedText);
+                    if (decryptedJson is Map && decryptedJson.containsKey('msg_type')) {
+                      final msgType = decryptedJson['msg_type'] as String? ?? '';
+                      if (msgType == 'file') {
+                        textBody = decryptedJson['text'] as String? ?? '';
+                        final fId = decryptedJson['file_id'] as String? ?? '';
+                        final fName = decryptedJson['file_name'] as String? ?? '';
+                        final fSize = decryptedJson['file_size'] as int? ?? 0;
+                        final fChunks = decryptedJson['total_chunks'] as int? ?? 0;
+                        final fBatchId = decryptedJson['batch_id'] as String? ?? '';
+                        // Query transfer status from native
+                        int receivedChunks = 0;
+                        int transferStatus = 0;
+                        if (fId.isNotEmpty) {
+                          try {
+                            final statusJson = native.EmailCore.fileTransferQuery(fId);
+                            final statusDecoded = jsonDecode(statusJson);
+                            if (statusDecoded['status'] == 'success') {
+                              receivedChunks = statusDecoded['received_chunks'] as int? ?? 0;
+                              transferStatus = statusDecoded['transfer_status'] as int? ?? 0;
+                            }
+                          } catch (_) {}
+                        }
+                        final result = EmlParsedContent(
+                          textBody: textBody.isNotEmpty ? textBody : '',
+                          htmlBody: '',
+                          attachments: [],
+                          hasAttachments: false,
+                          isFileMessage: true,
+                          fileName: fName,
+                          fileSize: fSize,
+                          fileId: fId,
+                          batchId: fBatchId,
+                          totalChunks: fChunks,
+                          receivedChunks: receivedChunks,
+                          transferStatus: transferStatus,
+                        );
+                        _emlCache[cacheKey] = result;
+                        return result;
+                      } else if (msgType == 'truck') {
+                        textBody = '[File chunk data]';
+                      } else {
+                        textBody = decryptedText;
+                      }
+                    } else {
+                      textBody = decryptedText;
+                    }
+                  } catch (_) {
+                    // Not JSON, use as-is
+                    textBody = decryptedText;
+                  }
                 } else {
                   native.EmailCore.logWrite('[EML] decrypt failed, rc=$rc');
+                  textBody = '[Decryption failed]';
                 }
               } finally {
                 malloc.free(outBuf);
               }
             } else {
               native.EmailCore.logWrite('[EML] decrypt skipped: account is null or empty');
+              textBody = '[Decryption failed]';
             }
           } else {
             // exchange or new type - just extract the text field

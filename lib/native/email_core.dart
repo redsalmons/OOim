@@ -389,6 +389,19 @@ typedef _EmailTaskProcessPendingDart = int Function(int, Pointer<Utf8>, Pointer<
 typedef _EmailMigrateIslocalNative = Int32 Function();
 typedef _EmailMigrateIslocalDart = int Function();
 
+// File transfer operations
+typedef _EmailFileSplitAndSendNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFileSplitAndSendDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _EmailFileTransferQueryNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFileTransferQueryDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _EmailFileTransferQueryPendingNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFileTransferQueryPendingDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _EmailFileTransferReassembleNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFileTransferReassembleDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
 // ---------------------------------------------------------------------------
 // Library loading
 // ---------------------------------------------------------------------------
@@ -496,6 +509,11 @@ final _emailTaskMarkFailed = _lib.lookupFunction<_EmailTaskMarkFailedNative, _Em
 final _emailTaskProcessPending = _lib.lookupFunction<_EmailTaskProcessPendingNative, _EmailTaskProcessPendingDart>('email_task_process_pending');
 
 final _emailMigrateIslocal = _lib.lookupFunction<_EmailMigrateIslocalNative, _EmailMigrateIslocalDart>('email_migrate_islocal');
+
+final _emailFileSplitAndSend = _lib.lookupFunction<_EmailFileSplitAndSendNative, _EmailFileSplitAndSendDart>('email_file_split_and_send');
+final _emailFileTransferQuery = _lib.lookupFunction<_EmailFileTransferQueryNative, _EmailFileTransferQueryDart>('email_file_transfer_query');
+final _emailFileTransferQueryPending = _lib.lookupFunction<_EmailFileTransferQueryPendingNative, _EmailFileTransferQueryPendingDart>('email_file_transfer_query_pending');
+final _emailFileTransferReassemble = _lib.lookupFunction<_EmailFileTransferReassembleNative, _EmailFileTransferReassembleDart>('email_file_transfer_reassemble');
 
 // ---------------------------------------------------------------------------
 // Idiomatic Dart data classes
@@ -1498,6 +1516,88 @@ class EmailCore {
   /// Migration: Update islocal for existing emails. Returns 0 on success, negative on error.
   static int migrateIslocal() {
     return _emailMigrateIslocal();
+  }
+
+  /// Splits a file into chunks and creates send tasks for file metadata + each chunk.
+  /// Returns JSON with file_id and metadata on success.
+  static String fileSplitAndSend({
+    required String filePath,
+    required String fileName,
+    required String account,
+    required String recipient,
+    String sessionId = '',
+    String inReplyTo = '',
+    String subject = '',
+    String text = '',
+    String batchId = '',
+  }) {
+    final filePathPtr = filePath.toNativeUtf8();
+    final fileNamePtr = fileName.toNativeUtf8();
+    final accountPtr = account.toNativeUtf8();
+    final recipientPtr = recipient.toNativeUtf8();
+    final sessionIdPtr = sessionId.toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
+    final subjectPtr = subject.toNativeUtf8();
+    final textPtr = text.toNativeUtf8();
+    final batchIdPtr = batchId.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      _emailFileSplitAndSend(filePathPtr, fileNamePtr, accountPtr, recipientPtr,
+                              sessionIdPtr, inReplyToPtr, subjectPtr, textPtr, batchIdPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(filePathPtr);
+      malloc.free(fileNamePtr);
+      malloc.free(accountPtr);
+      malloc.free(recipientPtr);
+      malloc.free(sessionIdPtr);
+      malloc.free(inReplyToPtr);
+      malloc.free(subjectPtr);
+      malloc.free(textPtr);
+      malloc.free(batchIdPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Queries file transfer status by file_id. Returns JSON string.
+  static String fileTransferQuery(String fileId) {
+    final fileIdPtr = fileId.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      _emailFileTransferQuery(fileIdPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(fileIdPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Queries all pending file transfers for an account. Returns JSON string.
+  static String fileTransferQueryPending(String account) {
+    final accountPtr = account.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _emailFileTransferQueryPending(accountPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Reassembles a file from received chunks. Returns JSON string with result.
+  static String fileTransferReassemble(String fileId, String outputDir) {
+    final fileIdPtr = fileId.toNativeUtf8();
+    final outputDirPtr = outputDir.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      _emailFileTransferReassemble(fileIdPtr, outputDirPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(fileIdPtr);
+      malloc.free(outputDirPtr);
+      malloc.free(outJson);
+    }
   }
 }
 

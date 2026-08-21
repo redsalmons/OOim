@@ -11,7 +11,6 @@ struct CodeRecord {
     std::string pubkey;
     std::string secretkey;
     std::string identify;
-    std::string keypassword;
 };
 
 struct KeyInfoRecord {
@@ -28,7 +27,10 @@ public:
 
     // Upsert code record by account (check exists -> update or insert)
     bool upsertCode(const std::string& account, const std::string& pubkey,
-        const std::string& secretkey, const std::string& keypassword);
+        const std::string& secretkey, const std::string& sessionUuid);
+
+    // Query pubkey by account and session
+    std::string queryPubkeyByAccountAndSession(const std::string& account, const std::string& sessionUuid);
 
     // Query latest pubkey from code table by account
     std::string queryPubkeyByAccount(const std::string& account);
@@ -43,7 +45,7 @@ public:
 
     // Insert keyinfo record
     bool insertKeyInfo(const std::string& pub, const std::string& key,
-        const std::string& password, int sessionId, const std::string& account);
+        const std::string& password, const std::string& sessionUuid, const std::string& account);
 
     // Query latest pubkey from keyinfo by account
     std::string queryLatestPubkeyFromKeyInfo(const std::string& account);
@@ -53,6 +55,11 @@ public:
     bool queryPrivateKeyByAccountAndMd5(const std::string& account,
         const std::string& expectedMd5,
         std::string& outPrivPem, std::string& outKeyPassword);
+
+    // Query full keypair from keyinfo by session_uuid
+    // Returns true if found, fills pubkey, privPem and keyPassword
+    bool queryKeyInfoBySession(const std::string& sessionUuid,
+        std::string& outPubkey, std::string& outPrivPem, std::string& outKeyPassword);
 };
 
 #endif // PERSISTENCE_KEY_REPO_H

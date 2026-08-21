@@ -248,7 +248,7 @@ int email_update_session_read(const char* sessionId);
 int email_query_session_unread(const char* sessionId);
 
 // Code table operations (store peer's ECC public key, secretkey, and identify=MD5(pubkey))
-int email_code_insert(const char* account, const char* pubkey, const char* secretkey, const char* keypassword);
+int email_code_insert(const char* account, const char* pubkey, const char* secretkey, const char* sessionUuid);
 int email_code_query_by_account(const char* account, char* outJson, int outSize);
 int email_code_query_by_identify(const char* identify, char* outJson, int outSize);
 
@@ -258,7 +258,7 @@ int email_create_session(const char* account, const char* subject, const char* m
 // Prepare encrypted data body for x_start_new=data messages.
 // Takes plaintext, recipient list (comma-separated), and sender account.
 // Returns encrypted JSON body string in outJson.
-int email_prepare_data_body(const char* plaintext, const char* recipients, const char* sender, char* outJson, int outSize);
+int email_prepare_data_body(const char* plaintext, const char* recipients, const char* sender, const char* sessionUuid, char* outJson, int outSize);
 
 // Decrypt data body for x_start_new=data messages.
 // Takes encrypted JSON body and the account doing the decryption.
@@ -279,6 +279,52 @@ int email_task_process_pending(int configIndex, const char* account, char* outJs
 
 // Migration: Update islocal for existing emails
 int email_migrate_islocal();
+
+// --- File Transfer Protocol ---
+
+// Prepare file metadata message JSON (plaintext for encryption).
+int email_prepare_file_message(const char* fileId, const char* fileName,
+                                long long fileSize, const char* fileMd5,
+                                int totalChunks, int chunkSize,
+                                const char* text, const char* batchId,
+                                char* outJson, int outSize);
+
+// Prepare chunk message JSON (plaintext for encryption).
+int email_prepare_truck_message(const char* fileId, int chunkIndex,
+                                 const char* chunkDataB64, const char* chunkMd5,
+                                 char* outJson, int outSize);
+
+// Split a file into chunks and create send tasks for file metadata + each chunk.
+// Returns 0 on success. outJson contains file_id and metadata.
+int email_file_split_and_send(const char* filePath, const char* fileName,
+                               const char* account, const char* recipient,
+                               const char* sessionId, const char* inReplyTo,
+                               const char* subject, const char* text,
+                               const char* batchId,
+                               char* outJson, int outSize);
+
+// Process a received "file" metadata message (create file_transfer record on receiver).
+int email_file_transfer_receive_file(const char* fileId, const char* sessionId,
+                                      const char* account, const char* sender,
+                                      const char* fileName, long long fileSize,
+                                      const char* fileMd5, int totalChunks, int chunkSize,
+                                      char* outJson, int outSize);
+
+// Process a received "truck" chunk message (store chunk, auto-reassemble if complete).
+int email_file_transfer_receive_truck(const char* fileId, int chunkIndex,
+                                       const char* chunkDataB64, const char* chunkMd5,
+                                       const char* outputDir,
+                                       char* outJson, int outSize);
+
+// Query file transfer status by file_id.
+int email_file_transfer_query(const char* fileId, char* outJson, int outSize);
+
+// Query all pending file transfers for an account.
+int email_file_transfer_query_pending(const char* account, char* outJson, int outSize);
+
+// Reassemble a file from received chunks (manual trigger).
+int email_file_transfer_reassemble(const char* fileId, const char* outputDir,
+                                    char* outJson, int outSize);
 
 #ifdef __cplusplus
 }

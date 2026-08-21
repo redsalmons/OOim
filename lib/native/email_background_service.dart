@@ -388,7 +388,7 @@ void childEntryPoint(SendPort supervisorPort) {
 
       while (!shouldStop) {
         // Block and wait for new email notification (timeout 300s inside C++)
-        final idleResult = native.EmailCore.idleWait(configIndex!, folder!, 300);
+        final idleResult = native.EmailCore.idleWait(configIndex!, folder!, 60);
 
         if (shouldStop) break;
 

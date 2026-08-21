@@ -68,8 +68,8 @@ extern "C" int email_create_session(const char* account, const char* subject, co
             return -1;
         }
 
-        // Store keypair in keyinfo with session_id=0 (will be updated when session row is created)
-        if (!s_keyRepo.insertKeyInfo(pubPem, privPem, password, 0, account ? account : "")) {
+        // Store keypair in keyinfo with session_uuid
+        if (!s_keyRepo.insertKeyInfo(pubPem, privPem, password, session_id, account ? account : "")) {
             LOG_INFO("[DB] email_create_session: keyinfo insert failed\n");
             if (outJson && outSize > 0) {
                 snprintf(outJson, outSize, R"({"status":"failed","error":"keyinfo_insert_failed"})");
@@ -77,6 +77,11 @@ extern "C" int email_create_session(const char* account, const char* subject, co
             return -1;
         }
         LOG_INFO("[DB] email_create_session: ECC key pair generated and inserted into keyinfo\n");
+
+        // Also store own pubkey in code table for this session (code holds all members' pubkeys)
+        if (!s_keyRepo.upsertCode(account ? account : "", pubPem, "", session_id)) {
+            LOG_INFO("[DB] email_create_session: failed to insert own pubkey into code table\n");
+        }
 
         // Generate 12-char session password and sign it with the private key
         std::string sessionPassword = generate_random_password(12);
@@ -208,6 +213,9 @@ extern "C" int email_insert_sent_email(const char* account, const char* sender, 
                 emlFile << "To: " << (to_addr ? to_addr : "") << "\n";
                 emlFile << "Subject: " << (subject ? subject : "") << "\n";
                 emlFile << "Date: " << (date ? date : "") << "\n";
+                emlFile << "Mime-Version: 1.0\n";
+                emlFile << "Content-Type: text/plain; charset=UTF-8\n";
+                emlFile << "Content-Transfer-Encoding: 8bit\n";
                 if (in_reply_to && *in_reply_to) {
                     emlFile << "In-Reply-To: " << in_reply_to << "\n";
                 }

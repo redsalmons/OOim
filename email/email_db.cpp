@@ -62,6 +62,48 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_code_identify ON code(identify);", NULL, NULL, &err);
         if (err) sqlite3_free(err);
 
+        // Add session_uuid column safely
+        sqlite3_exec(g_db, "ALTER TABLE keyinfo ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
+
+        // File transfer tables
+        const char* sql_file_transfer = "CREATE TABLE IF NOT EXISTS file_transfer ("
+                                        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                        "file_id TEXT NOT NULL UNIQUE,"
+                                        "session_id TEXT,"
+                                        "account TEXT NOT NULL,"
+                                        "sender TEXT,"
+                                        "file_name TEXT NOT NULL,"
+                                        "file_size INTEGER NOT NULL,"
+                                        "file_md5 TEXT,"
+                                        "total_chunks INTEGER NOT NULL,"
+                                        "chunk_size INTEGER NOT NULL,"
+                                        "status INTEGER DEFAULT 0,"
+                                        "created_at TEXT DEFAULT (datetime('now','localtime')),"
+                                        "updated_at TEXT DEFAULT (datetime('now','localtime'))"
+                                        ");";
+        sqlite3_exec(g_db, sql_file_transfer, NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_session ON file_transfer(session_id);", NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+
+        const char* sql_file_chunk = "CREATE TABLE IF NOT EXISTS file_chunk ("
+                                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                     "file_id TEXT NOT NULL,"
+                                     "chunk_index INTEGER NOT NULL,"
+                                     "chunk_data TEXT,"
+                                     "chunk_md5 TEXT,"
+                                     "status INTEGER DEFAULT 0,"
+                                     "received_at TEXT DEFAULT (datetime('now','localtime')),"
+                                     "UNIQUE(file_id, chunk_index)"
+                                     ");";
+        sqlite3_exec(g_db, sql_file_chunk, NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_chunk_file_id ON file_chunk(file_id);", NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+
         return 0;
     }
 
@@ -203,8 +245,10 @@ int email_db_init(const char* path) {
         if (err_msg) sqlite3_free(err_msg);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_code_identify ON code(identify);", NULL, NULL, &err_msg);
         if (err_msg) sqlite3_free(err_msg);
-        sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN keypassword TEXT;", NULL, NULL, &err_msg);
-        if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
+        // Add session_uuid column safely
+        sqlite3_exec(g_db, "ALTER TABLE keyinfo ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
     }
 
     // Task table for queued email sending
@@ -228,6 +272,52 @@ int email_db_init(const char* path) {
         sqlite3_free(err_msg);
     } else {
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_task_account_status ON task(account, status);", NULL, NULL, &err_msg);
+        if (err_msg) sqlite3_free(err_msg);
+    }
+
+    // File transfer tables
+    const char* sql_file_transfer = "CREATE TABLE IF NOT EXISTS file_transfer ("
+                                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                    "file_id TEXT NOT NULL UNIQUE,"
+                                    "session_id TEXT,"
+                                    "account TEXT NOT NULL,"
+                                    "sender TEXT,"
+                                    "file_name TEXT NOT NULL,"
+                                    "file_size INTEGER NOT NULL,"
+                                    "file_md5 TEXT,"
+                                    "total_chunks INTEGER NOT NULL,"
+                                    "chunk_size INTEGER NOT NULL,"
+                                    "status INTEGER DEFAULT 0,"
+                                    "created_at TEXT DEFAULT (datetime('now','localtime')),"
+                                    "updated_at TEXT DEFAULT (datetime('now','localtime'))"
+                                    ");";
+    rc = sqlite3_exec(g_db, sql_file_transfer, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_INFO("SQL error (file_transfer): %s\n", err_msg);
+        sqlite3_free(err_msg);
+    } else {
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err_msg);
+        if (err_msg) sqlite3_free(err_msg);
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_session ON file_transfer(session_id);", NULL, NULL, &err_msg);
+        if (err_msg) sqlite3_free(err_msg);
+    }
+
+    const char* sql_file_chunk = "CREATE TABLE IF NOT EXISTS file_chunk ("
+                                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                 "file_id TEXT NOT NULL,"
+                                 "chunk_index INTEGER NOT NULL,"
+                                 "chunk_data TEXT,"
+                                 "chunk_md5 TEXT,"
+                                 "status INTEGER DEFAULT 0,"
+                                 "received_at TEXT DEFAULT (datetime('now','localtime')),"
+                                 "UNIQUE(file_id, chunk_index)"
+                                 ");";
+    rc = sqlite3_exec(g_db, sql_file_chunk, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_INFO("SQL error (file_chunk): %s\n", err_msg);
+        sqlite3_free(err_msg);
+    } else {
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_chunk_file_id ON file_chunk(file_id);", NULL, NULL, &err_msg);
         if (err_msg) sqlite3_free(err_msg);
     }
 
@@ -357,15 +447,15 @@ int email_query_thread_roots(const char* account, char* outJson, int outSize) {
 }
 
 // Insert a record into the code table (upsert by account)
-extern "C" int email_code_insert(const char* account, const char* pubkey, const char* secretkey, const char* keypassword) {
+extern "C" int email_code_insert(const char* account, const char* pubkey, const char* secretkey, const char* sessionUuid) {
     if (!account) return -1;
 
     std::string pubkeyStr = pubkey ? pubkey : "";
     std::string secretkeyStr = secretkey ? secretkey : "";
-    std::string keypasswordStr = keypassword ? keypassword : "";
+    std::string sessionUuidStr = sessionUuid ? sessionUuid : "";
     std::string identify = compute_md5(pubkeyStr);
 
-    if (!s_keyRepo.upsertCode(account, pubkeyStr, secretkeyStr, keypasswordStr)) {
+    if (!s_keyRepo.upsertCode(account, pubkeyStr, secretkeyStr, sessionUuidStr)) {
         LOG_INFO("email_code_insert: failed for account=%s\n", account);
         return -3;
     }

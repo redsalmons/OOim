@@ -71,6 +71,7 @@ add_library(email_core STATIC
     email_imap.cpp
     email_oemailim.cpp
     email_contact.cpp
+    email_file_transfer.cpp
     email_core.h
     email_core_common.h
     persistence/db_connection.cpp
@@ -79,6 +80,7 @@ add_library(email_core STATIC
     persistence/key_repo.cpp
     persistence/contact_repo.cpp
     persistence/task_repo.cpp
+    persistence/file_transfer_repo.cpp
 )
 
 # Email core shared library (used by Flutter via dart:ffi)
@@ -90,6 +92,7 @@ add_library(email_core_shared SHARED
     email_imap.cpp
     email_oemailim.cpp
     email_contact.cpp
+    email_file_transfer.cpp
     email_core.h
     email_core_common.h
     persistence/db_connection.cpp
@@ -98,6 +101,7 @@ add_library(email_core_shared SHARED
     persistence/key_repo.cpp
     persistence/contact_repo.cpp
     persistence/task_repo.cpp
+    persistence/file_transfer_repo.cpp
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core

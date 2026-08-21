@@ -9,6 +9,34 @@ import 'email_module_base.dart';
 import 'eml_parser.dart';
 import '../../i18n/app_strings.dart';
 
+class FileCardInfo {
+  final String fileName;
+  final int fileSize;
+  final String fileId;
+  final int totalChunks;
+  final int receivedChunks;
+  final int transferStatus;
+
+  FileCardInfo({
+    this.fileName = '',
+    this.fileSize = 0,
+    this.fileId = '',
+    this.totalChunks = 0,
+    this.receivedChunks = 0,
+    this.transferStatus = 0,
+  });
+}
+
+class ThreadItem {
+  final List<native.EmailMessage> emails;
+  final bool isFileBatch;
+
+  ThreadItem.single(native.EmailMessage email)
+      : emails = [email],
+        isFileBatch = false;
+  ThreadItem.batch(this.emails) : isFileBatch = true;
+}
+
 // Helper function to parse EmailMessage from JSON
 native.EmailMessage _emailMessageFromJson(Map<String, dynamic> json) {
   return native.EmailMessage(
@@ -257,9 +285,10 @@ mixin ConversationViewMixin on State<EmailModule> {
   }
 
   List<native.EmailMessage> buildConversationThread(String sessionId) {
-    // Only show emails from INBOX folder
+    // Only show emails from INBOX folder, exclude truck (file chunk) messages
     final thread = emails
         .where((e) => e.sessionId == sessionId && e.folder == 'INBOX')
+        .where((e) => !e.messageId.startsWith('<truck_'))
         .toList();
 
     // Sort by rowid (insertion order = chronological)
@@ -268,6 +297,53 @@ mixin ConversationViewMixin on State<EmailModule> {
     });
 
     return thread;
+  }
+
+  List<ThreadItem> buildMergedThread(String sessionId) {
+    // Clear EML cache to ensure fresh file transfer status on each rebuild
+    clearEmlCache();
+    final thread = buildConversationThread(sessionId);
+    final items = <ThreadItem>[];
+
+    int i = 0;
+    while (i < thread.length) {
+      final email = thread[i];
+
+      // Check if this is a file message by parsing its EML
+      String? batchId;
+      if (email.file.isNotEmpty) {
+        final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
+        final parsed = parseEmlFile(emlPath, account: email.account);
+        if (parsed.isFileMessage && parsed.batchId.isNotEmpty) {
+          batchId = parsed.batchId;
+        }
+      }
+
+      if (batchId != null) {
+        // Collect all consecutive file messages with the same batch_id
+        final batchEmails = <native.EmailMessage>[email];
+        int j = i + 1;
+        while (j < thread.length) {
+          final nextEmail = thread[j];
+          if (nextEmail.file.isEmpty) break;
+          final nextPath = '$emailDataPath/${nextEmail.account}/${nextEmail.file}.eml';
+          final nextParsed = parseEmlFile(nextPath, account: nextEmail.account);
+          if (nextParsed.isFileMessage && nextParsed.batchId == batchId) {
+            batchEmails.add(nextEmail);
+            j++;
+          } else {
+            break;
+          }
+        }
+        items.add(ThreadItem.batch(batchEmails));
+        i = j;
+      } else {
+        items.add(ThreadItem.single(email));
+        i++;
+      }
+    }
+
+    return items;
   }
 
   List<native.EmailMessage> buildConversationThreadLegacy(String rootMessageId) {
@@ -319,6 +395,7 @@ mixin ConversationViewMixin on State<EmailModule> {
 
   Widget buildConversationDetail() {
     final thread = buildConversationThread(selectedConversationMessageId!);
+    final mergedThread = buildMergedThread(selectedConversationMessageId!);
 
     // Get title from thread root or from session_members
     String conversationTitle = AppStrings.noSubject;
@@ -387,12 +464,13 @@ mixin ConversationViewMixin on State<EmailModule> {
                           )
                         : ListView.builder(
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                            itemCount: thread.length,
+                            itemCount: mergedThread.length,
                             itemBuilder: (context, index) {
-                              final email = thread[index];
-                              final senderEmail = _extractEmailAddress(email.sender);
-                              final isMe = senderEmail == email.recipient.toLowerCase();
-                              return buildChatBubble(email, isMe);
+                              final item = mergedThread[index];
+                              final firstEmail = item.emails.first;
+                              final senderEmail = _extractEmailAddress(firstEmail.sender);
+                              final isMe = senderEmail == firstEmail.recipient.toLowerCase();
+                              return buildChatBubble(item, isMe);
                             },
                           ),
                   ),
@@ -771,17 +849,46 @@ mixin ConversationViewMixin on State<EmailModule> {
     final replyMessageId = '<${DateTime.now().millisecondsSinceEpoch}.${DateTime.now().microsecond}@${accountEmail.split('@').last}>';
 
     // Insert send task into task table for async processing
-    final taskId = native.EmailCore.taskInsert(
-      account: accountEmail,
-      recipient: recipientStr,
-      subject: subject,
-      body: bodyText,
-      inReplyTo: inReplyTo,
-      messageId: replyMessageId,
-      xMessageId: replyMessageId,
-      sessionId: sessionId ?? '',
-      xSessionChart: 'data',
-    );
+    // If files are attached, use fileSplitAndSend which carries text in the file message
+    // If no files, use regular taskInsert for plain text
+    int taskId = 0;
+    bool fileSendMode = droppedFiles.isNotEmpty;
+
+    if (fileSendMode) {
+      // Generate a batch_id shared by all files in this send
+      final batchId = 'batch_${DateTime.now().millisecondsSinceEpoch}';
+      // Send each file via fileSplitAndSend (text is embedded in the first file message)
+      for (int i = 0; i < droppedFiles.length; i++) {
+        final file = droppedFiles[i];
+        // Only include text on the first file message
+        final textForThisFile = (i == 0) ? bodyText : '';
+        final resultJson = native.EmailCore.fileSplitAndSend(
+          filePath: file.path,
+          fileName: file.name,
+          account: accountEmail,
+          recipient: recipientStr,
+          sessionId: sessionId ?? '',
+          inReplyTo: inReplyTo,
+          subject: subject,
+          text: textForThisFile,
+          batchId: batchId,
+        );
+        native.EmailCore.logWrite('[SEND] fileSplitAndSend result: $resultJson');
+      }
+      taskId = 1; // Indicate success
+    } else {
+      taskId = native.EmailCore.taskInsert(
+        account: accountEmail,
+        recipient: recipientStr,
+        subject: subject,
+        body: bodyText,
+        inReplyTo: inReplyTo,
+        messageId: replyMessageId,
+        xMessageId: replyMessageId,
+        sessionId: sessionId ?? '',
+        xSessionChart: 'data',
+      );
+    }
 
     () async {
       bool ok = false;
@@ -825,41 +932,103 @@ mixin ConversationViewMixin on State<EmailModule> {
     }();
   }
 
-  Widget buildChatBubble(native.EmailMessage email, bool isMe) {
-    final displayName = extractName(email.sender);
+  List<FileCardInfo> _refreshFileCardStatuses(List<FileCardInfo> cards) {
+    return cards.map((card) {
+      if (card.fileId.isEmpty) return card;
+      try {
+        final statusJson = native.EmailCore.fileTransferQuery(card.fileId);
+        native.EmailCore.logWrite('[FILE_STATUS] fileId=${card.fileId}, query=$statusJson');
+        final decoded = jsonDecode(statusJson);
+        if (decoded['status'] == 'success') {
+          return FileCardInfo(
+            fileName: card.fileName,
+            fileSize: card.fileSize,
+            fileId: card.fileId,
+            totalChunks: card.totalChunks,
+            receivedChunks: decoded['received_chunks'] as int? ?? card.receivedChunks,
+            transferStatus: decoded['transfer_status'] as int? ?? card.transferStatus,
+          );
+        }
+      } catch (e) {
+        native.EmailCore.logWrite('[FILE_STATUS] error querying ${card.fileId}: $e');
+      }
+      return card;
+    }).toList();
+  }
 
-    // Determine body content and attachment status
+  Widget buildChatBubble(ThreadItem item, bool isMe) {
+    final firstEmail = item.emails.first;
+    final displayName = extractName(firstEmail.sender);
+
     String bodyText = '';
     bool hasAtt = false;
-    bool isDownloading = email.file.isEmpty;
+    bool isDownloading = firstEmail.file.isEmpty;
+    bool showDownloadingIndicator = false;
 
-    native.EmailCore.logWrite('[Conversation] email.uuid=${email.uuid}, email.file="${email.file}", email.isLocal=${email.isLocal}, email.recipient=${email.recipient}');
+    bool isFileBatch = item.isFileBatch;
+    List<FileCardInfo> fileCards = [];
 
-    if (!isDownloading) {
-      // Read and parse the .eml file using file field
-      final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
-      native.EmailCore.logWrite('[Conversation] emlPath=$emlPath');
-      final parsed = parseEmlFile(emlPath, account: email.account);
-      bodyText = parsed.textBody;
-      hasAtt = parsed.hasAttachments;
-
-      // Log if islocal=1 and file is empty (should not happen)
-      if (email.isLocal == 1 && email.file.isEmpty) {
-        native.EmailCore.logWrite('[Conversation] islocal=1, file empty - unexpected state');
+    if (isFileBatch) {
+      // Parse all emails in the batch to collect file cards
+      String batchText = '';
+      for (int i = 0; i < item.emails.length; i++) {
+        final email = item.emails[i];
+        if (email.file.isEmpty) continue;
+        final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
+        final parsed = parseEmlFile(emlPath, account: email.account);
+        if (parsed.isFileMessage) {
+          // Text comes from the first file message that has non-empty text
+          if (batchText.isEmpty && parsed.textBody.isNotEmpty) {
+            batchText = parsed.textBody;
+          }
+          fileCards.add(FileCardInfo(
+            fileName: parsed.fileName,
+            fileSize: parsed.fileSize,
+            fileId: parsed.fileId,
+            totalChunks: parsed.totalChunks,
+            receivedChunks: parsed.receivedChunks,
+            transferStatus: parsed.transferStatus,
+          ));
+        }
       }
-    }
+      // Re-query fresh transfer status (bypass EML cache)
+      fileCards = _refreshFileCardStatuses(fileCards);
+      bodyText = batchText;
+      // If any file is still downloading, show indicator
+      showDownloadingIndicator = item.emails.any((e) => e.file.isEmpty || e.isLocal == 0);
+    } else {
+      final email = firstEmail;
+      isDownloading = email.file.isEmpty;
 
-    // Also check bodystructure for attachment info if not from eml
-    if (!hasAtt && email.body.isNotEmpty) {
-      hasAtt = hasAttachment(email.body);
-    }
+      native.EmailCore.logWrite('[Conversation] email.uuid=${email.uuid}, email.file="${email.file}", email.isLocal=${email.isLocal}, email.recipient=${email.recipient}');
 
-    if (bodyText.isEmpty && !isDownloading) {
-      bodyText = '';
-    }
+      bool isFileMessage = false;
+      if (!isDownloading) {
+        final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
+        final parsed = parseEmlFile(emlPath, account: email.account);
+        bodyText = parsed.textBody;
+        hasAtt = parsed.hasAttachments;
+        isFileMessage = parsed.isFileMessage;
+        if (isFileMessage) {
+          fileCards.add(FileCardInfo(
+            fileName: parsed.fileName,
+            fileSize: parsed.fileSize,
+            fileId: parsed.fileId,
+            totalChunks: parsed.totalChunks,
+            receivedChunks: parsed.receivedChunks,
+            transferStatus: parsed.transferStatus,
+          ));
+        }
+      }
+      // Re-query fresh transfer status (bypass EML cache)
+      fileCards = _refreshFileCardStatuses(fileCards);
 
-    // Determine if we should show downloading indicator
-    bool showDownloadingIndicator = (email.isLocal == 0 && !isDownloading) || isDownloading;
+      if (!hasAtt && email.body.isNotEmpty) {
+        hasAtt = hasAttachment(email.body);
+      }
+
+      showDownloadingIndicator = (email.isLocal == 0 && !isDownloading) || isDownloading;
+    }
 
     const bubbleColorMe = Color(0xFF95EC69);
     const bubbleColorOther = Colors.white;
@@ -899,10 +1068,11 @@ mixin ConversationViewMixin on State<EmailModule> {
                   maxWidth: MediaQuery.of(context).size.width * 0.5,
                   bodyText: bodyText,
                   showDownloadingIndicator: showDownloadingIndicator,
+                  fileCards: fileCards,
                 ),
                 Padding(
                   padding: const EdgeInsets.only(top: 5, left: 2, right: 2),
-                  child: Text(formatTimeShort(email.timestamp), style: TextStyle(fontSize: 10, color: Colors.grey[400], fontWeight: FontWeight.w300)),
+                  child: Text(formatTimeShort(firstEmail.timestamp), style: TextStyle(fontSize: 10, color: Colors.grey[400], fontWeight: FontWeight.w300)),
                 ),
               ],
             ),
@@ -920,6 +1090,7 @@ class _ChatBubble extends StatelessWidget {
   final double maxWidth;
   final String bodyText;
   final bool showDownloadingIndicator;
+  final List<FileCardInfo> fileCards;
 
   const _ChatBubble({
     required this.isMe,
@@ -927,6 +1098,7 @@ class _ChatBubble extends StatelessWidget {
     required this.maxWidth,
     required this.bodyText,
     required this.showDownloadingIndicator,
+    this.fileCards = const [],
   });
 
   @override
@@ -967,7 +1139,9 @@ class _ChatBubble extends StatelessWidget {
                     color: isMe ? const Color(0xFF1A1A1A) : const Color(0xFF333333),
                   ),
                 ),
-              if (showDownloadingIndicator)
+              for (final card in fileCards)
+                _buildFileCard(card, isMe),
+              if (!isMe && showDownloadingIndicator)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
                   child: Row(
@@ -989,6 +1163,163 @@ class _ChatBubble extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildFileCard(FileCardInfo card, bool isMe) {
+    final fileName = card.fileName;
+    final fileSize = card.fileSize;
+    final totalChunks = card.totalChunks;
+    final receivedChunks = card.receivedChunks;
+    final transferStatus = card.transferStatus;
+
+    final ext = fileName.split('.').last.toLowerCase();
+    IconData fileIcon;
+    Color iconColor;
+    if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext)) {
+      fileIcon = Icons.image;
+      iconColor = Colors.blue[600]!;
+    } else if (['pdf'].contains(ext)) {
+      fileIcon = Icons.picture_as_pdf;
+      iconColor = Colors.red[600]!;
+    } else if (['doc', 'docx'].contains(ext)) {
+      fileIcon = Icons.description;
+      iconColor = Colors.blue[800]!;
+    } else if (['xls', 'xlsx'].contains(ext)) {
+      fileIcon = Icons.table_chart;
+      iconColor = Colors.green[800]!;
+    } else if (['zip', 'rar', '7z', 'tar', 'gz'].contains(ext)) {
+      fileIcon = Icons.folder_zip;
+      iconColor = Colors.orange[700]!;
+    } else {
+      fileIcon = Icons.insert_drive_file;
+      iconColor = Colors.grey[600]!;
+    }
+
+    String sizeStr;
+    if (fileSize >= 1024 * 1024) {
+      sizeStr = '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';
+    } else if (fileSize >= 1024) {
+      sizeStr = '${(fileSize / 1024).toStringAsFixed(1)} KB';
+    } else {
+      sizeStr = '$fileSize B';
+    }
+
+    final bool isComplete = transferStatus == 1;
+    final bool isFailed = transferStatus == 2;
+    final double progress = totalChunks > 0 ? receivedChunks / totalChunks : 0.0;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.grey[300]!, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(fileIcon, size: 28, color: iconColor),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      fileName,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      sizeStr,
+                      style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (!isMe && !isComplete && !isFailed && totalChunks > 0) ...[
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: progress,
+                backgroundColor: Colors.grey[300],
+                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF07C160)),
+                minHeight: 4,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              '$receivedChunks / $totalChunks',
+              style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+            ),
+          ],
+          if (!isMe && isComplete)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.check_circle, size: 14, color: Colors.green[600]),
+                  const SizedBox(width: 4),
+                  Text('Received', style: TextStyle(fontSize: 11, color: Colors.green[600])),
+                ],
+              ),
+            ),
+          if (!isMe && isFailed)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.error_outline, size: 14, color: Colors.red[600]),
+                  const SizedBox(width: 4),
+                  Text('Failed', style: TextStyle(fontSize: 11, color: Colors.red[600])),
+                ],
+              ),
+            ),
+          if (isMe && !isComplete && !isFailed)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.grey[500],
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text('Sending...', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                ],
+              ),
+            ),
+          if (isMe && isComplete)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.check_circle, size: 14, color: Colors.green[600]),
+                  const SizedBox(width: 4),
+                  Text('Sent', style: TextStyle(fontSize: 11, color: Colors.green[600])),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }

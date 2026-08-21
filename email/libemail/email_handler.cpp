@@ -129,11 +129,16 @@ int EmailHandler::OpenNewEmail(const std::string& email_id) {
     // Determine provider type from config.type
     if (target_config.type == "163.com" || target_config.type == "emailType163" ||
         target_config.type == "qq.com" || target_config.type == "emailTypeQQ") {
+        
+        bool isQQ = (target_config.type == "qq.com" || target_config.type == "emailTypeQQ");
+        std::string defaultSmtp = isQQ ? "smtp.qq.com" : "smtp.163.com";
+        std::string defaultImap = isQQ ? "imap.qq.com" : "imap.163.com";
+        
         provider = oemailim::EmailProvider::EMAIL_PROVIDER_163;
         email = std::make_shared<EmailComm::Email163>(
-            target_config.smtp_server.empty() ? "smtp.163.com" : target_config.smtp_server,
+            target_config.smtp_server.empty() ? defaultSmtp : target_config.smtp_server,
             target_config.smtp_port > 0 ? target_config.smtp_port : 465,
-            target_config.imap_server.empty() ? "imap.163.com" : target_config.imap_server,
+            target_config.imap_server.empty() ? defaultImap : target_config.imap_server,
             target_config.imap_port > 0 ? target_config.imap_port : 993
         );
         delegate = std::make_shared<EmailComm::EmailOpt163Impl>(g_instance);
@@ -251,11 +256,16 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
     // Determine provider type from config.type
     if (config.type == "163.com" || config.type == "emailType163" ||
         config.type == "qq.com" || config.type == "emailTypeQQ") {
+        
+        bool isQQ = (config.type == "qq.com" || config.type == "emailTypeQQ");
+        std::string defaultSmtp = isQQ ? "smtp.qq.com" : "smtp.163.com";
+        std::string defaultImap = isQQ ? "imap.qq.com" : "imap.163.com";
+        
         provider = oemailim::EmailProvider::EMAIL_PROVIDER_163;
         email = std::make_shared<EmailComm::Email163>(
-            config.smtp_server.empty() ? "imap.163.com" : config.smtp_server,
+            config.smtp_server.empty() ? defaultSmtp : config.smtp_server,
             config.smtp_port > 0 ? config.smtp_port : 465,
-            config.imap_server.empty() ? "imap.163.com" : config.imap_server,
+            config.imap_server.empty() ? defaultImap : config.imap_server,
             config.imap_port > 0 ? config.imap_port : 993
         );
         delegate = std::make_shared<EmailComm::EmailOpt163Impl>(g_instance);

@@ -15,6 +15,7 @@ std::string generate_email_id(const char* type);
 bool generate_ecc_keypair(std::string& outPubPem, std::string& outPrivPem, const std::string& password);
 std::string generate_random_password(int length);
 std::string sign_with_ecc_private_key(const std::string& privPem, const std::string& keyPassword, const std::string& data);
+bool verify_with_ecc_public_key(const std::string& pubPem, const std::string& data, const std::string& signatureB64);
 std::string base64_encode(const unsigned char* data, size_t len);
 std::vector<uint8_t> base64_decode(const std::string& encoded);
 std::string compute_md5(const std::string& input);
