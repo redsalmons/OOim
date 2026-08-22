@@ -3,6 +3,7 @@
 #include "logger.h"
 #include "email_handler_c.h"
 #include "email_handler.h"
+#include "x_mailer.h"
 #include "email_opt_163_impl.h"
 #include "email_opt_outlook_impl.h"
 #include "email_opt_gmail_impl.h"
@@ -274,16 +275,20 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             message_id = decodeHeader(getHeader("Message-ID"));
             in_reply_to = decodeHeader(getHeader("In-Reply-To"));
 
-            std::string x_message_id = decodeHeader(getHeader("X-Message-ID"));
-            x_session_chart = decodeHeader(getHeader("X-Session-Chart"));
+            x_session_chart = decodeHeader(getHeader("X-Mailer"));
             eml_subject = decodeHeader(getHeader("Subject"));
             eml_to = decodeHeader(getHeader("To"));
             eml_from = decodeHeader(getHeader("From"));
-            if (!x_message_id.empty()) {
-                message_id = x_message_id;
-            }
+            std::string eml_cc = decodeHeader(getHeader("Cc"));
+            std::string eml_bcc = decodeHeader(getHeader("Bcc"));
 
-            LOG_INFO("[DB] download_pending: parsed message_id='%s', in_reply_to='%s', x_session_chart='%s' from %s\n",
+            // Extract contacts from To, Cc, Bcc into addressbook
+            if (!eml_to.empty()) addressbook_extract_from_header(eml_to.c_str());
+            if (!eml_cc.empty()) addressbook_extract_from_header(eml_cc.c_str());
+            if (!eml_bcc.empty()) addressbook_extract_from_header(eml_bcc.c_str());
+            if (!eml_from.empty()) addressbook_extract_from_header(eml_from.c_str());
+
+            LOG_INFO("[DB] download_pending: parsed message_id='%s', in_reply_to='%s', x_mailer='%s' from %s\n",
                      message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str(), filePath.c_str());
         } catch (const std::exception& e) {
             LOG_INFO("[DB] download_pending: failed to parse .eml file: %s\n", e.what());
@@ -291,11 +296,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
         DownloadedEml de{pe.uuid, pe.folder, filePath, emlContent, message_id, in_reply_to, x_session_chart, eml_subject, eml_to, eml_from};
 
-        if (x_session_chart == "new") {
+        if (x_session_chart == XMailer::NEW_SESSION) {
             newEmls.push_back(de);
-        } else if (x_session_chart == "exchange") {
+        } else if (x_session_chart == XMailer::EXCHANGE) {
             exchangeEmls.push_back(de);
-        } else if (x_session_chart == "data") {
+        } else if (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK) {
             dataEmls.push_back(de);
         } else {
             otherEmls.push_back(de);
@@ -305,7 +310,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
     LOG_INFO("[DB] download_pending: classified - new=%zu, exchange=%zu, data=%zu, other=%zu\n",
              newEmls.size(), exchangeEmls.size(), dataEmls.size(), otherEmls.size());
 
-    // Phase 2: Process in order: new → exchange → data → other
+    // Phase 2: Process in order: new(0.1.0) → exchange(0.1.1) → data(0.1.2/0.1.3/0.1.4) → other
     std::vector<DownloadedEml*> orderedEmls;
     for (auto& e : newEmls) orderedEmls.push_back(&e);
     for (auto& e : exchangeEmls) orderedEmls.push_back(&e);
@@ -316,8 +321,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         const auto& pe = dep->uuid;
         const std::string& filePath = dep->filePath;
         std::string& emlContent = dep->emlContent;
-        const std::string& message_id = dep->message_id;
-        const std::string& in_reply_to = dep->in_reply_to;
+        std::string message_id = dep->message_id;
+        std::string in_reply_to = dep->in_reply_to;
         const std::string& x_session_chart = dep->x_session_chart;
         const std::string& eml_subject = dep->eml_subject;
         const std::string& eml_to = dep->eml_to;
@@ -333,9 +338,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
         try {
 
-            // If X-Session-Chart=new, parse body as JSON to extract session_info
-            if (x_session_chart == "new") {
-                LOG_INFO("[DB] download_pending: X-Session-Chart=new, parsing body for session_info\n");
+            // If X-Mailer=0.1.0, parse body as JSON to extract session_info
+            if (x_session_chart == XMailer::NEW_SESSION) {
+                LOG_INFO("[DB] download_pending: X-Mailer=0.1.0, parsing body for session_info\n");
                 try {
                     // Parse the full EML to extract body text
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
@@ -497,7 +502,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             exchangeContent["message_id"] = "";
                             exchangeContent["session_id"] = "";
                             exchangeContent["x_message_id"] = "";
-                            exchangeContent["x_session_chart"] = "exchange";
+                            exchangeContent["x_session_chart"] = XMailer::EXCHANGE;
 
                             std::string exchangeStr = exchangeContent.dump();
                             int sendRc = SendEmail_c(configIndex, exchangeStr.c_str());
@@ -510,9 +515,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 }
             }
 
-            // If X-Session-Chart=exchange, save received pubkey to code table
-            if (x_session_chart == "exchange") {
-                LOG_INFO("[DB] download_pending: X-Session-Chart=exchange, parsing body for session_info\n");
+            // If X-Mailer=0.1.1, save received pubkey to code table
+            if (x_session_chart == XMailer::EXCHANGE) {
+                LOG_INFO("[DB] download_pending: X-Mailer=0.1.1, parsing body for session_info\n");
                 try {
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                     msg->parse(emlContent);
@@ -532,6 +537,16 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
                     LOG_INFO("[DB] download_pending: exchange from account=%s, pubkey_len=%zu\n",
                              siAccount.c_str(), siPubkey.size());
+
+                    // Extract x_message_id from body (may differ from IMAP Message-ID if SMTP rewrote it)
+                    std::string embeddedXMsgId = bodyJson.value("x_message_id", "");
+                    std::string embeddedLastMsgId = bodyJson.value("last_message_id", "");
+                    if (!embeddedXMsgId.empty()) {
+                        s_emailRepo.updateAfterDownload(pe, accountStr, embeddedXMsgId, embeddedLastMsgId, pe);
+                        LOG_INFO("[DB] download_pending: exchange email updated message_id='%s' (was '%s')\n",
+                                 embeddedXMsgId.c_str(), message_id.c_str());
+                        message_id = embeddedXMsgId;
+                    }
 
                     std::string foundSid;
                     if (!in_reply_to.empty()) {
@@ -596,9 +611,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 }
             }
 
-            // If X-Session-Chart=data, decrypt the body
-            if (x_session_chart == "data") {
-                LOG_INFO("[DB] download_pending: X-Session-Chart=data, decrypting body\n");
+            // If X-Mailer=0.1.2/0.1.3/0.1.4, decrypt the body
+            if (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK) {
+                LOG_INFO("[DB] download_pending: X-Mailer=%s, decrypting body\n", x_session_chart.c_str());
                 try {
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                     msg->parse(emlContent);
@@ -608,25 +623,38 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
                     std::string bodyText = textBody.empty() ? htmlBody : textBody;
 
-                    // File chunk messages can be large (512KB chunk -> ~690KB JSON plaintext)
-                    std::vector<char> decrypted(2 * 1024 * 1024);
+                    // File chunk messages can be large (3MB chunk -> ~4MB base64 + JSON overhead)
+                    std::vector<char> decrypted(8 * 1024 * 1024);
                     int decRc = email_decrypt_data_body(bodyText.c_str(), accountStr.c_str(), decrypted.data(), (int)decrypted.size());
                     if (decRc == 0) {
                         std::string decryptedStr(decrypted.data());
                         LOG_INFO("[DB] download_pending: data decrypted, plaintext_len=%zu\n", decryptedStr.size());
 
-                        // Parse decrypted plaintext to check msg_type
+                        // Extract x_message_id and last_message_id from decrypted body
+                        std::string embeddedXMsgId;
+                        std::string embeddedLastMsgId;
                         std::string msgType = "text";
                         try {
                             auto decryptedJson = json::parse(decryptedStr);
                             msgType = decryptedJson.value("msg_type", "text");
+                            embeddedXMsgId = decryptedJson.value("x_message_id", "");
+                            embeddedLastMsgId = decryptedJson.value("last_message_id", "");
+                            LOG_INFO("[DB] download_pending: embedded x_message_id='%s', last_message_id='%s', msg_type='%s'\n",
+                                     embeddedXMsgId.c_str(), embeddedLastMsgId.c_str(), msgType.c_str());
                         } catch (...) {
                             // Not JSON, treat as plain text message
                         }
 
-                        if (msgType == "file") {
-                            // File metadata message
-                            LOG_INFO("[DB] download_pending: msg_type=file, processing file metadata\n");
+                        // Update localemail with embedded IDs (override server-provided header values)
+                        if (!embeddedXMsgId.empty()) {
+                            s_emailRepo.updateAfterDownload(pe, accountStr, embeddedXMsgId, embeddedLastMsgId, pe);
+                            LOG_INFO("[DB] download_pending: updated localemail message_id='%s', in_reply_to='%s'\n",
+                                     embeddedXMsgId.c_str(), embeddedLastMsgId.c_str());
+                        }
+
+                        if (x_session_chart == XMailer::FILE_META) {
+                            // File metadata message (visible in UI)
+                            LOG_INFO("[DB] download_pending: X-Mailer=0.1.3, processing file metadata\n");
                             try {
                                 auto fileJson = json::parse(decryptedStr);
                                 std::string fileId = fileJson.value("file_id", "");
@@ -637,36 +665,50 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 int chunkSize = fileJson.value("chunk_size", 0);
                                 std::string text = fileJson.value("text", "");
 
+                                // Find session via last_message_id (embedded)
                                 std::string sid;
-                                if (!in_reply_to.empty()) {
-                                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, accountStr);
+                                if (!embeddedLastMsgId.empty()) {
+                                    sid = s_sessionRepo.querySessionByInReplyTo(embeddedLastMsgId, accountStr);
                                 }
-                                if (sid.empty() && !message_id.empty()) {
+                                if (sid.empty() && !embeddedXMsgId.empty()) {
                                     char sidBuf[256];
-                                    if (email_query_session_by_message_id(message_id.c_str(), accountStr.c_str(), sidBuf, sizeof(sidBuf)) == 0) {
+                                    if (email_query_session_by_message_id(embeddedXMsgId.c_str(), accountStr.c_str(), sidBuf, sizeof(sidBuf)) == 0) {
                                         sid = sidBuf;
                                     }
                                 }
 
-                                // Determine sender from From header
                                 std::string sender = eml_from;
 
                                 char ftResult[4096];
                                 int ftRc = email_file_transfer_receive_file(
                                     fileId.c_str(), sid.c_str(), accountStr.c_str(), sender.c_str(),
                                     fileName.c_str(), fileSize, fileMd5.c_str(),
-                                    totalChunks, chunkSize, message_id.c_str(),
+                                    totalChunks, chunkSize, embeddedXMsgId.c_str(),
                                     ftResult, sizeof(ftResult));
                                 LOG_INFO("[DB] download_pending: file_transfer_receive_file rc=%d, result=%s\n", ftRc, ftResult);
+
+                                // Session association for 0.1.3 via last_message_id
+                                if (!embeddedLastMsgId.empty() && !sid.empty()) {
+                                    int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
+                                    if (emailId > 0) {
+                                        std::string emailIdStr = std::to_string(emailId);
+                                        char session_result_json[4096];
+                                        int add_rc = email_add_email_to_session(
+                                            sid.c_str(), emailIdStr.c_str(), accountStr.c_str(), 1,
+                                            session_result_json, sizeof(session_result_json));
+                                        LOG_INFO("[DB] download_pending: 0.1.3 file metadata added to session=%s, email_id=%s, result=%d\n",
+                                                 sid.c_str(), emailIdStr.c_str(), add_rc);
+                                    }
+                                }
                             } catch (const std::exception& e) {
                                 LOG_INFO("[DB] download_pending: failed to parse file message: %s\n", e.what());
                             }
 
                             // Do NOT replace emlContent; keep original encrypted .eml so eml_parser can build file cards
 
-                        } else if (msgType == "truck") {
-                            // File chunk message
-                            LOG_INFO("[DB] download_pending: msg_type=truck, processing file chunk\n");
+                        } else if (x_session_chart == XMailer::FILE_CHUNK) {
+                            // File chunk message (hidden from UI)
+                            LOG_INFO("[DB] download_pending: X-Mailer=0.1.4, processing file chunk\n");
                             try {
                                 auto truckJson = json::parse(decryptedStr);
                                 std::string fileId = truckJson.value("file_id", "");
@@ -684,15 +726,51 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                     chunkDataB64.c_str(), chunkMd5.c_str(),
                                     outputDir.c_str(), truckResult, sizeof(truckResult));
                                 LOG_INFO("[DB] download_pending: file_transfer_receive_truck rc=%d, result=%s\n", truckRc, truckResult);
+
+                                // Check if file download is complete
+                                try {
+                                    auto truckResultJson = json::parse(truckResult);
+                                    if (truckResultJson.value("complete", false)) {
+                                        std::string completedFileId = truckResultJson.value("file_id", "");
+                                        LOG_INFO("[DB] download_pending: file download complete, file_id=%s\n", completedFileId.c_str());
+                                        // Notify UI via results
+                                        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath},
+                                                          {"file_complete", true}, {"file_id", completedFileId}});
+                                    }
+                                } catch (...) {}
                             } catch (const std::exception& e) {
                                 LOG_INFO("[DB] download_pending: failed to parse truck message: %s\n", e.what());
                             }
 
-                            // Do NOT replace emlContent; keep original encrypted .eml (conversation_view will skip truck messages)
+                            // Do NOT replace emlContent; keep original encrypted .eml
 
                         } else {
-                            // Regular text message (backward compatible)
-                            LOG_INFO("[DB] download_pending: msg_type=text, treating as regular message\n");
+                            // 0.1.2: Regular encrypted text message
+                            LOG_INFO("[DB] download_pending: X-Mailer=0.1.2, regular text message\n");
+
+                            // Session association for 0.1.2 via last_message_id
+                            if (!embeddedLastMsgId.empty()) {
+                                char foundSid[512];
+                                foundSid[0] = '\0';
+                                email_query_session_by_message_id(embeddedLastMsgId.c_str(), accountStr.c_str(), foundSid, sizeof(foundSid));
+                                if (foundSid[0] != '\0') {
+                                    int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
+                                    if (emailId > 0) {
+                                        std::string emailIdStr = std::to_string(emailId);
+                                        char session_result_json[4096];
+                                        int add_rc = email_add_email_to_session(
+                                            foundSid, emailIdStr.c_str(), accountStr.c_str(), 1,
+                                            session_result_json, sizeof(session_result_json));
+                                        LOG_INFO("[DB] download_pending: 0.1.2 text email added to session=%s, email_id=%s, result=%d\n",
+                                                 foundSid, emailIdStr.c_str(), add_rc);
+                                    }
+                                } else {
+                                    LOG_INFO("[DB] download_pending: 0.1.2 text email - could not find session for last_message_id=%s, account=%s\n",
+                                             embeddedLastMsgId.c_str(), accountStr.c_str());
+                                }
+                            }
+
+                            // Replace emlContent with decrypted plaintext
                             emlContent.clear();
                             emlContent += "Content-Type: text/plain; charset=utf-8\r\n";
                             emlContent += "Content-Transfer-Encoding: 8bit\r\n";
@@ -706,11 +784,40 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     LOG_INFO("[DB] download_pending: failed to decrypt data body: %s\n", e.what());
                 }
             }
+
+            // Session association for 0.1.2 text messages that were NOT encrypted (fallback)
+            // or for 0.1.0/0.1.1 types that need session via in_reply_to
+            if (x_session_chart != XMailer::FILE_CHUNK && x_session_chart != XMailer::TEXT && x_session_chart != XMailer::FILE_META && !in_reply_to.empty()) {
+                char foundSid[512];
+                foundSid[0] = '\0';
+                email_query_session_by_message_id(in_reply_to.c_str(), accountStr.c_str(), foundSid, sizeof(foundSid));
+                if (foundSid[0] != '\0') {
+                    int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
+                    if (emailId > 0) {
+                        std::string emailIdStr = std::to_string(emailId);
+                        char session_result_json[4096];
+                        int add_rc = email_add_email_to_session(
+                            foundSid, emailIdStr.c_str(), accountStr.c_str(), 0,
+                            session_result_json, sizeof(session_result_json));
+                        LOG_INFO("[DB] download_pending: data email added to session=%s, email_id=%s, result=%d\n",
+                                 foundSid, emailIdStr.c_str(), add_rc);
+                    }
+                } else {
+                    LOG_INFO("[DB] download_pending: data email - could not find session for in_reply_to=%s, account=%s\n",
+                             in_reply_to.c_str(), accountStr.c_str());
+                }
+            }
+
         } catch (const std::exception& e) {
             LOG_INFO("[DB] download_pending: failed to parse .eml file: %s\n", e.what());
         }
 
-        s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
+        // Update localemail with final message_id and in_reply_to
+        // For encrypted types (0.1.2/0.1.3/0.1.4), the embedded IDs were already set above
+        // For non-encrypted types (0.1.0/0.1.1), use header values
+        if (x_session_chart != XMailer::TEXT && x_session_chart != XMailer::FILE_META && x_session_chart != XMailer::FILE_CHUNK) {
+            s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
+        }
 
         downloaded++;
         results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
@@ -1043,7 +1150,7 @@ extern "C" int email_task_insert(const char* account, const char* recipient,
                                     message_id ? message_id : "",
                                     x_message_id ? x_message_id : "",
                                     session_id ? session_id : "",
-                                    x_session_chart ? x_session_chart : "data");
+                                    x_session_chart ? x_session_chart : XMailer::TEXT);
     if (id == 0) {
         LOG_INFO("[Task] insert failed: id=0 returned from repo\n");
         return -3;
@@ -1179,7 +1286,7 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
             {"x_session_chart", t.xSessionChart}
         };
 
-        // Note: encryption is handled by send_email() when x_session_chart=="data"
+        // Note: encryption is handled by send_email() when X-Mailer is 0.1.2/0.1.3/0.1.4
         // Do NOT encrypt here - it would cause double encryption
 
         std::string emailStr = emailContent.dump();

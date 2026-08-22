@@ -20,6 +20,7 @@ struct EmailRecord {
     std::string flags;
     std::string folder;
     int isLocal = 0;
+    int visible = 1;
     std::string sessionId;
     std::string servicerecvtime;
     int64_t rowid = 0;
@@ -53,6 +54,9 @@ public:
 
     // Check if email exists by message_id + account, return rowid if found
     int64_t findIdByMessageId(const std::string& messageId, const std::string& account);
+
+    // Find sent email (uuid=0) by in_reply_to + account, for dedup when SMTP rewrote Message-ID
+    int64_t findSentByInReplyTo(const std::string& inReplyTo, const std::string& account);
 
     // Insert new email record, return rowid (0 on failure)
     int64_t insert(const EmailRecord& rec);

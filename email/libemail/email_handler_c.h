@@ -182,7 +182,8 @@ int GetEmailToFile_c(int configIndex, const char* folder, const char* uid, const
  * @return 0 if successful, negative on error
  */
 int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
-                    const char* account, char* outJson, int outSize);
+                    const char* account, const char* storageDir,
+                    char* outJson, int outSize);
 
 /**
  * @brief Enter IMAP IDLE on the current folder, block until server notification

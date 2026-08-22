@@ -71,6 +71,7 @@ add_library(email_core STATIC
     email_imap.cpp
     email_oemailim.cpp
     email_contact.cpp
+    email_addressbook.cpp
     email_file_transfer.cpp
     email_core.h
     email_core_common.h
@@ -79,6 +80,7 @@ add_library(email_core STATIC
     persistence/session_repo.cpp
     persistence/key_repo.cpp
     persistence/contact_repo.cpp
+    persistence/addressbook_repo.cpp
     persistence/task_repo.cpp
     persistence/file_transfer_repo.cpp
 )
@@ -92,6 +94,7 @@ add_library(email_core_shared SHARED
     email_imap.cpp
     email_oemailim.cpp
     email_contact.cpp
+    email_addressbook.cpp
     email_file_transfer.cpp
     email_core.h
     email_core_common.h
@@ -100,6 +103,7 @@ add_library(email_core_shared SHARED
     persistence/session_repo.cpp
     persistence/key_repo.cpp
     persistence/contact_repo.cpp
+    persistence/addressbook_repo.cpp
     persistence/task_repo.cpp
     persistence/file_transfer_repo.cpp
 )

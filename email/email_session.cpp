@@ -22,7 +22,7 @@ static SessionRepo s_sessionRepo;
 static KeyRepo s_keyRepo;
 
 // Generate session records for existing emails
-// Now a no-op: sessions are only created via X-Session-Chart=new in download_pending_bodies
+// Now a no-op: sessions are only created via X-Mailer=0.1.0 in download_pending_bodies
 extern "C" int email_generate_sessions(const char* account, char* outJson, int outSize) {
     if (outJson && outSize > 0) {
         snprintf(outJson, outSize, R"({"status":"success","message":"no-op"})");
@@ -206,7 +206,6 @@ extern "C" int email_insert_sent_email(const char* account, const char* sender, 
             std::ofstream emlFile(filePath);
             if (emlFile.is_open()) {
                 emlFile << "Message-ID: " << messageIdStr << "\n";
-                emlFile << "X-Message-ID: " << messageIdStr << "\n";
                 emlFile << "From: " << (from_addr ? from_addr : "") << "\n";
                 emlFile << "To: " << (to_addr ? to_addr : "") << "\n";
                 emlFile << "Subject: " << (subject ? subject : "") << "\n";

@@ -185,9 +185,8 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       'body': emailBody,
       'in_reply_to': '',
       'message_id': messageId,
-      'x_message_id': messageId,
       'session_id': sessionId,
-      'x_session_chart': 'new',
+      'x_session_chart': native.XMailer.newSession,
     });
 
     native.EmailCore.logWrite('[CREATE_SESSION] Sending email to: $recipientStr, subject: $title');

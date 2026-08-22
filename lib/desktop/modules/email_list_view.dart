@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
 import 'email_module_base.dart';
+import 'conversation_view.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
 import '../../i18n/app_strings.dart';
@@ -38,11 +39,9 @@ mixin EmailListViewMixin on State<EmailModule> {
         children: [
           buildSearchBar(),
           Expanded(
-            child: emails.isEmpty
-                ? Center(child: Text(AppStrings.noEmails, style: TextStyle(color: Colors.grey[400], fontSize: 14)))
-                : ListView(
-                    children: buildGroupedEmailList(),
-                  ),
+            child: ListView(
+              children: buildGroupedEmailList(),
+            ),
           ),
         ],
       ),
@@ -407,7 +406,7 @@ mixin EmailListViewMixin on State<EmailModule> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                buildAvatar(displayName),
+                buildAvatar(displayName, email: email.sender),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -483,7 +482,7 @@ mixin EmailListViewMixin on State<EmailModule> {
               ),
             ),
             const SizedBox(width: 8),
-            buildAvatar(displayName),
+            buildAvatar(displayName, email: email.sender),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -515,8 +514,14 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
-  Widget buildAvatar(String name) {
-    final displayName = name.isEmpty ? '?' : name[0];
+  Widget buildAvatar(String name, {String? email}) {
+    String displayName = name.isEmpty ? '?' : name[0];
+    if (email != null && email.isNotEmpty) {
+      final abName = ConversationViewMixin.addressbookNameForEmail(email);
+      if (abName.isNotEmpty) {
+        displayName = abName[0];
+      }
+    }
     return Container(
       width: 32,
       height: 32,

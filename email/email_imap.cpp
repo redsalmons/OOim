@@ -148,6 +148,7 @@ int email_get_content(int configIndex, const char* folder, const char* uid, char
 }
 
 int email_fetch_and_store(int configIndex, const char* folder, const char* startUid,
-                          const char* account, char* outJson, int outSize) {
-    return FetchAndStore_c(configIndex, folder, startUid, account, outJson, outSize);
+                          const char* account, const char* storageDir,
+                          char* outJson, int outSize) {
+    return FetchAndStore_c(configIndex, folder, startUid, account, storageDir, outJson, outSize);
 }

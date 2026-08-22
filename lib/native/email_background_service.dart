@@ -228,7 +228,7 @@ void supervisorEntryPoint(SendPort mainSendPort) {
 
         accountAuthCodes[account.email] = account.authCode;
 
-        startChild(account.email, account.authCode, account.type, 'INBOX', inboxConfigIndex);
+        startChild(account.email, account.authCode, account.type, 'INBOX', inboxConfigIndex, storageDir: configPath?.replaceAll('/config/oim.conf', '/data'));
         // Sent folder watch disabled for all accounts
         // startChild(account.email, account.authCode, account.type, 'Sent', sentConfigIndex);
         startChild(account.email, account.authCode, account.type, 'Download', downloadConfigIndex, storageDir: configPath?.replaceAll('/config/oim.conf', '/data'));
@@ -330,7 +330,7 @@ void childEntryPoint(SendPort supervisorPort) {
     native.EmailCore.connectEmail(configIndex!);
 
     // Fetch and store new emails from the specified folder
-    final fetchResult = native.EmailCore.fetchAndStoreEmails(configIndex!, folder!, email!);
+    final fetchResult = native.EmailCore.fetchAndStoreEmails(configIndex!, folder!, email!, storageDir ?? '');
     log('fetchAndStoreEmails result for $folder (configIndex: $configIndex): $fetchResult');
 
     try {
@@ -453,9 +453,13 @@ void childEntryPoint(SendPort supervisorPort) {
             final count = decoded['downloaded'] ?? 0;
             if (count > 0) {
               log('Downloaded $count email bodies');
+              // Check for file completion notifications
+              final results = decoded['results'] as List? ?? [];
+              final fileCompletes = results.where((r) => r['file_complete'] == true).toList();
               notify('bodies_downloaded', {
                 'account': email,
                 'count': count,
+                if (fileCompletes.isNotEmpty) 'file_completes': fileCompletes,
               });
             } else {
               log('Downloaded 0 email bodies (no new downloads)');

@@ -7,6 +7,7 @@ Future<String> fetchEmailsInIsolate(Map<String, dynamic> params) async {
   final email = params['email'] as String;
   final authCode = params['authCode'] as String;
   final configIndex = params['configIndex'] as int;
+  final storageDir = params['storageDir'] as String? ?? '';
 
   final credResult = native.EmailCore.setEmailCredentials(configIndex, email, authCode);
   if (credResult != 0) {
@@ -19,7 +20,7 @@ Future<String> fetchEmailsInIsolate(Map<String, dynamic> params) async {
   }
 
   // Fetch INBOX
-  native.EmailCore.fetchAndStoreEmails(configIndex, 'INBOX', email);
+  native.EmailCore.fetchAndStoreEmails(configIndex, 'INBOX', email, storageDir);
   
   // Try to determine Sent folder name and fetch it
   String sentFolder = 'Sent';
@@ -30,7 +31,7 @@ Future<String> fetchEmailsInIsolate(Map<String, dynamic> params) async {
     }
   } catch (_) {}
   
-  final fetchResult = native.EmailCore.fetchAndStoreEmails(configIndex, sentFolder, email);
+  final fetchResult = native.EmailCore.fetchAndStoreEmails(configIndex, sentFolder, email, storageDir);
   return fetchResult;
 }
 

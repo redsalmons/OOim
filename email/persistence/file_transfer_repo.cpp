@@ -12,8 +12,8 @@ bool FileTransferRepo::insertFileTransfer(const FileTransferRecord& rec) {
     if (!db || rec.fileId.empty()) return false;
 
     const char* sql = "INSERT OR REPLACE INTO file_transfer "
-                      "(file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                      "(file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, original_path) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
 
@@ -28,6 +28,7 @@ bool FileTransferRepo::insertFileTransfer(const FileTransferRecord& rec) {
     sqlite3_bind_int(stmt, 9, rec.chunkSize);
     sqlite3_bind_int(stmt, 10, rec.status);
     sqlite3_bind_text(stmt, 11, rec.messageId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 12, rec.originalPath.c_str(), -1, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -39,7 +40,7 @@ bool FileTransferRepo::queryByFileId(const std::string& fileId, FileTransferReco
     sqlite3* db = conn.get();
     if (!db || fileId.empty()) return false;
 
-    const char* sql = "SELECT id, file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, created_at, updated_at "
+    const char* sql = "SELECT id, file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, created_at, updated_at, original_path "
                       "FROM file_transfer WHERE file_id = ?;";
     sqlite3_stmt* stmt;
     bool found = false;
@@ -60,6 +61,7 @@ bool FileTransferRepo::queryByFileId(const std::string& fileId, FileTransferReco
             out.messageId = sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
             out.createdAt = sqlite3_column_text(stmt, 12) ? (const char*)sqlite3_column_text(stmt, 12) : "";
             out.updatedAt = sqlite3_column_text(stmt, 13) ? (const char*)sqlite3_column_text(stmt, 13) : "";
+            out.originalPath = sqlite3_column_text(stmt, 14) ? (const char*)sqlite3_column_text(stmt, 14) : "";
             found = true;
         }
         sqlite3_finalize(stmt);

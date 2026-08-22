@@ -3,6 +3,7 @@
 #include "logger.h"
 #include "db_connection.h"
 #include "email_repo.h"
+#include "x_mailer.h"
 #include "key_repo.h"
 #include <stdio.h>
 #include <string.h>
@@ -30,6 +31,21 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, sql_contact, NULL, NULL, &err);
         if (err) sqlite3_free(err);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_contact_email ON contact(email);", NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+
+        // Addressbook table (auto-populated from received emails)
+        const char* sql_addressbook = "CREATE TABLE IF NOT EXISTS addressbook ("
+                                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                      "email TEXT NOT NULL UNIQUE,"
+                                      "name TEXT,"
+                                      "group_name TEXT,"
+                                      "notes TEXT,"
+                                      "created_at TEXT DEFAULT (datetime('now','localtime')),"
+                                      "updated_at TEXT DEFAULT (datetime('now','localtime'))"
+                                      ");";
+        sqlite3_exec(g_db, sql_addressbook, NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_addressbook_email ON addressbook(email);", NULL, NULL, &err);
         if (err) sqlite3_free(err);
 
         sqlite3_exec(g_db, "ALTER TABLE session ADD COLUMN encrypt_method INTEGER DEFAULT 0;", NULL, NULL, &err);
@@ -66,6 +82,7 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE keyinfo ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN message_id TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
 
         // File transfer tables
         const char* sql_file_transfer = "CREATE TABLE IF NOT EXISTS file_transfer ("
@@ -84,6 +101,7 @@ int email_db_init(const char* path) {
                                         "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                         "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                         ");";
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, sql_file_transfer, NULL, NULL, &err);
         if (err) sqlite3_free(err);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err);
@@ -154,6 +172,7 @@ int email_db_init(const char* path) {
     sqlite3_exec(g_db, "ALTER TABLE localemail ADD COLUMN folder TEXT;", NULL, NULL, &err_msg);
     sqlite3_exec(g_db, "ALTER TABLE localemail ADD COLUMN flags TEXT;", NULL, NULL, &err_msg);
     sqlite3_exec(g_db, "ALTER TABLE localemail ADD COLUMN file TEXT;", NULL, NULL, &err_msg);
+    sqlite3_exec(g_db, "ALTER TABLE localemail ADD COLUMN visible INTEGER DEFAULT 1;", NULL, NULL, &err_msg);
 
     const char* sql_session = "CREATE TABLE IF NOT EXISTS session ("
                               "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -252,6 +271,7 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE keyinfo ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN message_id TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
     }
 
     // Task table for queued email sending
@@ -265,7 +285,7 @@ int email_db_init(const char* path) {
                            "message_id TEXT,"
                            "x_message_id TEXT,"
                            "session_id TEXT,"
-                           "x_session_chart TEXT DEFAULT 'data',"
+                           "x_session_chart TEXT DEFAULT '0.1.2',"
                            "status INTEGER DEFAULT 0,"
                            "created_at TEXT DEFAULT (datetime('now','localtime'))"
                            ");";

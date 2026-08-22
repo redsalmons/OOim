@@ -1,6 +1,7 @@
 #include "task_repo.h"
 #include "db_connection.h"
 #include "logger.h"
+#include "x_mailer.h"
 #include <sqlite3.h>
 
 int64_t TaskRepo::insert(const std::string& account, const std::string& recipient,
@@ -72,7 +73,7 @@ std::vector<TaskRecord> TaskRepo::queryPending(const std::string& account, int l
         rec.messageId = (const char*)sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
         rec.xMessageId = (const char*)sqlite3_column_text(stmt, 7) ? (const char*)sqlite3_column_text(stmt, 7) : "";
         rec.sessionId = (const char*)sqlite3_column_text(stmt, 8) ? (const char*)sqlite3_column_text(stmt, 8) : "";
-        rec.xSessionChart = (const char*)sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "data";
+        rec.xSessionChart = (const char*)sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : XMailer::TEXT;
         rec.status = sqlite3_column_int(stmt, 10);
         const char* createdPtr = (const char*)sqlite3_column_text(stmt, 11);
         rec.createdAt = createdPtr ? createdPtr : "";

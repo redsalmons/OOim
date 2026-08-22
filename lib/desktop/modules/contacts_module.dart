@@ -13,22 +13,18 @@ class ContactsModule extends StatefulWidget {
 class ContactsModuleState extends State<ContactsModule> {
   final TextEditingController _searchController = TextEditingController();
   String _selectedGroup = '';
-  late final List<String> _groups;
-  Contact? _selectedContact;
-  bool _isNewContact = false;
+  late List<String> _groups;
+  AddressBookEntry? _selectedContact;
   bool _saving = false;
+  final List<AddressBookEntry> _contacts = [];
 
   @override
   void initState() {
     super.initState();
-    _groups = [
-      AppStrings.allContacts,
-      AppStrings.isZh ? '我的好友' : 'Friends',
-      AppStrings.isZh ? '同事' : 'Colleagues',
-      AppStrings.isZh ? '家人' : 'Family',
-      AppStrings.isZh ? '重要客户' : 'VIP Clients',
-    ];
+    _groups = [AppStrings.allContacts];
     _selectedGroup = _groups[0];
+    // Migrate contacts from existing emails into addressbook
+    native.EmailCore.addressbookMigrate();
     _loadContactsFromDb();
   }
 
@@ -37,7 +33,7 @@ class ContactsModuleState extends State<ContactsModule> {
   }
 
   void _loadContactsFromDb() {
-    final jsonStr = native.EmailCore.contactQueryAll();
+    final jsonStr = native.EmailCore.addressbookQueryAll();
     if (jsonStr == null) return;
     try {
       final list = jsonDecode(jsonStr) as List;
@@ -45,132 +41,87 @@ class ContactsModuleState extends State<ContactsModule> {
         _contacts.clear();
         for (final item in list) {
           final m = item as Map<String, dynamic>;
-          final cats = (m['categories'] as String? ?? '').split(',').where((s) => s.trim().isNotEmpty).map((s) => s.trim()).toList();
-          _contacts.add(Contact(
+          _contacts.add(AddressBookEntry(
             id: m['id'] as int? ?? 0,
-            name: m['name'] as String? ?? '',
-            phone: '',
             email: m['email'] as String? ?? '',
-            avatar: (m['name'] as String? ?? '?').isNotEmpty ? (m['name'] as String? ?? '?')[0] : '?',
-            categories: cats,
-            status: 'offline',
+            name: m['name'] as String? ?? '',
+            groupName: m['group_name'] as String? ?? '',
             notes: m['notes'] as String? ?? '',
-            key: m['key'] as String? ?? '',
           ));
-          _allCategories.addAll(cats);
-        }
-        for (final cat in _allCategories) {
-          if (!_groups.contains(cat)) {
-            _groups.add(cat);
-          }
         }
       });
+      _loadGroups();
     } catch (e) {
-      print('Failed to load contacts: $e');
+      print('Failed to load addressbook: $e');
     }
   }
 
-  final List<Contact> _contacts = [];
-  final Set<String> _allCategories = {};
-
-  void _addNewContact() {
-    setState(() {
-      final newContact = Contact(
-        id: 0,
-        name: '',
-        phone: '',
-        email: '',
-        avatar: '?',
-        categories: [],
-        status: 'offline',
-        notes: '',
-        key: '',
-      );
-      _contacts.insert(0, newContact);
-      _selectedContact = newContact;
-      _isNewContact = true;
-    });
-  }
-
-  void _cancelNewContact() {
-    setState(() {
-      _contacts.removeWhere((c) => c.id == 0 && _isNewContact);
-      _selectedContact = null;
-      _isNewContact = false;
-    });
+  void _loadGroups() {
+    final jsonStr = native.EmailCore.addressbookQueryGroups();
+    if (jsonStr == null) return;
+    try {
+      final list = jsonDecode(jsonStr) as List;
+      setState(() {
+        _groups = [AppStrings.allContacts];
+        for (final item in list) {
+          final g = item as String;
+          if (!_groups.contains(g)) _groups.add(g);
+        }
+      });
+    } catch (_) {}
   }
 
   void _deleteContact() {
     final contact = _selectedContact;
-    if (contact == null || contact.id == 0) return;
-    final result = native.EmailCore.contactDelete(contact.id);
+    if (contact == null) return;
+    final result = native.EmailCore.addressbookDelete(contact.id);
     if (result == 0) {
-      setState(() {
-        _selectedContact = null;
-      });
+      setState(() { _selectedContact = null; });
       _loadContactsFromDb();
-      setState(() {
-        _selectedContact = _contacts.isNotEmpty ? _contacts.first : null;
-      });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AppStrings.isZh ? '联系人已删除' : 'Contact deleted'),
-          duration: const Duration(seconds: 2),
-        ),
+        SnackBar(content: Text(AppStrings.isZh ? '联系人已删除' : 'Contact deleted'), duration: const Duration(seconds: 2)),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${AppStrings.isZh ? '删除失败' : 'Delete failed'}: $result'),
-          duration: const Duration(seconds: 2),
-        ),
+        SnackBar(content: Text('${AppStrings.isZh ? '删除失败' : 'Delete failed'}: $result'), duration: const Duration(seconds: 2)),
       );
     }
   }
 
-  void _saveNewContact(Contact contact) {
+  void _saveContact(AddressBookEntry contact) {
     if (_saving) return;
-    setState(() {
-      _saving = true;
-    });
-    final id = native.EmailCore.contactAdd(
-      email: contact.email,
-      name: contact.name,
-      categories: contact.categories.join(','),
-      notes: contact.notes,
-      key: contact.key,
-    );
-    if (id > 0) {
-      setState(() {
-        _isNewContact = false;
-        _selectedContact = null;
-        _saving = false;
-      });
+    setState(() { _saving = true; });
+    final result = native.EmailCore.addressbookUpdate(contact.id, contact.name, contact.groupName, contact.notes);
+    setState(() { _saving = false; });
+    if (result == 0) {
       _loadContactsFromDb();
+      // Update selected contact to the refreshed object
+      setState(() {
+        _selectedContact = _contacts.where((c) => c.id == contact.id).firstOrNull;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AppStrings.contactSaved),
-          duration: const Duration(seconds: 2),
-        ),
+        SnackBar(content: Text(AppStrings.contactSaved), duration: const Duration(seconds: 2)),
       );
     } else {
-      setState(() {
-        _saving = false;
-      });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${AppStrings.saveFailed}: $id'),
-          duration: const Duration(seconds: 2),
-        ),
+        SnackBar(content: Text('${AppStrings.saveFailed}: $result'), duration: const Duration(seconds: 2)),
       );
     }
   }
 
-  List<Contact> get _filteredContacts {
-    if (_selectedGroup == _groups[0]) {
-      return _contacts;
+  List<AddressBookEntry> get _filteredContacts {
+    final search = _searchController.text.trim().toLowerCase();
+    var result = _contacts;
+    if (_selectedGroup != _groups[0]) {
+      result = result.where((c) => c.groupName == _selectedGroup).toList();
     }
-    return _contacts.where((contact) => contact.categories.contains(_selectedGroup)).toList();
+    if (search.isNotEmpty) {
+      result = result.where((c) =>
+        c.name.toLowerCase().contains(search) ||
+        c.email.toLowerCase().contains(search)
+      ).toList();
+    }
+    return result;
   }
 
   @override
@@ -196,7 +147,7 @@ class ContactsModuleState extends State<ContactsModule> {
               itemCount: _filteredContacts.length,
               itemBuilder: (context, index) {
                 final contact = _filteredContacts[index];
-                return _buildContactItem(contact, index);
+                return _buildContactItem(contact);
               },
             ),
           ),
@@ -208,43 +159,23 @@ class ContactsModuleState extends State<ContactsModule> {
   Widget _buildSearchBar() {
     return Container(
       padding: const EdgeInsets.all(12),
-      child: Row(
-        children: [
-          Expanded(
-            child: Container(
-              height: 36,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: TextField(
-                controller: _searchController,
-                decoration: InputDecoration(
-                  hintText: AppStrings.searchContacts,
-                  hintStyle: const TextStyle(fontSize: 14),
-                  prefixIcon: const Icon(Icons.search, size: 20, color: Colors.grey),
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                ),
-              ),
-            ),
+      child: Container(
+        height: 36,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: TextField(
+          controller: _searchController,
+          onChanged: (_) => setState(() {}),
+          decoration: InputDecoration(
+            hintText: AppStrings.searchContacts,
+            hintStyle: const TextStyle(fontSize: 14),
+            prefixIcon: const Icon(Icons.search, size: 20, color: Colors.grey),
+            border: InputBorder.none,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
-          const SizedBox(width: 8),
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primary,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: IconButton(
-              onPressed: _addNewContact,
-              icon: const Icon(Icons.add, size: 20, color: Colors.white),
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -290,52 +221,31 @@ class ContactsModuleState extends State<ContactsModule> {
     );
   }
 
-  Widget _buildContactItem(Contact contact, int index) {
-    final isSelected = _selectedContact == contact;
+  Widget _buildContactItem(AddressBookEntry contact) {
+    final isSelected = _selectedContact?.id == contact.id;
     final primary = Theme.of(context).colorScheme.primary;
+    final displayName = contact.name.isNotEmpty ? contact.name : contact.email;
     return GestureDetector(
       onTap: () {
-        setState(() {
-          _selectedContact = contact;
-          if (contact.id != 0 || !_isNewContact) {
-            _isNewContact = false;
-          }
-        });
+        setState(() { _selectedContact = contact; });
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: isSelected ? primary.withValues(alpha: 0.08) : Colors.transparent,
-          border: Border(
-            bottom: BorderSide(color: Colors.grey[200]!, width: 0.5),
-          ),
+          border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
         ),
         child: Row(
           children: [
-            _buildAvatar(contact.avatar, contact.status),
+            _buildAvatar(displayName),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    contact.name.isEmpty ? AppStrings.enterName : contact.name,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: contact.name.isEmpty ? Colors.grey[400] : null,
-                    ),
-                  ),
+                  Text(displayName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 4),
-                  Text(
-                    contact.email,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[600],
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(contact.email, style: TextStyle(fontSize: 12, color: Colors.grey[600]), maxLines: 1, overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
@@ -346,53 +256,16 @@ class ContactsModuleState extends State<ContactsModule> {
     );
   }
 
-  Widget _buildAvatar(String name, String status) {
-    Color statusColor;
-    switch (status) {
-      case 'online':
-        statusColor = Colors.green;
-        break;
-      case 'busy':
-        statusColor = Colors.orange;
-        break;
-      default:
-        statusColor = Colors.grey;
-    }
-
-    return Stack(
-      children: [
-        Container(
-          width: 45,
-          height: 45,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFFFF9966), Color(0xFFFF5E62)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(22.5),
-          ),
-          child: Center(
-            child: Text(
-              name,
-              style: const TextStyle(color: Colors.white, fontSize: 16),
-            ),
-          ),
-        ),
-        Positioned(
-          bottom: 0,
-          right: 0,
-          child: Container(
-            width: 12,
-            height: 12,
-            decoration: BoxDecoration(
-              color: statusColor,
-              border: Border.all(color: Colors.white, width: 2),
-              borderRadius: BorderRadius.circular(6),
-            ),
-          ),
-        ),
-      ],
+  Widget _buildAvatar(String name) {
+    final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    return Container(
+      width: 45,
+      height: 45,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [Color(0xFFFF9966), Color(0xFFFF5E62)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+        borderRadius: BorderRadius.circular(22.5),
+      ),
+      child: Center(child: Text(initial, style: const TextStyle(color: Colors.white, fontSize: 16))),
     );
   }
 
@@ -421,69 +294,58 @@ class ContactsModuleState extends State<ContactsModule> {
                 ],
               ),
             )
-          : _ContactEditPanel(
-              key: ValueKey(_selectedContact!.id == 0 ? 'new_${_selectedContact.hashCode}' : 'contact_${_selectedContact!.id}'),
+          : _AddressBookEditPanel(
+              key: ValueKey('contact_${_selectedContact!.id}'),
               contact: _selectedContact!,
-              existingCategories: _groups.skip(1).toList(),
-              isNew: _isNewContact,
-              onSave: _saveNewContact,
-              onDelete: _isNewContact ? _cancelNewContact : _deleteContact,
+              existingGroups: _groups.skip(1).toList(),
+              onSave: _saveContact,
+              onDelete: _deleteContact,
             ),
       ),
     );
   }
 }
 
-class Contact {
+class AddressBookEntry {
   final int id;
-  final String name;
-  final String phone;
   final String email;
-  final String avatar;
-  final List<String> categories;
-  final String status;
+  final String name;
+  final String groupName;
   final String notes;
-  final String key;
 
-  Contact({
+  AddressBookEntry({
     required this.id,
-    required this.name,
-    required this.phone,
     required this.email,
-    required this.avatar,
-    required this.categories,
-    required this.status,
-    this.notes = '',
-    this.key = '',
+    required this.name,
+    required this.groupName,
+    required this.notes,
   });
 }
 
-class _ContactEditPanel extends StatefulWidget {
-  final Contact contact;
-  final List<String> existingCategories;
-  final bool isNew;
-  final void Function(Contact) onSave;
+class _AddressBookEditPanel extends StatefulWidget {
+  final AddressBookEntry contact;
+  final List<String> existingGroups;
+  final void Function(AddressBookEntry) onSave;
   final VoidCallback onDelete;
 
-  const _ContactEditPanel({
+  const _AddressBookEditPanel({
     super.key,
     required this.contact,
-    required this.existingCategories,
-    required this.isNew,
+    required this.existingGroups,
     required this.onSave,
     required this.onDelete,
   });
 
   @override
-  State<_ContactEditPanel> createState() => _ContactEditPanelState();
+  State<_AddressBookEditPanel> createState() => _AddressBookEditPanelState();
 }
 
-class _ContactEditPanelState extends State<_ContactEditPanel> {
+class _AddressBookEditPanelState extends State<_AddressBookEditPanel> {
   late final TextEditingController _emailController;
   late final TextEditingController _nameController;
   late final TextEditingController _notesController;
-  final _categoryController = TextEditingController();
-  late List<String> _selectedCategories;
+  late final TextEditingController _groupController;
+  String _selectedGroup = '';
   bool _saved = false;
 
   @override
@@ -492,7 +354,8 @@ class _ContactEditPanelState extends State<_ContactEditPanel> {
     _emailController = TextEditingController(text: widget.contact.email);
     _nameController = TextEditingController(text: widget.contact.name);
     _notesController = TextEditingController(text: widget.contact.notes);
-    _selectedCategories = List.from(widget.contact.categories);
+    _selectedGroup = widget.contact.groupName;
+    _groupController = TextEditingController();
   }
 
   @override
@@ -500,30 +363,13 @@ class _ContactEditPanelState extends State<_ContactEditPanel> {
     _emailController.dispose();
     _nameController.dispose();
     _notesController.dispose();
-    _categoryController.dispose();
+    _groupController.dispose();
     super.dispose();
-  }
-
-  void _addCategory(String cat) {
-    final trimmed = cat.trim();
-    if (trimmed.isNotEmpty && !_selectedCategories.contains(trimmed)) {
-      setState(() {
-        _selectedCategories.add(trimmed);
-        _categoryController.clear();
-      });
-    }
-  }
-
-  void _removeCategory(String cat) {
-    setState(() {
-      _selectedCategories.remove(cat);
-    });
   }
 
   void _save() {
     if (_saved) return;
     _saved = true;
-    final email = _emailController.text.trim();
     final name = _nameController.text.trim();
     final notes = _notesController.text.trim();
 
@@ -534,43 +380,32 @@ class _ContactEditPanelState extends State<_ContactEditPanel> {
       );
       return;
     }
-    if (email.isEmpty) {
-      _saved = false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(AppStrings.enterEmail), duration: const Duration(seconds: 2)),
-      );
-      return;
-    }
 
-    final avatar = name.isNotEmpty ? name[0] : '?';
-    final contact = Contact(
+    widget.onSave(AddressBookEntry(
       id: widget.contact.id,
+      email: widget.contact.email,
       name: name,
-      phone: '',
-      email: email,
-      avatar: avatar,
-      categories: _selectedCategories.isNotEmpty ? List.from(_selectedCategories) : [AppStrings.isZh ? '我的好友' : 'Friends'],
-      status: 'offline',
+      groupName: _selectedGroup,
       notes: notes,
-      key: widget.contact.key,
-    );
-
-    widget.onSave(contact);
+    ));
   }
 
   Widget _buildLabel(String text) {
     return Text(text, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500));
   }
 
-  Widget _buildField(TextEditingController controller, String hint, {int maxLines = 1}) {
+  Widget _buildField(TextEditingController controller, String hint, {int maxLines = 1, bool readOnly = false}) {
     return TextField(
       controller: controller,
       maxLines: maxLines,
+      readOnly: readOnly,
       decoration: InputDecoration(
         hintText: hint,
         hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        filled: readOnly,
+        fillColor: readOnly ? Colors.grey[100] : null,
       ),
     );
   }
@@ -585,7 +420,7 @@ class _ContactEditPanelState extends State<_ContactEditPanel> {
           children: [
             _buildLabel(AppStrings.contactEmail),
             const SizedBox(height: 6),
-            _buildField(_emailController, AppStrings.enterEmail),
+            _buildField(_emailController, '', readOnly: true),
             const SizedBox(height: 16),
 
             _buildLabel(AppStrings.contactName),
@@ -593,68 +428,74 @@ class _ContactEditPanelState extends State<_ContactEditPanel> {
             _buildField(_nameController, AppStrings.enterName),
             const SizedBox(height: 16),
 
-            _buildLabel(AppStrings.contactCategory),
+            _buildLabel(AppStrings.isZh ? '分组' : 'Group'),
             const SizedBox(height: 6),
-            if (widget.existingCategories.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: widget.existingCategories.map((cat) {
-                    final isSelected = _selectedCategories.contains(cat);
-                    return FilterChip(
-                      label: Text(cat, style: const TextStyle(fontSize: 12)),
-                      selected: isSelected,
-                      onSelected: (selected) {
-                        setState(() {
-                          if (selected) {
-                            _selectedCategories.add(cat);
-                          } else {
-                            _selectedCategories.remove(cat);
-                          }
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
-              ),
             Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _categoryController,
+                  child: DropdownButtonFormField<String>(
+                    value: _selectedGroup.isNotEmpty && widget.existingGroups.contains(_selectedGroup)
+                      ? _selectedGroup : null,
                     decoration: InputDecoration(
-                      hintText: AppStrings.selectOrInputCategory,
+                      hintText: AppStrings.isZh ? '选择分组' : 'Select group',
                       hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),
-                    onSubmitted: _addCategory,
+                    items: [
+                      ...widget.existingGroups.map((g) => DropdownMenuItem(
+                        value: g,
+                        child: Text(g, style: const TextStyle(fontSize: 13)),
+                      )),
+                      if (_selectedGroup.isNotEmpty && !widget.existingGroups.contains(_selectedGroup))
+                        DropdownMenuItem(
+                          value: _selectedGroup,
+                          child: Text(_selectedGroup, style: const TextStyle(fontSize: 13)),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      setState(() { _selectedGroup = value ?? ''; });
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 200,
+                  child: TextField(
+                    controller: _groupController,
+                    decoration: InputDecoration(
+                      hintText: AppStrings.isZh ? '或输入新分组' : 'Or type new group',
+                      hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    onSubmitted: (value) {
+                      final trimmed = value.trim();
+                      if (trimmed.isNotEmpty) {
+                        setState(() { _selectedGroup = trimmed; _groupController.clear(); });
+                      }
+                    },
                   ),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
-                  onPressed: () => _addCategory(_categoryController.text),
+                  onPressed: () {
+                    final trimmed = _groupController.text.trim();
+                    if (trimmed.isNotEmpty) {
+                      setState(() { _selectedGroup = trimmed; _groupController.clear(); });
+                    }
+                  },
                   icon: const Icon(Icons.add_circle, size: 22),
                   color: Theme.of(context).colorScheme.primary,
                 ),
               ],
             ),
-            if (_selectedCategories.any((c) => !widget.existingCategories.contains(c)))
+            if (_selectedGroup.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: _selectedCategories
-                      .where((c) => !widget.existingCategories.contains(c))
-                      .map((cat) => Chip(
-                            label: Text(cat, style: const TextStyle(fontSize: 12)),
-                            deleteIcon: const Icon(Icons.close, size: 16),
-                            onDeleted: () => _removeCategory(cat),
-                          ))
-                      .toList(),
+                child: Chip(
+                  label: Text(_selectedGroup, style: const TextStyle(fontSize: 12)),
+                  onDeleted: () { setState(() { _selectedGroup = ''; }); },
                 ),
               ),
             const SizedBox(height: 16),
@@ -669,9 +510,7 @@ class _ContactEditPanelState extends State<_ContactEditPanel> {
               children: [
                 TextButton(
                   onPressed: widget.onDelete,
-                  style: TextButton.styleFrom(
-                    foregroundColor: Colors.red,
-                  ),
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
                   child: Text(AppStrings.delete),
                 ),
                 const SizedBox(width: 8),

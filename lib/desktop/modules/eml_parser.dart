@@ -135,8 +135,10 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
                       } else if (msgType == 'truck') {
                         textBody = '[File chunk data]';
                       } else {
-                        textBody = decryptedText;
+                        textBody = decryptedJson['text'] as String? ?? decryptedText;
                       }
+                    } else if (decryptedJson is Map && decryptedJson.containsKey('text')) {
+                      textBody = decryptedJson['text'] as String? ?? decryptedText;
                     } else {
                       textBody = decryptedText;
                     }

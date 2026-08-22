@@ -224,11 +224,12 @@ class EmailModuleState extends State<EmailModule>
         switch (msg.type) {
           case 'new_emails':
             _logToFile('Background: new emails for ${msg.account}, count=${msg.data?['count']}');
+            clearEmlCache();
             await _loadEmailsFromDb();
             break;
           case 'email_sent':
             _logToFile('Background: email sent for ${msg.account}, message_id=${msg.data?['message_id']}');
-            clearEmlCache(); // Clear cache to force re-parsing with decryption for newly sent emails
+            clearEmlCache();
             await _loadEmailsFromDb();
             break;
           case 'log':
@@ -251,11 +252,13 @@ class EmailModuleState extends State<EmailModule>
             break;
           case 'bodies_downloaded':
             _logToFile('Background: downloaded ${msg.data?['count']} email bodies for ${msg.account}');
-            await _loadEmailsFromDb();
-            break;
-          case 'email_sent':
-            _logToFile('Background: email sent, session_id=${msg.data?['session_id']}, email_id=${msg.data?['email_id']}');
-            // Reload emails to show the newly sent email
+            if (msg.data?['file_completes'] != null) {
+              final completes = msg.data!['file_completes'] as List;
+              for (final fc in completes) {
+                _logToFile('Background: file download complete, file_id=${fc['file_id']}');
+              }
+            }
+            clearEmlCache();
             await _loadEmailsFromDb();
             break;
           default:
@@ -367,6 +370,7 @@ class EmailModuleState extends State<EmailModule>
         'email': email,
         'authCode': authCode,
         'configIndex': configIndex,
+        'storageDir': _emailDataPath,
       });
       _logToFile('fetchAndStoreEmails result: $fetchResult');
 

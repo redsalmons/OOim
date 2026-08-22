@@ -180,7 +180,8 @@ int email_get_content(int configIndex, const char* folder, const char* uid, char
 // and store them in the localemail SQLite table.
 // Returns 0 on success, negative on error. outJson contains the fetched emails JSON.
 int email_fetch_and_store(int configIndex, const char* folder, const char* startUid,
-                          const char* account, char* outJson, int outSize);
+                          const char* account, const char* storageDir,
+                          char* outJson, int outSize);
 
 // Insert sent email into database. Returns 0 on success, negative on error.
 int email_insert_sent_email(const char* account, const char* sender, const char* from_addr, const char* to_addr, const char* subject, const char* date, const char* message_id, const char* in_reply_to, const char* body, const char* storageDir, char* outJson, int outSize);
@@ -330,6 +331,19 @@ int email_file_transfer_query_pending(const char* account, char* outJson, int ou
 // Reassemble a file from received chunks (manual trigger).
 int email_file_transfer_reassemble(const char* fileId, const char* outputDir,
                                     char* outJson, int outSize);
+
+// Copy a sent file from its original path to output directory (for sender Save As).
+int email_file_transfer_copy_original(const char* fileId, const char* outputDir,
+                                       char* outJson, int outSize);
+
+// Addressbook API
+int addressbook_add_email(const char* email, const char* name);
+const char* addressbook_query_all();
+const char* addressbook_query_groups();
+int addressbook_update(int id, const char* name, const char* groupName, const char* notes);
+int addressbook_delete(int id);
+int addressbook_extract_from_header(const char* headerValue);
+int addressbook_migrate_from_emails();
 
 #ifdef __cplusplus
 }

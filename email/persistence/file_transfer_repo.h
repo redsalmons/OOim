@@ -18,6 +18,7 @@ struct FileTransferRecord {
     int chunkSize = 0;
     int status = 0;  // 0=pending, 1=complete, 2=failed
     std::string messageId;
+    std::string originalPath;
     std::string createdAt;
     std::string updatedAt;
 };

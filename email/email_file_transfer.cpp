@@ -1,6 +1,7 @@
 #include "email_core_common.h"
 #include "email_core.h"
 #include "logger.h"
+#include "x_mailer.h"
 #include "db_connection.h"
 #include "persistence/file_transfer_repo.h"
 #include "persistence/task_repo.h"
@@ -21,8 +22,8 @@ using json = nlohmann::json;
 static FileTransferRepo s_fileTransferRepo;
 static TaskRepo s_taskRepo;
 
-// Default chunk size: 512 KB (can be adjusted)
-static const int DEFAULT_CHUNK_SIZE = 512 * 1024;
+// Default chunk size: 3 MB (can be adjusted)
+static const int DEFAULT_CHUNK_SIZE = 3 * 1024 * 1024; // 3 MB
 
 // Generate a unique file_id
 static std::string generate_file_id() {
@@ -180,6 +181,7 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
     ftRec.totalChunks = totalChunks;
     ftRec.chunkSize = chunkSize;
     ftRec.status = 0; // Pending until confirmed via INBOX
+    ftRec.originalPath = filePathStr;
 
     if (!s_fileTransferRepo.insertFileTransfer(ftRec)) {
         LOG_INFO("email_file_split_and_send: failed to insert file_transfer record\n");
@@ -189,7 +191,8 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
         return -4;
     }
 
-    // Create "file" metadata message task
+    // Create "file" metadata message task (X-Mailer=0.1.3)
+    std::string fileMsgId;
     {
         char fileMsgJson[8192];
         int rc = email_prepare_file_message(fileId.c_str(), fileNameStr.c_str(),
@@ -201,14 +204,17 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
         if (rc != 0) {
             LOG_INFO("email_file_split_and_send: failed to prepare file message, rc=%d\n", rc);
         } else {
-            std::string msgId = "<file_" + fileId + "@" + accountStr.substr(accountStr.find('@') + 1) + ">";
+            std::string domain = accountStr.substr(accountStr.find('@') + 1);
+            fileMsgId = "<file_" + fileId + "@" + domain + ">";
             s_taskRepo.insert(accountStr, recipientStr, subjectStr, fileMsgJson,
-                              inReplyToStr, msgId, msgId, sessionIdStr, "data");
-            LOG_INFO("email_file_split_and_send: created file metadata task, msg_id=%s\n", msgId.c_str());
+                              inReplyToStr, fileMsgId, fileMsgId, sessionIdStr, XMailer::FILE_META);
+            LOG_INFO("email_file_split_and_send: created file metadata task (0.1.3), msg_id=%s\n", fileMsgId.c_str());
         }
     }
 
-    // Create "truck" chunk message tasks
+    // Create "truck" chunk message tasks (X-Mailer=0.1.4)
+    // Chain: truck_0.last_message_id → file metadata, truck_i.last_message_id → truck_(i-1)
+    std::string prevMsgId = fileMsgId; // First truck points to file metadata
     for (int i = 0; i < totalChunks; i++) {
         auto chunkData = read_file_chunk(filePathStr, i, chunkSize);
         if (chunkData.empty() && i < totalChunks - 1) {
@@ -219,7 +225,8 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
         std::string chunkB64 = base64_encode(chunkData.data(), chunkData.size());
         std::string chunkMd5 = compute_md5(std::string(chunkData.begin(), chunkData.end()));
 
-        std::vector<char> truckMsgJson(2 * 1024 * 1024);
+        size_t truckBufSize = chunkB64.size() + 4096;
+        std::vector<char> truckMsgJson(truckBufSize);
         int rc = email_prepare_truck_message(fileId.c_str(), i,
                                              chunkB64.c_str(), chunkMd5.c_str(),
                                              truckMsgJson.data(), (int)truckMsgJson.size());
@@ -228,12 +235,13 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
             continue;
         }
 
-        std::string msgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" +
-                            accountStr.substr(accountStr.find('@') + 1) + ">";
+        std::string domain = accountStr.substr(accountStr.find('@') + 1);
+        std::string truckMsgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" + domain + ">";
         s_taskRepo.insert(accountStr, recipientStr, subjectStr, truckMsgJson.data(),
-                          inReplyToStr, msgId, msgId, sessionIdStr, "data");
-        LOG_INFO("email_file_split_and_send: created chunk %d task, msg_id=%s, chunk_b64_len=%zu\n",
-                 i, msgId.c_str(), chunkB64.size());
+                          prevMsgId, truckMsgId, truckMsgId, sessionIdStr, XMailer::FILE_CHUNK);
+        LOG_INFO("email_file_split_and_send: created chunk %d task (0.1.4), msg_id=%s, last_msg_id=%s\n",
+                 i, truckMsgId.c_str(), prevMsgId.c_str());
+        prevMsgId = truckMsgId; // Next truck points to this one
     }
 
     // Build response
@@ -573,4 +581,54 @@ extern "C" int email_file_transfer_reassemble(const char* fileId, const char* ou
     LOG_INFO("email_file_transfer_reassemble: file_id=%s, output=%s, md5_ok=%d\n",
              fileId, outPath.c_str(), md5Ok);
     return md5Ok ? 0 : -4;
+}
+
+// Copy a sent file from its original path to the output directory (for sender Save As)
+extern "C" int email_file_transfer_copy_original(const char* fileId, const char* outputDir,
+                                                  char* outJson, int outSize) {
+    if (!fileId || !outputDir || !outJson || outSize <= 0) return -1;
+
+    FileTransferRecord rec;
+    if (!s_fileTransferRepo.queryByFileId(fileId, rec)) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"not_found"})");
+        return -1;
+    }
+
+    if (rec.originalPath.empty()) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"no_original_path"})");
+        return -2;
+    }
+
+    std::filesystem::path srcPath(rec.originalPath);
+    if (!std::filesystem::exists(srcPath)) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"original_file_not_found"})");
+        return -3;
+    }
+
+    std::string outPath = std::string(outputDir) + "/" + rec.fileName;
+    try {
+        if (std::filesystem::is_directory(srcPath)) {
+            // Remove existing destination directory first (overwrite)
+            std::filesystem::remove_all(outPath);
+            std::filesystem::copy(srcPath, outPath,
+                std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
+        } else {
+            std::filesystem::copy_file(srcPath, outPath, std::filesystem::copy_options::overwrite_existing);
+        }
+    } catch (const std::exception& e) {
+        snprintf(outJson, outSize, R"({"status":"failed","error":"copy_failed"})");
+        return -4;
+    }
+
+    json resp;
+    resp["status"] = "success";
+    resp["file_id"] = fileId;
+    resp["file_name"] = rec.fileName;
+    resp["output_path"] = outPath;
+    std::string jsonStr = resp.dump();
+    snprintf(outJson, outSize, "%s", jsonStr.c_str());
+
+    LOG_INFO("email_file_transfer_copy_original: file_id=%s, output=%s\n",
+             fileId, outPath.c_str());
+    return 0;
 }

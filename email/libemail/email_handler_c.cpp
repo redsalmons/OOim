@@ -1,6 +1,8 @@
 #include "email_handler_c.h"
 #include "email_handler.h"
 #include "email.h"
+#include "email_core.h"
+#include "x_mailer.h"
 #include "email_opt_163_impl.h"
 #include "email_opt_outlook_impl.h"
 #include "email_opt_gmail_impl.h"
@@ -9,9 +11,12 @@
 #include "email_repo.h"
 #include "session_repo.h"
 #include <string>
+#include <set>
 #include <nlohmann/json.hpp>
 #include <cstring>
 #include <mutex>
+#include <filesystem>
+#include <vector>
 
 
 // Forward declaration for db handle and mutex from email_core_utils.cpp
@@ -709,7 +714,8 @@ int GetEmailToFile_c(int configIndex, const char* folder, const char* uid, const
 }
 
 int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
-                    const char* account, char* outJson, int outSize) {
+                    const char* account, const char* storageDir,
+                    char* outJson, int outSize) {
     try {
         if (configIndex < 0 || configIndex >= static_cast<int>(oemailim::EmailHandler::g_EmailConfigIndices.size())) {
             if (outJson && outSize > 0) {
@@ -793,6 +799,13 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
 
         int stored_count = 0;
         auto emails = response["emails"];
+
+        struct DeferredEmail {
+            std::string uuid, from_addr, sender, subject, date, reply_to, in_reply_to, message_id;
+            std::string x_session_chart, servicerecvtime, bodystructure, flags, to_addr;
+        };
+        std::vector<DeferredEmail> deferredChunks;
+
         for (const auto& email_data : emails) {
             std::string uuid = email_data.value("uuid", "");
             std::string from_addr = email_data.value("from", "");
@@ -802,16 +815,15 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             std::string reply_to = email_data.value("reply_to", "");
             std::string in_reply_to = email_data.value("in_reply_to", "");
             std::string message_id = email_data.value("message_id", "");
-            std::string x_message_id = email_data.value("x_message_id", "");
             std::string x_session_chart = email_data.value("x_session_chart", "");
 
-            // If X-Message-ID header exists, use it as message_id for matching
-            // This allows sent emails (which have our locally generated X-Message-ID) to be matched
-            if (!x_message_id.empty()) {
-                LOG_INFO("FetchAndStore_c: using x_message_id='%s' as message_id (original message_id='%s')\n",
-                         x_message_id.c_str(), message_id.c_str());
-                message_id = x_message_id;
+            // Filter: only accept emails with X-Mailer in our whitelist
+            if (!XMailer::isValid(x_session_chart)) {
+                LOG_INFO("FetchAndStore_c: skipping email uuid=%s, X-Mailer='%s' not in whitelist\n",
+                         uuid.c_str(), x_session_chart.c_str());
+                continue;
             }
+
             std::string servicerecvtime = email_data.value("servicerecvtime", "");
 
             // bodystructure is now a JSON object, serialize it to string
@@ -835,6 +847,16 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
 
             if (uuid.empty()) continue;
 
+            // 0.1.4 (file chunk): defer insertion — will be inserted after download_pending_bodies
+            if (x_session_chart == XMailer::FILE_CHUNK) {
+                deferredChunks.push_back({uuid, from_addr, sender, subject, date, reply_to,
+                    in_reply_to, message_id, x_session_chart, servicerecvtime, bodystructure, flags,
+                    email_data.value("to_addr", "")});
+                continue;
+            }
+
+            // 0.1.0~0.1.3: insert with islocal=0, then download_pending_bodies will process them
+
             // Check if a record with the same message_id already exists (from sent email or previous sync)
             bool found_existing = false;
             int64_t existing_id = 0;
@@ -842,6 +864,16 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                 existing_id = s_emailRepo.findIdByMessageId(message_id, accountStr);
                 if (existing_id > 0) {
                     found_existing = true;
+                }
+            }
+            // Fallback: if message_id not found, try matching sent email (uuid=0) by in_reply_to
+            // This handles the case where SMTP rewrote the Message-ID
+            if (!found_existing && !in_reply_to.empty()) {
+                existing_id = s_emailRepo.findSentByInReplyTo(in_reply_to, accountStr);
+                if (existing_id > 0) {
+                    found_existing = true;
+                    LOG_INFO("FetchAndStore_c: matched sent email by in_reply_to=%s, id=%lld (message_id was rewritten)\n",
+                             in_reply_to.c_str(), (long long)existing_id);
                 }
             }
 
@@ -887,25 +919,98 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             insertRec.folder = folder;
             insertRec.servicerecvtime = servicerecvtime;
             insertRec.toAddr = email_data.value("to_addr", "");
-            // No X-Session-Chart header → mark as islocal=2 (no need to download body)
-            insertRec.isLocal = x_session_chart.empty() ? 2 : 0;
+            // 0.1.0~0.1.3: islocal=0 so download_pending_bodies will download, process, and set islocal=1
+            insertRec.isLocal = 0;
+            insertRec.visible = 1;
             int64_t my_rowid = s_emailRepo.insert(insertRec);
 
             if (my_rowid > 0 && folder == "INBOX") {
                 stored_count++;
 
-                LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_session_chart=%s\n", 
+                LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_mailer=%s\n", 
                          uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str());
+            }
 
-                // Session is only created via X-Session-Chart=new in download_pending_bodies
-                // Here we only match in_reply_to to join existing sessions
-                if (x_session_chart != "new" && !in_reply_to.empty()) {
-                    std::string session_id = s_sessionRepo.querySessionByInReplyTo(in_reply_to, accountStr);
-                    if (!session_id.empty()) {
-                        s_sessionRepo.insertSessionAssoc(session_id, my_rowid);
-                        LOG_INFO("FetchAndStore_c: matched in_reply_to to session=%s, email_id=%lld\n", session_id.c_str(), my_rowid);
-                    }
+            // Extract contacts from From and To headers into addressbook
+            if (!from_addr.empty()) {
+                addressbook_extract_from_header(from_addr.c_str());
+            }
+            if (!email_data.value("to_addr", "").empty()) {
+                addressbook_extract_from_header(email_data.value("to_addr", "").c_str());
+            }
+        }
+
+        // Phase 2: Download and process 0.1.0~0.1.3 emails via download_pending_bodies
+        // This downloads .eml, extracts x_message_id, updates message_id, does session/key
+        // association, and sets islocal=1
+        std::string storageDirStr = storageDir ? storageDir : "";
+        if (!storageDirStr.empty() && stored_count > 0) {
+            LOG_INFO("FetchAndStore_c: calling download_pending_bodies to process %d new emails\n", stored_count);
+            char dlResult[65536];
+            int dlRc = email_download_pending_bodies(configIndex, accountStr.c_str(),
+                                                     storageDirStr.c_str(), dlResult, sizeof(dlResult));
+            LOG_INFO("FetchAndStore_c: download_pending_bodies result=%d, json=%s\n", dlRc, dlResult);
+        }
+
+        // Phase 3: Insert 0.1.4 (file chunk) emails with islocal=0 — let download thread handle
+        for (const auto& dc : deferredChunks) {
+            bool found_existing = false;
+            int64_t existing_id = 0;
+            if (!dc.message_id.empty()) {
+                existing_id = s_emailRepo.findIdByMessageId(dc.message_id, accountStr);
+                if (existing_id > 0) {
+                    found_existing = true;
                 }
+            }
+            if (!found_existing && !dc.in_reply_to.empty()) {
+                existing_id = s_emailRepo.findSentByInReplyTo(dc.in_reply_to, accountStr);
+                if (existing_id > 0) {
+                    found_existing = true;
+                }
+            }
+
+            if (found_existing) {
+                EmailRecord updateRec;
+                updateRec.uuid = dc.uuid;
+                updateRec.sender = dc.sender;
+                updateRec.fromAddr = dc.from_addr;
+                updateRec.subject = dc.subject;
+                updateRec.date = dc.date;
+                updateRec.bodystructure = dc.bodystructure;
+                updateRec.replyTo = dc.reply_to;
+                updateRec.inReplyTo = dc.in_reply_to;
+                updateRec.flags = dc.flags;
+                updateRec.folder = folderStr;
+                updateRec.servicerecvtime = dc.servicerecvtime;
+                updateRec.toAddr = dc.to_addr;
+                s_emailRepo.updateById(existing_id, updateRec);
+                stored_count++;
+                continue;
+            }
+
+            EmailRecord insertRec;
+            insertRec.uuid = dc.uuid;
+            insertRec.account = accountStr;
+            insertRec.sender = dc.sender;
+            insertRec.fromAddr = dc.from_addr;
+            insertRec.subject = dc.subject;
+            insertRec.date = dc.date;
+            insertRec.bodystructure = dc.bodystructure;
+            insertRec.replyTo = dc.reply_to;
+            insertRec.inReplyTo = dc.in_reply_to;
+            insertRec.messageId = dc.message_id;
+            insertRec.flags = dc.flags;
+            insertRec.folder = folderStr;
+            insertRec.servicerecvtime = dc.servicerecvtime;
+            insertRec.toAddr = dc.to_addr;
+            insertRec.isLocal = 0;
+            insertRec.visible = 0;
+            int64_t my_rowid = s_emailRepo.insert(insertRec);
+
+            if (my_rowid > 0) {
+                stored_count++;
+                LOG_INFO("FetchAndStore_c: deferred 0.1.4 uuid=%s, message_id=%s, islocal=0\n",
+                         dc.uuid.c_str(), dc.message_id.c_str());
             }
         }
 

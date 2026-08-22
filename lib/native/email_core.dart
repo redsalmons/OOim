@@ -249,8 +249,8 @@ typedef _EmailListDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, int);
 typedef _EmailGetContentNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailGetContentDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _EmailFetchAndStoreNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _EmailFetchAndStoreDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _EmailFetchAndStoreNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFetchAndStoreDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _EmailQueryLocalemailNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailQueryLocalemailDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
@@ -370,6 +370,22 @@ typedef _ContactQueryAllDart = Pointer<Utf8> Function();
 typedef _ContactDeleteNative = Int32 Function(Int32);
 typedef _ContactDeleteDart = int Function(int);
 
+// Addressbook
+typedef _AddressbookQueryAllNative = Pointer<Utf8> Function();
+typedef _AddressbookQueryAllDart = Pointer<Utf8> Function();
+
+typedef _AddressbookQueryGroupsNative = Pointer<Utf8> Function();
+typedef _AddressbookQueryGroupsDart = Pointer<Utf8> Function();
+
+typedef _AddressbookUpdateNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _AddressbookUpdateDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
+typedef _AddressbookDeleteNative = Int32 Function(Int32);
+typedef _AddressbookDeleteDart = int Function(int);
+
+typedef _AddressbookMigrateNative = Int32 Function();
+typedef _AddressbookMigrateDart = int Function();
+
 typedef _EmailLogWriteNative = Void Function(Pointer<Utf8>);
 typedef _EmailLogWriteDart = void Function(Pointer<Utf8>);
 
@@ -404,6 +420,9 @@ typedef _EmailFileTransferQueryPendingDart = int Function(Pointer<Utf8>, Pointer
 
 typedef _EmailFileTransferReassembleNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailFileTransferReassembleDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _EmailFileTransferCopyOriginalNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFileTransferCopyOriginalDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 // ---------------------------------------------------------------------------
 // Library loading
@@ -506,6 +525,12 @@ final _contactAdd = _lib.lookupFunction<_ContactAddNative, _ContactAddDart>('con
 final _contactQueryAll = _lib.lookupFunction<_ContactQueryAllNative, _ContactQueryAllDart>('contact_query_all');
 final _contactDelete = _lib.lookupFunction<_ContactDeleteNative, _ContactDeleteDart>('contact_delete');
 
+final _addressbookQueryAll = _lib.lookupFunction<_AddressbookQueryAllNative, _AddressbookQueryAllDart>('addressbook_query_all');
+final _addressbookQueryGroups = _lib.lookupFunction<_AddressbookQueryGroupsNative, _AddressbookQueryGroupsDart>('addressbook_query_groups');
+final _addressbookUpdate = _lib.lookupFunction<_AddressbookUpdateNative, _AddressbookUpdateDart>('addressbook_update');
+final _addressbookDelete = _lib.lookupFunction<_AddressbookDeleteNative, _AddressbookDeleteDart>('addressbook_delete');
+final _addressbookMigrate = _lib.lookupFunction<_AddressbookMigrateNative, _AddressbookMigrateDart>('addressbook_migrate_from_emails');
+
 final _emailTaskInsert = _lib.lookupFunction<_EmailTaskInsertNative, _EmailTaskInsertDart>('email_task_insert');
 final _emailTaskQueryPending = _lib.lookupFunction<_EmailTaskQueryPendingNative, _EmailTaskQueryPendingDart>('email_task_query_pending');
 final _emailTaskMarkSent = _lib.lookupFunction<_EmailTaskMarkSentNative, _EmailTaskMarkSentDart>('email_task_mark_sent');
@@ -518,6 +543,7 @@ final _emailFileSplitAndSend = _lib.lookupFunction<_EmailFileSplitAndSendNative,
 final _emailFileTransferQuery = _lib.lookupFunction<_EmailFileTransferQueryNative, _EmailFileTransferQueryDart>('email_file_transfer_query');
 final _emailFileTransferQueryPending = _lib.lookupFunction<_EmailFileTransferQueryPendingNative, _EmailFileTransferQueryPendingDart>('email_file_transfer_query_pending');
 final _emailFileTransferReassemble = _lib.lookupFunction<_EmailFileTransferReassembleNative, _EmailFileTransferReassembleDart>('email_file_transfer_reassemble');
+final _emailFileTransferCopyOriginal = _lib.lookupFunction<_EmailFileTransferCopyOriginalNative, _EmailFileTransferCopyOriginalDart>('email_file_transfer_copy_original');
 
 // ---------------------------------------------------------------------------
 // Idiomatic Dart data classes
@@ -611,6 +637,26 @@ EmailMessage _emailMessageFromNative(_NativeEmail email) {
     body: email.body.toDartString(),
     timestamp: email.timestamp.toDartString(),
   );
+}
+
+// ---------------------------------------------------------------------------
+// X-Mailer header values for message type classification
+// ---------------------------------------------------------------------------
+
+class XMailer {
+  static const String header = 'X-Mailer';
+
+  static const String newSession = '0.1.0';  // New session creation
+  static const String exchange    = '0.1.1';  // Key exchange
+  static const String text        = '0.1.2';  // Encrypted text message
+  static const String fileMeta    = '0.1.3';  // File metadata (visible in UI)
+  static const String fileChunk   = '0.1.4';  // File chunk (hidden from UI)
+
+  static const List<String> whitelist = [
+    newSession, exchange, text, fileMeta, fileChunk,
+  ];
+
+  static bool isValid(String value) => whitelist.contains(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,7 +1118,7 @@ class EmailCore {
 
   /// Fetches email headers from IMAP and stores them in localemail SQLite table.
   /// Returns JSON string with fetched emails and stored count.
-  static String fetchAndStoreEmails(int configIndex, String folder, String account) {
+  static String fetchAndStoreEmails(int configIndex, String folder, String account, String storageDir) {
     // Get max UID from localemail table to use as start point
     String startUid = getMaxUid(account, folder);
     if (startUid.isEmpty) {
@@ -1082,15 +1128,17 @@ class EmailCore {
     final folderPtr = folder.toNativeUtf8();
     final startUidPtr = startUid.toNativeUtf8();
     final accountPtr = account.toNativeUtf8();
+    final storageDirPtr = storageDir.toNativeUtf8();
     final outJson = malloc.allocate<Utf8>(65536);
     try {
-      final result = _emailFetchAndStore(configIndex, folderPtr, startUidPtr, accountPtr, outJson, 65536);
+      final result = _emailFetchAndStore(configIndex, folderPtr, startUidPtr, accountPtr, storageDirPtr, outJson, 65536);
       // Always return outJson content, even on error (it contains the error details)
       return outJson.toDartString();
     } finally {
       malloc.free(folderPtr);
       malloc.free(startUidPtr);
       malloc.free(accountPtr);
+      malloc.free(storageDirPtr);
       malloc.free(outJson);
     }
   }
@@ -1375,7 +1423,7 @@ class EmailCore {
     }
   }
 
-  /// Decrypts an x_session_chart=data email body for the given account.
+  /// Decrypts an X-Mailer=0.1.2/0.1.3/0.1.4 email body for the given account.
   /// Returns 0 on success, negative on error. Output plaintext in outJson.
   static int decryptDataBody(String encryptedBody, String account, Pointer<Utf8> outJson, int outSize) {
     final bodyPtr = encryptedBody.toNativeUtf8();
@@ -1455,6 +1503,53 @@ class EmailCore {
     return _contactDelete(id);
   }
 
+  /// Queries all addressbook entries. Returns JSON string array, or null on error.
+  static String? addressbookQueryAll() {
+    final ptr = _addressbookQueryAll();
+    if (ptr == nullptr) return null;
+    try {
+      return ptr.toDartString();
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Queries all distinct group names from addressbook. Returns JSON string array, or null on error.
+  static String? addressbookQueryGroups() {
+    final ptr = _addressbookQueryGroups();
+    if (ptr == nullptr) return null;
+    try {
+      return ptr.toDartString();
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Updates an addressbook entry. Returns 0 on success, negative on error.
+  static int addressbookUpdate(int id, String name, String groupName, String notes) {
+    final namePtr = name.toNativeUtf8();
+    final groupPtr = groupName.toNativeUtf8();
+    final notesPtr = notes.toNativeUtf8();
+    try {
+      return _addressbookUpdate(id, namePtr, groupPtr, notesPtr);
+    } finally {
+      malloc.free(namePtr);
+      malloc.free(groupPtr);
+      malloc.free(notesPtr);
+    }
+  }
+
+  /// Deletes an addressbook entry by id. Returns 0 on success, negative on error.
+  static int addressbookDelete(int id) {
+    return _addressbookDelete(id);
+  }
+
+  /// Migrates contacts from existing localemail records into addressbook.
+  /// Returns the number of new contacts added.
+  static int addressbookMigrate() {
+    return _addressbookMigrate();
+  }
+
   /// Inserts a send task into the task table with basic email info. Returns task id (>0) on success, negative on error.
   static int taskInsert({
     required String account,
@@ -1465,7 +1560,7 @@ class EmailCore {
     String messageId = '',
     String xMessageId = '',
     String sessionId = '',
-    String xSessionChart = 'data',
+    String xSessionChart = XMailer.text,
   }) {
     final accountPtr = account.toNativeUtf8();
     final recipientPtr = recipient.toNativeUtf8();
@@ -1609,6 +1704,21 @@ class EmailCore {
     final outJson = malloc.allocate<Utf8>(8192);
     try {
       _emailFileTransferReassemble(fileIdPtr, outputDirPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(fileIdPtr);
+      malloc.free(outputDirPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Copies a sent file from its original path to output directory (for sender Save As).
+  static String fileTransferCopyOriginal(String fileId, String outputDir) {
+    final fileIdPtr = fileId.toNativeUtf8();
+    final outputDirPtr = outputDir.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      _emailFileTransferCopyOriginal(fileIdPtr, outputDirPtr, outJson, 8192);
       return outJson.toDartString();
     } finally {
       malloc.free(fileIdPtr);

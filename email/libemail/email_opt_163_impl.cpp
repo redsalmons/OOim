@@ -1,6 +1,7 @@
 #include "email_opt_163_impl.h"
 #include "email_core.h"
 #include "email_core_common.h"
+#include "x_mailer.h"
 #include "db_connection.h"
 #include "session_repo.h"
 #include "email_handler.h"
@@ -390,30 +391,85 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
 
             auto nonConstSock = vmime::const_pointer_cast<vmime::net::socket>(sock);
             std::string fullResponse;
-            int safety = 50;
-            bool gotComplete = false;
             
-            while (!gotComplete && safety-- > 0) {
-                if (!nonConstSock->waitForRead(10000)) break;
+            // Phase 1: Read until we find the {size} marker
+            size_t literalSize = 0;
+            size_t braceEndPos = std::string::npos;
+            while (braceEndPos == std::string::npos) {
+                if (!nonConstSock->waitForRead(30000)) {
+                    last_error_ = "Failed to get email: timeout waiting for FETCH response header";
+                    LOG_INFO("163 get_email - timeout waiting for response header\n");
+                    return "";
+                }
                 std::string data;
                 nonConstSock->receive(data);
                 fullResponse += data;
                 
-                // Check for tagged response (end of FETCH)
-                vmime::shared_ptr<vmime::net::imap::IMAPTag> tag = conn->getTag();
-                std::string tagStr = *tag;
-                if (data.find(tagStr + " OK") != std::string::npos ||
-                    data.find(tagStr + " BAD") != std::string::npos ||
-                    data.find(tagStr + " NO") != std::string::npos) {
-                    gotComplete = true;
+                // Look for {size} marker after BODY[]
+                size_t bodyPos = fullResponse.find("BODY[]");
+                if (bodyPos != std::string::npos) {
+                    size_t bStart = fullResponse.find("{", bodyPos);
+                    if (bStart != std::string::npos) {
+                        braceEndPos = fullResponse.find("}", bStart);
+                        if (braceEndPos != std::string::npos) {
+                            std::string sizeStr = fullResponse.substr(bStart + 1, braceEndPos - bStart - 1);
+                            literalSize = std::stoull(sizeStr);
+                            LOG_INFO("163 get_email - literal size=%zu bytes\n", literalSize);
+                        }
+                    }
                 }
             }
+            
+            // Phase 2: Read until we have all literal content + closing )\r\n + tagged response
+            // Content starts after }\r\n
+            size_t contentStart = braceEndPos + 1;
+            if (contentStart + 2 <= fullResponse.size() && fullResponse[contentStart] == '\r' && fullResponse[contentStart + 1] == '\n') {
+                contentStart += 2;
+            }
+            
+            // Keep reading until we have contentStart + literalSize bytes, plus closing tag
+            vmime::shared_ptr<vmime::net::imap::IMAPTag> tag = conn->getTag();
+            std::string tagStr = *tag;
+            bool gotComplete = false;
+            int safety = 5000;  // Much higher limit for large emails
+            
+            while (!gotComplete && safety-- > 0) {
+                size_t currentContent = fullResponse.size() - contentStart;
+                if (currentContent >= literalSize) {
+                    // We have all literal content, check for tagged response
+                    if (fullResponse.find(tagStr + " OK") != std::string::npos ||
+                        fullResponse.find(tagStr + " BAD") != std::string::npos ||
+                        fullResponse.find(tagStr + " NO") != std::string::npos) {
+                        gotComplete = true;
+                        break;
+                    }
+                    // Need to read more to get the tagged response
+                }
+                if (!nonConstSock->waitForRead(30000)) {
+                    // Timeout — check if we already have the tagged response
+                    if (fullResponse.find(tagStr + " OK") != std::string::npos ||
+                        fullResponse.find(tagStr + " BAD") != std::string::npos ||
+                        fullResponse.find(tagStr + " NO") != std::string::npos) {
+                        gotComplete = true;
+                    }
+                    break;
+                }
+                std::string data;
+                nonConstSock->receive(data);
+                fullResponse += data;
+            }
+            
+            if (!gotComplete && (fullResponse.size() - contentStart) < literalSize) {
+                last_error_ = "Failed to get email: incomplete response, got " + std::to_string(fullResponse.size() - contentStart) + " of " + std::to_string(literalSize) + " bytes";
+                LOG_INFO("163 get_email - incomplete response: got %zu of %zu bytes\n", fullResponse.size() - contentStart, literalSize);
+                return "";
+            }
 
-            LOG_INFO("163 get_email - FETCH response received, size=%zu\n", fullResponse.size());
-            LOG_INFO("163 get_email - FETCH response content: %s\n", fullResponse.c_str());
+            LOG_INFO("163 get_email - FETCH response received, total_size=%zu, literal_size=%zu\n", fullResponse.size(), literalSize);
             
             // Parse FETCH response to extract email body
             // Format: * UID FETCH (BODY[] {size}\r\n<email content>\r\n)
+            // We already parsed BODY[] and {size} in Phase 1, so reuse those values
             size_t bodyStart = fullResponse.find("BODY[]");
             if (bodyStart == std::string::npos) {
                 last_error_ = "No BODY[] in response";
@@ -421,43 +477,16 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
                 return "";
             }
             
-            // Find the opening brace after BODY[]
-            size_t braceStart = fullResponse.find("{", bodyStart);
-            if (braceStart == std::string::npos) {
-                last_error_ = "No size in BODY[]";
-                LOG_INFO("163 get_email - no size in BODY[]\n");
-                return "";
+            // Email content starts after }\r\n (already calculated in Phase 2)
+            // Use the contentStart we already computed
+            // Content is exactly literalSize bytes starting from contentStart
+            if (contentStart + literalSize > fullResponse.size()) {
+                // Truncated response — extract what we have
+                literalSize = fullResponse.size() - contentStart;
+                LOG_INFO("163 get_email - warning: response truncated, extracting %zu bytes\n", literalSize);
             }
             
-            // Find the closing brace
-            size_t braceEnd = fullResponse.find("}", braceStart);
-            if (braceEnd == std::string::npos) {
-                last_error_ = "Invalid BODY[] format";
-                LOG_INFO("163 get_email - invalid BODY[] format\n");
-                return "";
-            }
-            
-            // Email content starts after }\r\n
-            size_t contentStart = braceEnd + 1;
-            if (contentStart + 2 < fullResponse.size() && fullResponse[contentStart] == '\r' && fullResponse[contentStart + 1] == '\n') {
-                contentStart += 2;
-            }
-            
-            // Email content ends before the closing ) of the FETCH response
-            size_t contentEnd = fullResponse.rfind(")");
-            if (contentEnd == std::string::npos || contentEnd <= contentStart) {
-                last_error_ = "Invalid FETCH response format";
-                LOG_INFO("163 get_email - invalid FETCH response format\n");
-                return "";
-            }
-            
-            // Remove trailing \r\n before the closing )
-            size_t actualEnd = contentEnd;
-            if (actualEnd > 2 && fullResponse[actualEnd - 2] == '\r' && fullResponse[actualEnd - 1] == '\n') {
-                actualEnd -= 2;
-            }
-            
-            std::string emailContent = fullResponse.substr(contentStart, actualEnd - contentStart);
+            std::string emailContent = fullResponse.substr(contentStart, literalSize);
             LOG_INFO("163 get_email - successfully extracted email content, size=%zu\n", emailContent.size());
             return emailContent;
         } catch (const vmime::exception& e) {
@@ -790,7 +819,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         // 6. Resolve session ID early for potential body encryption
         std::string sid = session_id;
-        if (x_session_chart == "new" && sid.empty()) {
+        if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
             char create_json[4096];
             int create_rc = email_create_session(
                 email_.c_str(), subject.c_str(), email_.c_str(),
@@ -803,24 +832,55 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                     }
                 } catch (...) {}
             }
-            LOG_INFO("163 send_email: x_session_chart=new, created session_id=%s\n", sid.c_str());
+            LOG_INFO("163 send_email: x_mailer=0.1.0, created session_id=%s\n", sid.c_str());
         }
 
-        // For x_session_chart=exchange or reply, find session via in_reply_to
+        // For non-new types, find session via in_reply_to
         if (sid.empty() && !in_reply_to.empty()) {
             static SessionRepo s_sessionRepo;
             sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
-            LOG_INFO("163 send_email: x_session_chart=%s, found session_id=%s via in_reply_to=%s\n",
+            LOG_INFO("163 send_email: x_mailer=%s, found session_id=%s via in_reply_to=%s\n",
                      x_session_chart.c_str(), sid.c_str(), in_reply_to.c_str());
         }
 
         LOG_INFO("163 send_email: using session_id=%s\n", sid.c_str());
 
-        // For x_session_chart=data, encrypt the body
+        // Generate message_id early so it can be injected into body
+        std::string msg_id;
+        if (!message_id.empty()) {
+            msg_id = message_id;
+            if (msg_id.front() != '<') msg_id = "<" + msg_id + ">";
+        } else {
+            std::string domain = "163.com";
+            size_t atPos = email_.find('@');
+            if (atPos != std::string::npos) {
+                domain = email_.substr(atPos + 1);
+            }
+            msg_id = "<" + std::to_string(std::time(nullptr)) + "." + 
+                                std::to_string(rand()) + "@" + domain + ">";
+        }
+
+        // Inject x_message_id and last_message_id into body for encrypted and exchange types
         std::string bodyToSend = body;
-        if (x_session_chart == "data") {
-            std::vector<char> encBody(2 * 1024 * 1024);
-            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
+        bool needsEncryption = (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK);
+        bool needsInjection = needsEncryption || x_session_chart == XMailer::EXCHANGE;
+        if (needsInjection) {
+            try {
+                auto bodyJson = nlohmann::json::parse(body);
+                bodyJson["x_message_id"] = msg_id;
+                bodyJson["last_message_id"] = in_reply_to;
+                bodyToSend = bodyJson.dump();
+            } catch (...) {
+                nlohmann::json bodyJson;
+                bodyJson["text"] = body;
+                bodyJson["x_message_id"] = msg_id;
+                bodyJson["last_message_id"] = in_reply_to;
+                bodyToSend = bodyJson.dump();
+            }
+        }
+        if (needsEncryption) {
+            std::vector<char> encBody(8 * 1024 * 1024);
+            int encRc = email_prepare_data_body(bodyToSend.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
             if (encRc == 0) {
                 bodyToSend = encBody.data();
                 LOG_INFO("163 send_email: encrypted data body, len=%zu\n", bodyToSend.size());
@@ -837,32 +897,15 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         vmime::shared_ptr<vmime::header> header = msg->getHeader();
         header->From()->setValue(vmime::make_shared<vmime::mailbox>(email_));
         header->Date()->setValue(vmime::datetime::now());
-        
-        // Use provided message_id or generate one
-        std::string msg_id;
-        if (!message_id.empty()) {
-            msg_id = message_id;
-            if (msg_id.front() != '<') msg_id = "<" + msg_id + ">";
-        } else {
-            msg_id = "<" + std::to_string(std::time(nullptr)) + "." + 
-                                std::to_string(rand()) + "@163.com>";
-        }
         header->MessageId()->setValue(msg_id);
         LOG_INFO("163 send_email - manually set Message-ID: %s\n", msg_id.c_str());
 
-        // Set X-Message-ID header with the locally generated message_id
-        // This allows FetchAndStore_c to match the sent email when QQ/163 server rewrites Message-ID
-        vmime::shared_ptr<vmime::headerField> xMsgIdField =
-            vmime::headerFieldFactory::getInstance()->create("X-Message-ID", msg_id);
-        header->appendField(xMsgIdField);
-        LOG_INFO("163 send_email - set X-Message-ID: %s\n", msg_id.c_str());
-
-        // Set X-Session-Chart header if provided (for new session creation)
+        // Set X-Mailer header if provided
         if (!x_session_chart.empty()) {
-            vmime::shared_ptr<vmime::headerField> xStartNewField =
-                vmime::headerFieldFactory::getInstance()->create("X-Session-Chart", x_session_chart);
-            header->appendField(xStartNewField);
-            LOG_INFO("163 send_email - set X-Session-Chart: %s\n", x_session_chart.c_str());
+            vmime::shared_ptr<vmime::headerField> xMailerField =
+                vmime::headerFieldFactory::getInstance()->create("X-Mailer", x_session_chart);
+            header->appendField(xMailerField);
+            LOG_INFO("163 send_email - set X-Mailer: %s\n", x_session_chart.c_str());
         }
 
         // Handle In-Reply-To and References for conversation threading
@@ -928,7 +971,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                     // Just proceed with adding email to session
 
                     char session_buffer[8192];
-                    int encMethod = (x_session_chart == "data") ? 1 : 0;
+                    int encMethod = needsEncryption ? 1 : 0;
                     int session_result = email_add_email_to_session(
                         sid.c_str(),
                         email_id.c_str(),
@@ -1131,8 +1174,7 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
         fetchAttrs.add("Reply-To");
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
-        fetchAttrs.add("X-Message-ID");
-        fetchAttrs.add("X-Session-Chart");
+        fetchAttrs.add("X-Mailer");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         // Ensure UID is included
@@ -1354,11 +1396,10 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
             email_obj["date"] = getHeader("Date");
             email_obj["reply_to"] = decodeHeader(getHeader("Reply-To"));
             email_obj["in_reply_to"] = decodeHeader(getHeader("In-Reply-To"));
-            std::string xMsgId = decodeHeader(getHeader("X-Message-ID"));
+            std::string xMailer = decodeHeader(getHeader("X-Mailer"));
             std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
-            email_obj["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
-            email_obj["x_message_id"] = xMsgId;
-            email_obj["x_session_chart"] = decodeHeader(getHeader("X-Session-Chart"));
+            email_obj["message_id"] = stdMsgId;
+            email_obj["x_session_chart"] = xMailer;
             email_obj["to_addr"] = decodeHeader(getHeader("To"));
             
             // Extract service receive time from the first (topmost) Received header

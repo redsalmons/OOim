@@ -3,6 +3,7 @@
 #include "email_handler.h"
 #include "email_core.h"
 #include "email_core_common.h"
+#include "x_mailer.h"
 #include "db_connection.h"
 #include "session_repo.h"
 #include "logger.h"
@@ -545,7 +546,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
 
         // Resolve session ID early for potential body encryption
         std::string sid = session_id;
-        if (x_session_chart == "new" && sid.empty()) {
+        if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
             char create_json[4096];
             int create_rc = email_create_session(
                 email_.c_str(), subject.c_str(), email_.c_str(),
@@ -558,24 +559,38 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                     }
                 } catch (...) {}
             }
-            LOG_INFO("Gmail send_email: x_session_chart=new, created session_id=%s\n", sid.c_str());
+            LOG_INFO("Gmail send_email: x_mailer=0.1.0, created session_id=%s\n", sid.c_str());
         }
 
-        // For exchange or reply, find session via in_reply_to
+        // For non-new types, find session via in_reply_to
         if (sid.empty() && !in_reply_to.empty()) {
             static SessionRepo s_sessionRepo;
             sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
-            LOG_INFO("Gmail send_email: x_session_chart=%s, found session_id=%s via in_reply_to=%s\n",
+            LOG_INFO("Gmail send_email: x_mailer=%s, found session_id=%s via in_reply_to=%s\n",
                      x_session_chart.c_str(), sid.c_str(), in_reply_to.c_str());
         }
 
         LOG_INFO("Gmail send_email: using session_id=%s\n", sid.c_str());
 
-        // For x_session_chart=data, encrypt the body
+        // For encrypted types (0.1.2/0.1.3/0.1.4), inject x_message_id and last_message_id into body, then encrypt
         std::string bodyToSend = body;
-        if (x_session_chart == "data") {
-            std::vector<char> encBody(2 * 1024 * 1024);
-            int encRc = email_prepare_data_body(body.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
+        bool needsEncryption = (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK);
+        if (needsEncryption) {
+            // Inject x_message_id and last_message_id into body JSON before encryption
+            try {
+                auto bodyJson = nlohmann::json::parse(body);
+                bodyJson["x_message_id"] = message_id;
+                bodyJson["last_message_id"] = in_reply_to;
+                bodyToSend = bodyJson.dump();
+            } catch (...) {
+                nlohmann::json bodyJson;
+                bodyJson["text"] = body;
+                bodyJson["x_message_id"] = message_id;
+                bodyJson["last_message_id"] = in_reply_to;
+                bodyToSend = bodyJson.dump();
+            }
+            std::vector<char> encBody(8 * 1024 * 1024);
+            int encRc = email_prepare_data_body(bodyToSend.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
             if (encRc == 0) {
                 bodyToSend = encBody.data();
                 LOG_INFO("Gmail send_email: encrypted data body, len=%zu\n", bodyToSend.size());
@@ -608,17 +623,12 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
             }
         }
 
-        // Add custom headers
-        if (!x_message_id.empty()) {
-            vmime::shared_ptr<vmime::headerField> xMsgIdField =
-                vmime::headerFieldFactory::getInstance()->create("X-Message-ID", x_message_id);
-            msg->getHeader()->appendField(xMsgIdField);
-        }
+        // Set X-Mailer header if provided
         if (!x_session_chart.empty()) {
-            vmime::shared_ptr<vmime::headerField> xChartField =
-                vmime::headerFieldFactory::getInstance()->create("X-Session-Chart", x_session_chart);
-            msg->getHeader()->appendField(xChartField);
-            LOG_INFO("Gmail send_email - set X-Session-Chart: %s\n", x_session_chart.c_str());
+            vmime::shared_ptr<vmime::headerField> xMailerField =
+                vmime::headerFieldFactory::getInstance()->create("X-Mailer", x_session_chart);
+            msg->getHeader()->appendField(xMailerField);
+            LOG_INFO("Gmail send_email - set X-Mailer: %s\n", x_session_chart.c_str());
         }
 
         // Send
@@ -647,7 +657,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                     std::string email_id = ins_response["uuid"].get<std::string>();
 
                     char session_buffer[8192];
-                    int encMethod = (x_session_chart == "data") ? 1 : 0;
+                    int encMethod = needsEncryption ? 1 : 0;
                     int session_result = email_add_email_to_session(
                         sid.c_str(), email_id.c_str(), email_.c_str(),
                         encMethod, session_buffer, sizeof(session_buffer)
@@ -751,8 +761,7 @@ std::string EmailOptGmailImpl::fetch_email_headers(const std::string& folder, co
         fetchAttrs.add("Reply-To");
         fetchAttrs.add("In-Reply-To");
         fetchAttrs.add("Message-ID");
-        fetchAttrs.add("X-Message-ID");
-        fetchAttrs.add("X-Session-Chart");
+        fetchAttrs.add("X-Mailer");
         fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
 
         vmime::net::fetchAttributes attribsWithUID(fetchAttrs);
@@ -938,11 +947,10 @@ std::string EmailOptGmailImpl::fetch_email_headers(const std::string& folder, co
             email_obj["date"] = getHeader("Date");
             email_obj["reply_to"] = decodeHeader(getHeader("Reply-To"));
             email_obj["in_reply_to"] = decodeHeader(getHeader("In-Reply-To"));
-            std::string xMsgId = decodeHeader(getHeader("X-Message-ID"));
+            std::string xMailer = decodeHeader(getHeader("X-Mailer"));
             std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
-            email_obj["message_id"] = !xMsgId.empty() ? xMsgId : stdMsgId;
-            email_obj["x_message_id"] = xMsgId;
-            email_obj["x_session_chart"] = decodeHeader(getHeader("X-Session-Chart"));
+            email_obj["message_id"] = stdMsgId;
+            email_obj["x_session_chart"] = xMailer;
             email_obj["to_addr"] = decodeHeader(getHeader("To"));
 
             // Extract service receive time from Received header

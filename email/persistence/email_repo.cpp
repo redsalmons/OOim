@@ -71,7 +71,7 @@ std::vector<EmailRecord> EmailRepo::queryThreadRoots(const std::string& account)
         "l.servicerecvtime, l.to_addr, l.id, l.file "
         "FROM localemail l "
         "INNER JOIN session s ON l.id = s.email_id "
-        "WHERE l.account = ? AND s.visible = 1 "
+        "WHERE l.account = ? AND s.visible = 1 AND l.visible = 1 "
         "AND l.id = (SELECT MIN(email_id) FROM session WHERE session_id = s.session_id AND email_id > 0) "
         "ORDER BY l.id DESC;";
 
@@ -98,7 +98,7 @@ std::vector<EmailRecord> EmailRepo::queryThread(const std::string& sessionId) {
         "l.servicerecvtime, l.to_addr, l.id, l.file "
         "FROM localemail l "
         "INNER JOIN session s ON l.id = s.email_id "
-        "WHERE s.session_id = ? AND s.visible = 1 "
+        "WHERE s.session_id = ? AND s.visible = 1 AND l.visible = 1 "
         "ORDER BY l.id ASC;";
 
     sqlite3_stmt* stmt;
@@ -188,6 +188,25 @@ int64_t EmailRepo::findIdByMessageId(const std::string& messageId, const std::st
     return result;
 }
 
+int64_t EmailRepo::findSentByInReplyTo(const std::string& inReplyTo, const std::string& account) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || inReplyTo.empty()) return 0;
+
+    const char* sql = "SELECT id FROM localemail WHERE in_reply_to = ? AND account = ? AND uuid = '0' LIMIT 1;";
+    sqlite3_stmt* stmt;
+    int64_t result = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, inReplyTo.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            result = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
 int64_t EmailRepo::insert(const EmailRecord& rec) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
@@ -196,8 +215,8 @@ int64_t EmailRepo::insert(const EmailRecord& rec) {
     const char* sql =
         "INSERT INTO localemail "
         "(uuid, account, sender, from_addr, subject, date, bodystructure, reply_to, "
-        "in_reply_to, message_id, flags, folder, islocal, servicerecvtime, to_addr, file) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '');";
+        "in_reply_to, message_id, flags, folder, islocal, servicerecvtime, to_addr, file, visible) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?);";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
@@ -217,6 +236,7 @@ int64_t EmailRepo::insert(const EmailRecord& rec) {
     sqlite3_bind_int(stmt, 13, rec.isLocal);
     sqlite3_bind_text(stmt, 14, rec.servicerecvtime.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 15, rec.toAddr.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 16, rec.visible);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -253,7 +273,7 @@ bool EmailRepo::updateById(int64_t id, const EmailRecord& rec) {
     const char* sql =
         "UPDATE localemail SET uuid = ?, sender = ?, from_addr = ?, subject = ?, "
         "date = ?, bodystructure = ?, reply_to = ?, in_reply_to = ?, flags = ?, "
-        "folder = ?, servicerecvtime = ?, to_addr = ? WHERE id = ?;";
+        "folder = ?, servicerecvtime = ?, to_addr = ?, islocal = 1 WHERE id = ?;";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;

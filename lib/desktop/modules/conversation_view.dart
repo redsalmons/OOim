@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
@@ -218,8 +219,62 @@ mixin ConversationViewMixin on State<EmailModule> {
   List<DroppedFile> get droppedFiles;
   bool _isDragging = false;
 
-  Widget buildAvatar(String name) {
-    final displayName = name.isEmpty ? '?' : name[0];
+  // Cache: email -> name from addressbook
+  static Map<String, String>? _addressbookCache;
+
+  String _addressbookNameFor(String email) {
+    if (email.isEmpty) return '';
+    final addr = _extractEmailAddress(email);
+    if (addr.isEmpty) return '';
+    _addressbookCache ??= _loadAddressbookCache();
+    return _addressbookCache![addr] ?? '';
+  }
+
+  static String addressbookNameForEmail(String email) {
+    if (email.isEmpty) return '';
+    final lt = email.indexOf('<');
+    final gt = email.indexOf('>');
+    String addr;
+    if (lt >= 0 && gt > lt) {
+      addr = email.substring(lt + 1, gt).trim().toLowerCase();
+    } else {
+      addr = email.trim().toLowerCase();
+    }
+    if (addr.isEmpty) return '';
+    _addressbookCache ??= _loadAddressbookCache();
+    return _addressbookCache![addr] ?? '';
+  }
+
+  static Map<String, String> _loadAddressbookCache() {
+    final map = <String, String>{};
+    try {
+      final jsonStr = native.EmailCore.addressbookQueryAll();
+      if (jsonStr == null) return map;
+      final list = jsonDecode(jsonStr) as List;
+      for (final item in list) {
+        final m = item as Map<String, dynamic>;
+        final email = (m['email'] as String? ?? '').toLowerCase();
+        final name = m['name'] as String? ?? '';
+        if (email.isNotEmpty && name.isNotEmpty) {
+          map[email] = name;
+        }
+      }
+    } catch (_) {}
+    return map;
+  }
+
+  static void refreshAddressbookCache() {
+    _addressbookCache = null;
+  }
+
+  Widget buildAvatar(String name, {String? email}) {
+    String displayName = name.isEmpty ? '?' : name[0];
+    if (email != null && email.isNotEmpty) {
+      final abName = _addressbookNameFor(email);
+      if (abName.isNotEmpty) {
+        displayName = abName[0];
+      }
+    }
     final bgColor = avatarColor(name);
     return Container(
       width: 36,
@@ -590,7 +645,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          buildAvatar(displayName),
+          buildAvatar(displayName, email: address),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -885,9 +940,8 @@ mixin ConversationViewMixin on State<EmailModule> {
         body: bodyText,
         inReplyTo: inReplyTo,
         messageId: replyMessageId,
-        xMessageId: replyMessageId,
         sessionId: sessionId ?? '',
-        xSessionChart: 'data',
+        xSessionChart: native.XMailer.text,
       );
     }
 
@@ -959,10 +1013,12 @@ mixin ConversationViewMixin on State<EmailModule> {
 
   Widget buildChatBubble(ThreadItem item, bool isMe) {
     final firstEmail = item.emails.first;
+    final isFileBatch = item.isFileBatch;
 
-    // Hide all file transfer messages (file metadata and chunks) from conversation
-    if (firstEmail.messageId.startsWith('<file_') ||
-        firstEmail.messageId.startsWith('<truck_')) {
+    // Hide individual file transfer messages (not batches) from conversation
+    if (!isFileBatch && (
+        firstEmail.messageId.startsWith('<file_') ||
+        firstEmail.messageId.startsWith('<truck_'))) {
       return const SizedBox.shrink();
     }
 
@@ -975,7 +1031,6 @@ mixin ConversationViewMixin on State<EmailModule> {
     String savedEmlPath = '';
     List<EmlAttachment> savedAttachments = [];
 
-    bool isFileBatch = item.isFileBatch;
     List<FileCardInfo> fileCards = [];
 
     if (isFileBatch) {
@@ -1071,7 +1126,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!isMe) ...[buildAvatar(displayName), const SizedBox(width: 10)],
+          if (!isMe) ...[buildAvatar(displayName, email: firstEmail.sender), const SizedBox(width: 10)],
           Flexible(
             child: Column(
               crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -1129,7 +1184,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                   bodyText: bodyText,
                   showDownloadingIndicator: showDownloadingIndicator,
                   fileCards: fileCards,
-                  onSaveFile: (context, fileId, fileName) => _saveFileTransfer(context, fileId, fileName),
+                  onSaveFile: (context, fileId, fileName) => _saveFileTransfer(context, fileId, fileName, isMe),
                 ),
                 Padding(
                   padding: const EdgeInsets.only(top: 5, left: 2, right: 2),
@@ -1138,25 +1193,23 @@ mixin ConversationViewMixin on State<EmailModule> {
               ],
             ),
           ),
-          if (isMe) ...[const SizedBox(width: 10), buildAvatar(displayName)],
+          if (isMe) ...[const SizedBox(width: 10), buildAvatar(displayName, email: firstEmail.sender)],
         ],
       ),
     );
   }
 
-  Future<void> _saveFileTransfer(BuildContext context, String fileId, String fileName) async {
+  Future<void> _saveFileTransfer(BuildContext context, String fileId, String fileName, bool isMe) async {
     if (fileId.isEmpty) return;
 
-    Directory dir;
-    try {
-      dir = await getApplicationDocumentsDirectory();
-    } catch (_) {
-      dir = Directory('${Platform.environment['HOME']}/Documents');
-    }
-    final saveDir = Directory('${dir.path}/SavedFiles');
-    if (!saveDir.existsSync()) saveDir.createSync(recursive: true);
+    String? selectedDir = await FilePicker.getDirectoryPath(
+      dialogTitle: AppStrings.isZh ? '选择保存位置' : 'Choose save location',
+    );
+    if (selectedDir == null) return;
 
-    final result = native.EmailCore.fileTransferReassemble(fileId, saveDir.path);
+    final result = isMe
+        ? native.EmailCore.fileTransferCopyOriginal(fileId, selectedDir)
+        : native.EmailCore.fileTransferReassemble(fileId, selectedDir);
     try {
       final decoded = jsonDecode(result);
       if (decoded['status'] == 'success') {
@@ -1447,6 +1500,16 @@ class _ChatBubble extends StatelessWidget {
                   Icon(Icons.check_circle, size: 14, color: Colors.green[600]),
                   const SizedBox(width: 4),
                   Text('Sent', style: TextStyle(fontSize: 11, color: Colors.green[600])),
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: () => onSaveFile?.call(context, card.fileId, card.fileName),
+                    icon: Icon(Icons.save_alt, size: 14),
+                    label: Text(AppStrings.isZh ? '另存为' : 'Save As', style: TextStyle(fontSize: 11)),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      minimumSize: const Size(0, 24),
+                    ),
+                  ),
                 ],
               ),
             ),
