@@ -1202,9 +1202,7 @@ mixin ConversationViewMixin on State<EmailModule> {
   Future<void> _saveFileTransfer(BuildContext context, String fileId, String fileName, bool isMe) async {
     if (fileId.isEmpty) return;
 
-    String? selectedDir = await FilePicker.getDirectoryPath(
-      dialogTitle: AppStrings.isZh ? '选择保存位置' : 'Choose save location',
-    );
+    final selectedDir = await _pickDirectory();
     if (selectedDir == null) return;
 
     final result = isMe
@@ -1228,6 +1226,12 @@ mixin ConversationViewMixin on State<EmailModule> {
         SnackBar(content: Text(AppStrings.isZh ? '保存失败' : 'Save failed'), duration: const Duration(seconds: 2)),
       );
     }
+  }
+
+  Future<String?> _pickDirectory() async {
+    return await FilePicker.getDirectoryPath(
+      dialogTitle: AppStrings.isZh ? '选择保存位置' : 'Choose save location',
+    );
   }
 
   Future<void> _saveAttachment(String emlPath, int index, String filename) async {

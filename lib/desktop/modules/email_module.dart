@@ -531,6 +531,7 @@ class EmailModuleState extends State<EmailModule>
                 rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
                 toAddr: e['to_addr']?.toString() ?? '',
                 file: e['file']?.toString() ?? '',
+                account: e['account']?.toString() ?? '',
               );
             }).toList();
             allEmails.addAll(parsedEmails);
