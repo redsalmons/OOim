@@ -30,6 +30,7 @@ struct EmailRecord {
 struct PendingEmail {
     std::string uuid;
     std::string folder;
+    int islocal = 0;
 };
 
 class EmailRepo {
@@ -74,10 +75,13 @@ public:
         const std::string& messageId, const std::string& inReplyTo,
         const std::string& bodystructure, const std::string& file);
 
-    // Update email after download (set islocal, message_id, in_reply_to, file)
+    // Update email after download (set islocal=2, message_id, in_reply_to, file)
     bool updateAfterDownload(const std::string& uuid, const std::string& account,
         const std::string& messageId, const std::string& inReplyTo,
         const std::string& file);
+
+    // Set islocal flag for an email (used when body is downloaded in fetch phase)
+    bool setIslocal(const std::string& uuid, const std::string& account, int islocal);
 
     // Increment retry count
     bool incrementRetryCount(const std::string& uuid, const std::string& account);

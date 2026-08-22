@@ -400,6 +400,7 @@ int email_query_localemail(const char* account, char* outJson, int outSize) {
         email_obj["rowid"] = e.rowid;
         email_obj["to_addr"] = e.toAddr;
         email_obj["file"] = e.file;
+        email_obj["visible"] = e.visible;
         emails_array.push_back(email_obj);
     }
 

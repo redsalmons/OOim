@@ -431,6 +431,7 @@ class EmailModuleState extends State<EmailModule>
               toAddr: e['to_addr']?.toString() ?? '',
               file: fileField,
               account: e['account']?.toString() ?? '',
+              visible: e['visible'] is int ? e['visible'] : (int.tryParse(e['visible']?.toString() ?? '1') ?? 1),
             );
           }).toList();
           
@@ -461,6 +462,7 @@ class EmailModuleState extends State<EmailModule>
                 toAddr: e['to_addr']?.toString() ?? '',
                 file: e['file']?.toString() ?? '',
                 account: e['account']?.toString() ?? '',
+                visible: e['visible'] is int ? e['visible'] : (int.tryParse(e['visible']?.toString() ?? '1') ?? 1),
               );
             }).toList());
           }
@@ -532,6 +534,7 @@ class EmailModuleState extends State<EmailModule>
                 toAddr: e['to_addr']?.toString() ?? '',
                 file: e['file']?.toString() ?? '',
                 account: e['account']?.toString() ?? '',
+                visible: e['visible'] is int ? e['visible'] : (int.tryParse(e['visible']?.toString() ?? '1') ?? 1),
               );
             }).toList();
             allEmails.addAll(parsedEmails);

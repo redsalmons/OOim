@@ -852,7 +852,7 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
         char create_json[4096];
         int create_rc = email_create_session(
             email_.c_str(), subject_str.c_str(), email_.c_str(),
-            message_id_str.c_str(), 0, create_json, sizeof(create_json));
+            message_id_str.c_str(), 0, 0, create_json, sizeof(create_json));
         if (create_rc == 0) {
             try {
                 auto resp = nlohmann::json::parse(create_json);
@@ -1119,7 +1119,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                     char create_json[4096];
                     int create_rc = email_create_session(
                         email_.c_str(), subject.c_str(), email_.c_str(),
-                        msg_id.c_str(), 0, create_json, sizeof(create_json));
+                        msg_id.c_str(), 0, 0, create_json, sizeof(create_json));
                     if (create_rc == 0) {
                         try {
                             auto resp = nlohmann::json::parse(create_json);
@@ -1322,7 +1322,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                         char create_json[4096];
                         int create_rc = email_create_session(
                             email_.c_str(), subject.c_str(), email_.c_str(),
-                            msg_id.c_str(), 0, create_json, sizeof(create_json));
+                            msg_id.c_str(), 0, 0, create_json, sizeof(create_json));
                         if (create_rc == 0) {
                             try {
                                 auto resp = nlohmann::json::parse(create_json);

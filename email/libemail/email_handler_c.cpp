@@ -855,7 +855,8 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                 continue;
             }
 
-            // 0.1.0~0.1.3: insert with islocal=0, then download_pending_bodies will process them
+            // 0.1.0~0.1.3: download full EML now, then insert with islocal=1
+            // download_pending_bodies will process (decrypt/session/key) and set islocal=2
 
             // Check if a record with the same message_id already exists (from sent email or previous sync)
             bool found_existing = false;
@@ -898,7 +899,20 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                     LOG_INFO("FetchAndStore_c: Updated id=%lld, uuid='%s', folder='%s'\n", (long long)existing_id, uuid.c_str(), folder.c_str());
                 }
 
-                // No need to update session table — email_id stores localemail.id which doesn't change
+                // Download full EML for this email
+                std::string storageDirStr = storageDir ? storageDir : "";
+                if (!storageDirStr.empty()) {
+                    std::string accountDir = storageDirStr + "/" + accountStr;
+                    std::filesystem::create_directories(accountDir);
+                    std::string emlPath = accountDir + "/" + uuid + ".eml";
+                    int getRc = GetEmailToFile_c(configIndex, folder.c_str(), uuid.c_str(), emlPath.c_str());
+                    LOG_INFO("FetchAndStore_c: downloaded EML for existing uuid=%s, rc=%d\n", uuid.c_str(), getRc);
+                    if (getRc == 0) {
+                        // Body downloaded, set islocal=1 for download_pending_bodies to process
+                        s_emailRepo.setIslocal(uuid, accountStr, 1);
+                    }
+                }
+
                 stored_count++;
                 continue;
             }
@@ -919,7 +933,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             insertRec.folder = folder;
             insertRec.servicerecvtime = servicerecvtime;
             insertRec.toAddr = email_data.value("to_addr", "");
-            // 0.1.0~0.1.3: islocal=0 so download_pending_bodies will download, process, and set islocal=1
+            // 0.1.0~0.1.3: will download EML now and set islocal=1
             insertRec.isLocal = 0;
             insertRec.visible = 1;
             int64_t my_rowid = s_emailRepo.insert(insertRec);
@@ -931,6 +945,20 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                          uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str());
             }
 
+            // Download full EML for this email
+            std::string storageDirStr = storageDir ? storageDir : "";
+            if (!storageDirStr.empty() && my_rowid > 0) {
+                std::string accountDir = storageDirStr + "/" + accountStr;
+                std::filesystem::create_directories(accountDir);
+                std::string emlPath = accountDir + "/" + uuid + ".eml";
+                int getRc = GetEmailToFile_c(configIndex, folder.c_str(), uuid.c_str(), emlPath.c_str());
+                LOG_INFO("FetchAndStore_c: downloaded EML for new uuid=%s, rc=%d\n", uuid.c_str(), getRc);
+                if (getRc == 0) {
+                    // Body downloaded, set islocal=1 for download_pending_bodies to process
+                    s_emailRepo.setIslocal(uuid, accountStr, 1);
+                }
+            }
+
             // Extract contacts from From and To headers into addressbook
             if (!from_addr.empty()) {
                 addressbook_extract_from_header(from_addr.c_str());
@@ -940,9 +968,9 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             }
         }
 
-        // Phase 2: Download and process 0.1.0~0.1.3 emails via download_pending_bodies
-        // This downloads .eml, extracts x_message_id, updates message_id, does session/key
-        // association, and sets islocal=1
+        // Phase 2: Process 0.1.0~0.1.3 emails via download_pending_bodies
+        // EMLs are already downloaded in the loop above (islocal=1).
+        // download_pending_bodies will skip download for islocal=1, do decrypt/session/key, set islocal=2
         std::string storageDirStr = storageDir ? storageDir : "";
         if (!storageDirStr.empty() && stored_count > 0) {
             LOG_INFO("FetchAndStore_c: calling download_pending_bodies to process %d new emails\n", stored_count);

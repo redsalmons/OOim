@@ -258,7 +258,7 @@ int email_code_query_by_account(const char* account, char* outJson, int outSize)
 int email_code_query_by_identify(const char* identify, char* outJson, int outSize);
 
 // Create a new session with ECC key pair generation. Returns 0 on success.
-int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, char* outJson, int outSize);
+int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, int64_t localemail_rowid, char* outJson, int outSize);
 
 // Prepare encrypted data body for x_start_new=data messages.
 // Takes plaintext, recipient list (comma-separated), and sender account.

@@ -59,6 +59,7 @@ native.EmailMessage _emailMessageFromJson(Map<String, dynamic> json) {
     toAddr: json['to_addr'] ?? '',
     file: json['file'] ?? '',
     account: json['account'] ?? '',
+    visible: json['visible'] ?? 1,
   );
 }
 
@@ -341,9 +342,10 @@ mixin ConversationViewMixin on State<EmailModule> {
   }
 
   List<native.EmailMessage> buildConversationThread(String sessionId) {
-    // Only show emails from INBOX folder, exclude truck (file chunk) messages
+    // Only show emails from INBOX folder, exclude invisible (file chunk) messages
     final thread = emails
         .where((e) => e.sessionId == sessionId && e.folder == 'INBOX')
+        .where((e) => e.visible == 1)
         .where((e) => !e.messageId.startsWith('<truck_'))
         .toList();
 
@@ -1060,7 +1062,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       fileCards = _refreshFileCardStatuses(fileCards);
       bodyText = batchText;
       // If any file is still downloading, show indicator
-      showDownloadingIndicator = item.emails.any((e) => e.file.isEmpty || e.isLocal == 0);
+      showDownloadingIndicator = item.emails.any((e) => e.file.isEmpty || e.isLocal < 2);
     } else {
       final email = firstEmail;
       isDownloading = email.file.isEmpty;
@@ -1113,7 +1115,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         }
       }
 
-      showDownloadingIndicator = (email.isLocal == 0 && !isDownloading) || isDownloading;
+      showDownloadingIndicator = (email.isLocal < 2 && !isDownloading) || isDownloading;
     }
 
     const bubbleColorMe = Color(0xFF95EC69);

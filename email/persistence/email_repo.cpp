@@ -4,7 +4,7 @@
 #include <sqlite3.h>
 #include <cstring>
 
-static EmailRecord readEmailRecord(sqlite3_stmt* stmt, bool hasSessionIdAt13, bool hasRowidAt16, bool hasFileLast) {
+static EmailRecord readEmailRecord(sqlite3_stmt* stmt, bool hasSessionIdAt13, bool hasRowidAt16, bool hasVisibleLast) {
     EmailRecord r;
     r.uuid = (const char*)sqlite3_column_text(stmt, 0);
     r.account = (const char*)sqlite3_column_text(stmt, 1);
@@ -31,6 +31,9 @@ static EmailRecord readEmailRecord(sqlite3_stmt* stmt, bool hasSessionIdAt13, bo
             r.toAddr = sqlite3_column_text(stmt, 16) ? (const char*)sqlite3_column_text(stmt, 16) : "";
             r.file = sqlite3_column_text(stmt, 17) ? (const char*)sqlite3_column_text(stmt, 17) : "";
         }
+        if (hasVisibleLast) {
+            r.visible = sqlite3_column_int(stmt, 18);
+        }
     }
     return r;
 }
@@ -44,7 +47,7 @@ std::vector<EmailRecord> EmailRepo::queryByAccount(const std::string& account) {
     const char* sql =
         "SELECT l.uuid, l.account, l.sender, l.from_addr, l.subject, l.date, l.bodystructure, "
         "l.reply_to, l.in_reply_to, l.message_id, l.flags, l.folder, l.islocal, s.session_id, "
-        "l.servicerecvtime, l.id, l.to_addr, l.file "
+        "l.servicerecvtime, l.id, l.to_addr, l.file, l.visible "
         "FROM localemail l LEFT JOIN session s ON l.id = s.email_id "
         "WHERE l.account = ? ORDER BY l.id DESC;";
 
@@ -80,7 +83,7 @@ std::vector<EmailRecord> EmailRepo::queryThreadRoots(const std::string& account)
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        result.push_back(readEmailRecord(stmt, true, true, true));
+        result.push_back(readEmailRecord(stmt, true, true, false));
     }
     sqlite3_finalize(stmt);
     return result;
@@ -106,7 +109,7 @@ std::vector<EmailRecord> EmailRepo::queryThread(const std::string& sessionId) {
     sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_TRANSIENT);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        result.push_back(readEmailRecord(stmt, true, true, true));
+        result.push_back(readEmailRecord(stmt, true, true, false));
     }
     sqlite3_finalize(stmt);
     return result;
@@ -345,7 +348,7 @@ bool EmailRepo::updateAfterDownload(const std::string& uuid, const std::string& 
     if (!db) return false;
 
     const char* sql =
-        "UPDATE localemail SET islocal = 1, message_id = ?, in_reply_to = ?, file = ? "
+        "UPDATE localemail SET islocal = 2, message_id = ?, in_reply_to = ?, file = ? "
         "WHERE uuid = ? AND account = ?;";
 
     sqlite3_stmt* stmt;
@@ -357,6 +360,22 @@ bool EmailRepo::updateAfterDownload(const std::string& uuid, const std::string& 
     sqlite3_bind_text(stmt, 4, uuid.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, account.c_str(), -1, SQLITE_TRANSIENT);
 
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+bool EmailRepo::setIslocal(const std::string& uuid, const std::string& account, int islocal) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE localemail SET islocal = ? WHERE uuid = ? AND account = ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, islocal);
+    sqlite3_bind_text(stmt, 2, uuid.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, account.c_str(), -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
@@ -388,7 +407,7 @@ int EmailRepo::countPendingBodies(const std::string& account) {
     if (!db) return -1;
 
     const char* sql =
-        "SELECT COUNT(*) FROM localemail WHERE account = ? AND islocal = 0 "
+        "SELECT COUNT(*) FROM localemail WHERE account = ? AND islocal IN (0, 1) "
         "AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3);";
 
     sqlite3_stmt* stmt;
@@ -410,9 +429,9 @@ std::vector<PendingEmail> EmailRepo::queryPendingEmails(const std::string& accou
     if (!db) return result;
 
     const char* sql =
-        "SELECT uuid, folder FROM localemail WHERE account = ? AND islocal = 0 "
+        "SELECT uuid, folder, islocal FROM localemail WHERE account = ? AND islocal IN (0, 1) "
         "AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3) "
-        "ORDER BY uuid ASC LIMIT ?;";
+        "ORDER BY islocal DESC, uuid ASC LIMIT ?;";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
@@ -423,6 +442,7 @@ std::vector<PendingEmail> EmailRepo::queryPendingEmails(const std::string& accou
         PendingEmail pe;
         pe.uuid = (const char*)sqlite3_column_text(stmt, 0);
         pe.folder = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "INBOX";
+        pe.islocal = sqlite3_column_int(stmt, 2);
         result.push_back(pe);
     }
     sqlite3_finalize(stmt);

@@ -262,8 +262,8 @@ typedef _EmailQueryThreadDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 typedef _EmailGenerateSessionsNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailGenerateSessionsDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _EmailCreateSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Int32);
-typedef _EmailCreateSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, int);
+typedef _EmailCreateSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int64, Pointer<Utf8>, Int32);
+typedef _EmailCreateSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, int, Pointer<Utf8>, int);
 
 typedef _EmailCodeQueryByAccountNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailCodeQueryByAccountDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
@@ -606,6 +606,7 @@ class EmailMessage {
   final String toAddr;
   final String file;
   final String account;
+  final int visible;
 
   EmailMessage({
     required this.sender,
@@ -625,6 +626,7 @@ class EmailMessage {
     this.toAddr = '',
     this.file = '',
     this.account = '',
+    this.visible = 1,
   });
 
 }
@@ -1195,14 +1197,14 @@ class EmailCore {
     }
   }
 
-  static String createSession(String account, String subject, String members, String messageId, {int encryptMethod = 0}) {
+  static String createSession(String account, String subject, String members, String messageId, {int encryptMethod = 0, int localemailRowid = 0}) {
     final accountPtr = account.toNativeUtf8();
     final subjectPtr = subject.toNativeUtf8();
     final membersPtr = members.toNativeUtf8();
     final messageIdPtr = messageId.toNativeUtf8();
     final outJson = malloc.allocate<Utf8>(4096);
     try {
-      final result = _emailCreateSession(accountPtr, subjectPtr, membersPtr, messageIdPtr, encryptMethod, outJson, 4096);
+      final result = _emailCreateSession(accountPtr, subjectPtr, membersPtr, messageIdPtr, encryptMethod, localemailRowid, outJson, 4096);
       return outJson.toDartString();
     } finally {
       malloc.free(accountPtr);

@@ -39,7 +39,7 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
 extern "C" int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, int encrypt_method, char* outJson, int outSize);
 
 // Forward declaration for email_create_session from email_session.cpp
-extern "C" int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, char* outJson, int outSize);
+extern "C" int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, int64_t localemail_rowid, char* outJson, int outSize);
 
 int oemailim_system_open(const char* dataDir, const char* configDir, const char* logDir) {
     return systemOpen_c(dataDir, configDir, logDir);
@@ -163,10 +163,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
     struct PendingEmail {
         std::string uuid;
         std::string folder;
+        int islocal = 0;
     };
     std::vector<PendingEmail> pending;
     for (const auto& pr : pendingRecs) {
-        pending.push_back({pr.uuid, pr.folder});
+        pending.push_back({pr.uuid, pr.folder, pr.islocal});
     }
 
     if (pending.empty()) {
@@ -196,6 +197,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         std::string eml_subject;
         std::string eml_to;
         std::string eml_from;
+        int islocal = 0;
     };
 
     std::vector<DownloadedEml> newEmls, exchangeEmls, dataEmls, otherEmls;
@@ -203,13 +205,18 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
     for (const auto& pe : pending) {
         std::string filePath = accountDir + "/" + pe.uuid + ".eml";
 
-        int getResult = GetEmailToFile_c(configIndex, pe.folder.c_str(), pe.uuid.c_str(), filePath.c_str());
-        if (getResult != 0) {
-            LOG_INFO("[DB] download_pending: failed to fetch uid=%s folder=%s: %d\n", pe.uuid.c_str(), pe.folder.c_str(), getResult);
-            if (getResult != -10) {
-                s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
+        // islocal=1 means EML was already downloaded in fetch phase, skip download
+        if (pe.islocal == 0) {
+            int getResult = GetEmailToFile_c(configIndex, pe.folder.c_str(), pe.uuid.c_str(), filePath.c_str());
+            if (getResult != 0) {
+                LOG_INFO("[DB] download_pending: failed to fetch uid=%s folder=%s: %d\n", pe.uuid.c_str(), pe.folder.c_str(), getResult);
+                if (getResult != -10) {
+                    s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
+                }
+                continue;
             }
-            continue;
+        } else {
+            LOG_INFO("[DB] download_pending: islocal=1, skipping download for uid=%s\n", pe.uuid.c_str());
         }
 
         std::string message_id = "";
@@ -294,7 +301,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             LOG_INFO("[DB] download_pending: failed to parse .eml file: %s\n", e.what());
         }
 
-        DownloadedEml de{pe.uuid, pe.folder, filePath, emlContent, message_id, in_reply_to, x_session_chart, eml_subject, eml_to, eml_from};
+        DownloadedEml de{pe.uuid, pe.folder, filePath, emlContent, message_id, in_reply_to, x_session_chart, eml_subject, eml_to, eml_from, pe.islocal};
 
         if (x_session_chart == XMailer::NEW_SESSION) {
             newEmls.push_back(de);
@@ -328,11 +335,10 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         const std::string& eml_to = dep->eml_to;
         const std::string& eml_from = dep->eml_from;
 
-        // Skip if emlContent is empty (parse failed in phase 1)
+        // Skip if emlContent is empty (EML file missing or parse failed)
         if (emlContent.empty()) {
-            s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
-            downloaded++;
-            results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
+            LOG_INFO("[DB] download_pending: emlContent empty for uuid=%s, resetting islocal=0 for re-download\n", pe.c_str());
+            s_emailRepo.setIslocal(pe, accountStr, 0);
             continue;
         }
 
@@ -396,6 +402,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             siAccount.c_str(),
                             message_id.c_str(),
                             decodeType,
+                            s_emailRepo.findRowidByUuidAndAccount(pe, accountStr),
                             create_session_json,
                             sizeof(create_session_json)
                         );
@@ -709,6 +716,12 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         } else if (x_session_chart == XMailer::FILE_CHUNK) {
                             // File chunk message (hidden from UI)
                             LOG_INFO("[DB] download_pending: X-Mailer=0.1.4, processing file chunk\n");
+                            // Update localemail with embedded IDs (same as 0.1.2/0.1.3)
+                            if (!embeddedXMsgId.empty()) {
+                                s_emailRepo.updateAfterDownload(pe, accountStr, embeddedXMsgId, embeddedLastMsgId, pe);
+                                LOG_INFO("[DB] download_pending: 0.1.4 updated localemail message_id='%s', in_reply_to='%s'\n",
+                                         embeddedXMsgId.c_str(), embeddedLastMsgId.c_str());
+                            }
                             try {
                                 auto truckJson = json::parse(decryptedStr);
                                 std::string fileId = truckJson.value("file_id", "");

@@ -31,7 +31,7 @@ extern "C" int email_generate_sessions(const char* account, char* outJson, int o
 }
 
 // Create a user-defined session (auto=0) with message_id as index_uuid
-extern "C" int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, char* outJson, int outSize) {
+extern "C" int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, int64_t localemail_rowid, char* outJson, int outSize) {
     auto& conn = DbConnection::instance();
     if (!conn.get()) {
         if (outJson && outSize > 0) {
@@ -47,12 +47,33 @@ extern "C" int email_create_session(const char* account, const char* subject, co
         return -1;
     }
 
-    LOG_INFO("[DB] email_create_session called with account: '%s', subject: '%s', members: '%s', message_id: '%s', encrypt_method: %d\n",
-             account ? account : "null", subject ? subject : "null", members ? members : "null", message_id ? message_id : "null", encrypt_method);
+    LOG_INFO("[DB] email_create_session called with account: '%s', subject: '%s', members: '%s', message_id: '%s', encrypt_method: %d, localemail_rowid: %lld\n",
+             account ? account : "null", subject ? subject : "null", members ? members : "null", message_id ? message_id : "null", encrypt_method, (long long)localemail_rowid);
 
-    // Generate a unique session_id without inserting into session table
-    // The session row will be created later by email_add_email_to_session
-    std::string session_id = "session_" + std::to_string(rand() % 10000);
+    // Generate session_id based on localemail rowid
+    int64_t rowid = localemail_rowid;
+    if (rowid <= 0 && message_id && *message_id) {
+        // Try to find existing localemail record by message_id
+        rowid = s_emailRepo.findIdByMessageId(message_id, account);
+    }
+    if (rowid <= 0) {
+        // No existing record, insert a placeholder to get a rowid
+        EmailRecord placeholder;
+        placeholder.uuid = "0";
+        placeholder.account = account;
+        placeholder.subject = subject ? subject : "";
+        placeholder.messageId = message_id ? message_id : "";
+        placeholder.isLocal = 0;
+        rowid = s_emailRepo.insert(placeholder);
+        LOG_INFO("[DB] email_create_session: inserted placeholder localemail rowid=%lld\n", (long long)rowid);
+    }
+    if (rowid <= 0) {
+        // Fallback to random if insert failed
+        rowid = rand() % 1000000;
+        LOG_INFO("[DB] email_create_session: fallback random rowid=%lld\n", (long long)rowid);
+    }
+
+    std::string session_id = "session_" + std::to_string(rowid);
     LOG_INFO("[DB] email_create_session: generated session_id=%s\n", session_id.c_str());
 
     if (encrypt_method == 1) {
