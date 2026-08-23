@@ -276,7 +276,8 @@ bool EmailRepo::updateById(int64_t id, const EmailRecord& rec) {
     const char* sql =
         "UPDATE localemail SET uuid = ?, sender = ?, from_addr = ?, subject = ?, "
         "date = ?, bodystructure = ?, reply_to = ?, in_reply_to = ?, flags = ?, "
-        "folder = ?, servicerecvtime = ?, to_addr = ?, islocal = 1 WHERE id = ?;";
+        "folder = ?, servicerecvtime = ?, to_addr = ?, "
+        "islocal = CASE WHEN islocal = 0 THEN 1 ELSE islocal END WHERE id = ?;";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
@@ -379,6 +380,23 @@ bool EmailRepo::setIslocal(const std::string& uuid, const std::string& account, 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
+}
+
+int EmailRepo::getIslocal(int64_t id) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return -1;
+
+    const char* sql = "SELECT islocal FROM localemail WHERE id = ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, id);
+    int result = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        result = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 bool EmailRepo::incrementRetryCount(const std::string& uuid, const std::string& account) {

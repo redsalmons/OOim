@@ -50,27 +50,19 @@ extern "C" int email_create_session(const char* account, const char* subject, co
     LOG_INFO("[DB] email_create_session called with account: '%s', subject: '%s', members: '%s', message_id: '%s', encrypt_method: %d, localemail_rowid: %lld\n",
              account ? account : "null", subject ? subject : "null", members ? members : "null", message_id ? message_id : "null", encrypt_method, (long long)localemail_rowid);
 
-    // Generate session_id based on localemail rowid
+    // session_id is based on localemail rowid
     int64_t rowid = localemail_rowid;
     if (rowid <= 0 && message_id && *message_id) {
-        // Try to find existing localemail record by message_id
+        // Fallback: find existing localemail record by message_id (e.g. received email)
         rowid = s_emailRepo.findIdByMessageId(message_id, account);
     }
     if (rowid <= 0) {
-        // No existing record, insert a placeholder to get a rowid
-        EmailRecord placeholder;
-        placeholder.uuid = "0";
-        placeholder.account = account;
-        placeholder.subject = subject ? subject : "";
-        placeholder.messageId = message_id ? message_id : "";
-        placeholder.isLocal = 0;
-        rowid = s_emailRepo.insert(placeholder);
-        LOG_INFO("[DB] email_create_session: inserted placeholder localemail rowid=%lld\n", (long long)rowid);
-    }
-    if (rowid <= 0) {
-        // Fallback to random if insert failed
-        rowid = rand() % 1000000;
-        LOG_INFO("[DB] email_create_session: fallback random rowid=%lld\n", (long long)rowid);
+        // Cannot create session without a localemail record
+        LOG_INFO("[DB] email_create_session: no localemail rowid, cannot create session\n");
+        if (outJson && outSize > 0) {
+            snprintf(outJson, outSize, R"({"status":"failed","error":"no_localemail_rowid"})");
+        }
+        return -1;
     }
 
     std::string session_id = "session_" + std::to_string(rowid);
@@ -163,7 +155,7 @@ extern "C" int email_insert_sent_email(const char* account, const char* sender, 
     }
 
     if (!existing_uuid.empty()) {
-        int64_t rowid = s_emailRepo.findRowidByUuid(existing_uuid);
+        int64_t rowid = s_emailRepo.findIdByMessageId(message_id ? message_id : "", account ? account : "");
         std::string rowidStr = std::to_string(rowid);
         LOG_INFO("[DB] email_insert_sent_email: already exists with uuid='%s', rowid='%s'\n", existing_uuid.c_str(), rowidStr.c_str());
         if (outJson && outSize > 0) {

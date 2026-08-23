@@ -485,6 +485,8 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         std::string session_id  = json_content.value("session_id", "");
         std::string x_message_id = json_content.value("x_message_id", "");
         std::string x_session_chart = json_content.value("x_session_chart", "");
+        int encrypt_method = json_content.value("encrypt_method", 0);
+        std::string members = json_content.value("members", "");
 
         LOG_INFO("Gmail send_email - parsed: recipient='%s', subject='%s', in_reply_to='%s'\n",
                  recipient.c_str(), subject.c_str(), in_reply_to.c_str());
@@ -545,22 +547,8 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
 
         // Resolve session ID early for potential body encryption
+        // For NEW_SESSION: defer session creation to after email_insert_sent_email (need rowid)
         std::string sid = session_id;
-        if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
-            char create_json[4096];
-            int create_rc = email_create_session(
-                email_.c_str(), subject.c_str(), email_.c_str(),
-                message_id.c_str(), 0, 0, create_json, sizeof(create_json));
-            if (create_rc == 0) {
-                try {
-                    auto resp = nlohmann::json::parse(create_json);
-                    if (resp.value("status", "") == "success") {
-                        sid = resp.value("session_id", "");
-                    }
-                } catch (...) {}
-            }
-            LOG_INFO("Gmail send_email: x_mailer=0.1.0, created session_id=%s\n", sid.c_str());
-        }
 
         // For non-new types, find session via in_reply_to
         if (sid.empty() && !in_reply_to.empty()) {
@@ -656,8 +644,28 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                 if (ins_response.contains("uuid")) {
                     std::string email_id = ins_response["uuid"].get<std::string>();
 
+                    // For NEW_SESSION: create session now that we have the rowid
+                    if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
+                        int64_t rowid = std::stoll(email_id);
+                        char create_json[4096];
+                        int create_rc = email_create_session(
+                            email_.c_str(), subject.c_str(),
+                            members.empty() ? email_.c_str() : members.c_str(),
+                            msg_id.c_str(), encrypt_method, rowid,
+                            create_json, sizeof(create_json));
+                        if (create_rc == 0) {
+                            try {
+                                auto resp = nlohmann::json::parse(create_json);
+                                if (resp.value("status", "") == "success") {
+                                    sid = resp.value("session_id", "");
+                                }
+                            } catch (...) {}
+                        }
+                        LOG_INFO("Gmail send_email: NEW_SESSION created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
+                    }
+
                     char session_buffer[8192];
-                    int encMethod = needsEncryption ? 1 : 0;
+                    int encMethod = needsEncryption ? 1 : (encrypt_method == 1 ? 1 : 0);
                     int session_result = email_add_email_to_session(
                         sid.c_str(), email_id.c_str(), email_.c_str(),
                         encMethod, session_buffer, sizeof(session_buffer)

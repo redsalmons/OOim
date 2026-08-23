@@ -83,6 +83,9 @@ public:
     // Set islocal flag for an email (used when body is downloaded in fetch phase)
     bool setIslocal(const std::string& uuid, const std::string& account, int islocal);
 
+    // Get islocal value by rowid
+    int getIslocal(int64_t id);
+
     // Increment retry count
     bool incrementRetryCount(const std::string& uuid, const std::string& account);
 

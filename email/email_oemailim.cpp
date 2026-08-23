@@ -487,7 +487,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 recipientStr += needkeyList[i];
                             }
 
-                            LOG_INFO("[DB] download_pending: exchange email recipients: %s\n", recipientStr.c_str());
+                            LOG_INFO("[DB] download_pending: queuing exchange email to %s\n", recipientStr.c_str());
 
                             std::string pubmd5 = compute_md5(myPubkey);
                             std::string signature = sign_with_ecc_private_key(myPrivPem, myKeyPassword, pubmd5);
@@ -501,19 +501,20 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 {"signature", signature}
                             };
 
-                            json exchangeContent;
-                            exchangeContent["recipient"] = recipientStr;
-                            exchangeContent["subject"] = eml_subject;
-                            exchangeContent["body"] = exchangeBody.dump();
-                            exchangeContent["in_reply_to"] = message_id;
-                            exchangeContent["message_id"] = "";
-                            exchangeContent["session_id"] = "";
-                            exchangeContent["x_message_id"] = "";
-                            exchangeContent["x_session_chart"] = XMailer::EXCHANGE;
-
-                            std::string exchangeStr = exchangeContent.dump();
-                            int sendRc = SendEmail_c(configIndex, exchangeStr.c_str());
-                            LOG_INFO("[DB] download_pending: exchange email sent to %s, result=%d\n", recipientStr.c_str(), sendRc);
+                            // Queue exchange email via TaskRepo instead of sending directly
+                            static TaskRepo s_taskRepo;
+                            int64_t taskId = s_taskRepo.insert(
+                                accountStr,
+                                recipientStr,
+                                eml_subject,
+                                exchangeBody.dump(),
+                                message_id,
+                                "",
+                                "",
+                                newSessionId,
+                                XMailer::EXCHANGE
+                            );
+                            LOG_INFO("[DB] download_pending: exchange email queued, task_id=%lld\n", (long long)taskId);
                         }
                     }
                     } // end if (decodeType == 1)
@@ -831,6 +832,10 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         if (x_session_chart != XMailer::TEXT && x_session_chart != XMailer::FILE_META && x_session_chart != XMailer::FILE_CHUNK) {
             s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
         }
+
+        // Mark as fully processed to prevent reprocessing
+        s_emailRepo.setIslocal(pe, accountStr, 2);
+        LOG_INFO("[DB] download_pending: set islocal=2 for uuid=%s\n", pe.c_str());
 
         downloaded++;
         results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});

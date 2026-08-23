@@ -108,54 +108,9 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       return;
     }
 
-    // 3. Create session first (before sending email)
-    final membersStr = _members.join(',');
-    final createResult = native.EmailCore.createSession(_selectedAccount, title, membersStr, messageId, encryptMethod: _encryptMethod);
-    native.EmailCore.logWrite('[CREATE_SESSION] createSession result: $createResult');
-
-    String sessionId = '';
-    String pubkey = '';
-    String secretkey = '';
-    String sessionPassword = '';
-    try {
-      final decoded = jsonDecode(createResult);
-      if (decoded['status'] != 'success') {
-        if (mounted) {
-          setState(() => _creating = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('${AppStrings.createSessionFailed}: ${decoded['error'] ?? 'unknown'}'), duration: const Duration(seconds: 2)),
-          );
-        }
-        return;
-      }
-      sessionId = decoded['session_id']?.toString() ?? '';
-      pubkey = decoded['pubkey']?.toString() ?? '';
-      secretkey = decoded['secretkey']?.toString() ?? '';
-      sessionPassword = decoded['session_password']?.toString() ?? '';
-    } catch (e) {
-      if (mounted) {
-        setState(() => _creating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${AppStrings.createSessionFailed}: $e'), duration: const Duration(seconds: 2)),
-        );
-      }
-      return;
-    }
-
-    if (sessionId.isEmpty) {
-      if (mounted) {
-        setState(() => _creating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.createSessionFailed), duration: const Duration(seconds: 2)),
-        );
-      }
-      return;
-    }
-
-    native.EmailCore.logWrite('[CREATE_SESSION] Session created: $sessionId, now sending email...');
-
-    // 4. Send email with session_id — C++ backend will handle insertSentEmail + addEmailToSession
+    // 3. Send email — C++ backend will handle insertSentEmail + createSession + addEmailToSession
     // Include self in recipients so self also receives a copy in INBOX
+    final membersStr = _members.join(',');
     final allRecipients = <String>{..._members, _selectedAccount};
     final recipientStr = allRecipients.join(', ');
 
@@ -185,8 +140,10 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       'body': emailBody,
       'in_reply_to': '',
       'message_id': messageId,
-      'session_id': sessionId,
+      'session_id': '',
       'x_session_chart': native.XMailer.newSession,
+      'encrypt_method': _encryptMethod,
+      'members': membersStr,
     });
 
     native.EmailCore.logWrite('[CREATE_SESSION] Sending email to: $recipientStr, subject: $title');

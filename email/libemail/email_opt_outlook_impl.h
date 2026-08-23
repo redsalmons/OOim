@@ -151,11 +151,13 @@ private:
     bool send_email_via_graph_api(const std::string& recipient, const std::string& subject, 
                                    const std::string& body, const std::string& in_reply_to, 
                                    const std::string& message_id, const std::string& session_id,
-                                   const std::string& x_message_id = "", const std::string& x_session_chart = "");
+                                   const std::string& x_message_id = "", const std::string& x_session_chart = "",
+                                   int encrypt_method = 0, const std::string& members = "");
     bool send_email_via_vmime_smtp(const std::string& recipient, const std::string& subject, 
                                      const std::string& body, const std::string& in_reply_to, 
                                      const std::string& message_id, const std::string& session_id,
-                                     const std::string& x_message_id = "", const std::string& x_session_chart = "");
+                                     const std::string& x_message_id = "", const std::string& x_session_chart = "",
+                                     int encrypt_method = 0, const std::string& members = "");
 };
 
 } // namespace EmailComm
