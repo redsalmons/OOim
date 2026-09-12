@@ -21,6 +21,9 @@ public:
     // Query session_id by in_reply_to + account (for joining existing sessions)
     std::string querySessionByInReplyTo(const std::string& inReplyTo, const std::string& account);
 
+    // Query session_id by subject + from_addr + account (fallback when in_reply_to is empty)
+    std::string querySessionBySubjectAndSender(const std::string& subject, const std::string& fromAddr, const std::string& account);
+
     // Add email to session (upsert by email_id). Multi-step: uses transaction.
     bool addEmailToSession(const std::string& sessionId, int64_t emailId, int encryptMethod);
 
@@ -41,6 +44,15 @@ public:
 
     // Hide session (set visible=0)
     bool hideSession(const std::string& sessionId);
+
+    // Set Signal session_id for an email session
+    bool setSignalSessionId(const std::string& sessionId, const std::string& signalSessionId);
+
+    // Get Signal session_id for an email session
+    std::string getSignalSessionId(const std::string& sessionId);
+
+    // Find email session_id by Signal session_id + account
+    std::string findSessionIdBySignalSessionId(const std::string& account, const std::string& signalSessionId);
 };
 
 #endif // PERSISTENCE_SESSION_REPO_H

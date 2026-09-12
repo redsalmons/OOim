@@ -16,6 +16,7 @@ class EmlParsedContent {
   final int totalChunks;
   final int receivedChunks;
   final int transferStatus; // 0=pending, 1=complete, 2=failed
+  final bool isHandshakeMessage; // true for PREKEY_BUNDLE (1.0.0) and SESSION_INIT (1.0.1)
 
   EmlParsedContent({
     this.textBody = '',
@@ -30,6 +31,7 @@ class EmlParsedContent {
     this.totalChunks = 0,
     this.receivedChunks = 0,
     this.transferStatus = 0,
+    this.isHandshakeMessage = false,
   });
 }
 
@@ -72,6 +74,7 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
     final htmlBody = decoded['html_body'] as String? ?? '';
     final hasAtt = decoded['has_attachments'] as bool? ?? false;
     final attList = decoded['attachments'] as List? ?? [];
+    final xMailer = decoded['x_mailer'] as String? ?? '';
 
     // Check if body is encrypted data (JSON with "text" and "session_info")
     if (textBody.isNotEmpty && textBody.contains('"text"') && textBody.contains('"session_info"')) {
@@ -168,6 +171,39 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
       }
     }
 
+    // Check if this is a handshake message (PREKEY_BUNDLE 1.0.0 or SESSION_INIT 1.0.1)
+    // Use X-Mailer header first (most reliable), then fall back to body JSON detection
+    bool isHandshakeMessage = false;
+    if (xMailer == '1.0.0' || xMailer == '1.0.1') {
+      isHandshakeMessage = true;
+      textBody = '';
+    } else if (textBody.isNotEmpty &&
+        textBody.contains('"version"') &&
+        textBody.contains('"signal_header"')) {
+      try {
+        final bodyJson = jsonDecode(textBody);
+        if (bodyJson is Map &&
+            bodyJson.containsKey('version') &&
+            bodyJson.containsKey('signal_header')) {
+          final header = bodyJson['signal_header'] as Map? ?? {};
+          final msgType = header['msg_type'] as String? ?? '';
+          if (msgType == 'prekey' || msgType == 'init') {
+            isHandshakeMessage = true;
+            textBody = '';
+          } else if (msgType == 'msg') {
+            textBody = '[Signal encrypted message]';
+          } else if (msgType == 'repair') {
+            textBody = '[Signal session repair requested]';
+          } else {
+            textBody = '[Signal protocol message]';
+          }
+          native.EmailCore.logWrite('[EML] detected Signal protocol message, msg_type=$msgType');
+        }
+      } catch (_) {
+        // Not valid JSON, keep original
+      }
+    }
+
     final attachments = attList.map((a) => EmlAttachment(
       filename: a['filename'] as String? ?? 'unknown',
       contentType: a['content_type'] as String? ?? '',
@@ -181,6 +217,7 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
       htmlBody: htmlBody,
       attachments: attachments,
       hasAttachments: hasAtt,
+      isHandshakeMessage: isHandshakeMessage,
     );
     _emlCache[cacheKey] = result;
     return result;

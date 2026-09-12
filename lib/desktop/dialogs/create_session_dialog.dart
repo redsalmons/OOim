@@ -23,7 +23,7 @@ class CreateSessionDialog extends StatefulWidget {
 class _CreateSessionDialogState extends State<CreateSessionDialog> {
   late String _selectedAccount;
   final _titleController = TextEditingController();
-  final _membersController = TextEditingController();
+  TextEditingController _membersController = TextEditingController();
   final List<String> _members = [];
   bool _creating = false;
   int _encryptMethod = 0; // 0=none, 1=standard
@@ -109,9 +109,10 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     }
 
     // 3. Send email — C++ backend will handle insertSentEmail + createSession + addEmailToSession
-    // Include self in recipients so self also receives a copy in INBOX
+    // Self is NOT included in recipients — sent email is already stored in DB, and QQ/163
+    // mail servers auto-deliver self-addressed emails to INBOX causing duplicates.
     final membersStr = _members.join(',');
-    final allRecipients = <String>{..._members, _selectedAccount};
+    final allRecipients = <String>{..._members};
     final recipientStr = allRecipients.join(', ');
 
     // Build email body as JSON with session_info
@@ -141,7 +142,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       'in_reply_to': '',
       'message_id': messageId,
       'session_id': '',
-      'x_session_chart': native.XMailer.newSession,
+      'x_session_chart': native.XMailer.sessionInit,
       'encrypt_method': _encryptMethod,
       'members': membersStr,
     });
@@ -259,15 +260,64 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
             Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _membersController,
-                    decoration: InputDecoration(
-                      hintText: AppStrings.enterEmail,
-                      hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    ),
-                    onSubmitted: (_) => _addMember(),
+                  child: Autocomplete<String>(
+                    fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+                      _membersController = controller;
+                      return TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        decoration: InputDecoration(
+                          hintText: AppStrings.enterEmail,
+                          hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        ),
+                        onSubmitted: (_) {
+                          _addMember();
+                          onFieldSubmitted();
+                        },
+                      );
+                    },
+                    optionsBuilder: (TextEditingValue textEditingValue) {
+                      if (textEditingValue.text.isEmpty) {
+                        return widget.accounts.where((a) => !_members.contains(a));
+                      }
+                      final input = textEditingValue.text.toLowerCase();
+                      return widget.accounts
+                          .where((a) => a.toLowerCase().contains(input) && !_members.contains(a));
+                    },
+                    onSelected: (String selection) {
+                      setState(() {
+                        if (!_members.contains(selection)) {
+                          _members.add(selection);
+                        }
+                        _membersController.clear();
+                      });
+                    },
+                    optionsViewBuilder: (context, onSelected, options) {
+                      return Align(
+                        alignment: Alignment.topLeft,
+                        child: Material(
+                          elevation: 4,
+                          borderRadius: BorderRadius.circular(6),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxHeight: 200),
+                            child: ListView.builder(
+                              shrinkWrap: true,
+                              itemCount: options.length,
+                              itemBuilder: (context, index) {
+                                final option = options.elementAt(index);
+                                return ListTile(
+                                  dense: true,
+                                  title: Text(option, style: const TextStyle(fontSize: 13)),
+                                  onTap: () => onSelected(option),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(width: 8),

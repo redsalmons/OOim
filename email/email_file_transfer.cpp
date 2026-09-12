@@ -191,7 +191,7 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
         return -4;
     }
 
-    // Create "file" metadata message task (X-Mailer=0.1.3)
+    // Create "file" metadata message task (X-Mailer=1.0.4)
     std::string fileMsgId;
     {
         char fileMsgJson[8192];
@@ -207,12 +207,12 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
             std::string domain = accountStr.substr(accountStr.find('@') + 1);
             fileMsgId = "<file_" + fileId + "@" + domain + ">";
             s_taskRepo.insert(accountStr, recipientStr, subjectStr, fileMsgJson,
-                              inReplyToStr, fileMsgId, fileMsgId, sessionIdStr, XMailer::FILE_META);
-            LOG_INFO("email_file_split_and_send: created file metadata task (0.1.3), msg_id=%s\n", fileMsgId.c_str());
+                              inReplyToStr, fileMsgId, fileMsgId, sessionIdStr, XMailer::ATTACH_META);
+            LOG_INFO("email_file_split_and_send: created file metadata task (1.0.4), msg_id=%s\n", fileMsgId.c_str());
         }
     }
 
-    // Create "truck" chunk message tasks (X-Mailer=0.1.4)
+    // Create "truck" chunk message tasks (X-Mailer=1.0.5)
     // Chain: truck_0.last_message_id → file metadata, truck_i.last_message_id → truck_(i-1)
     std::string prevMsgId = fileMsgId; // First truck points to file metadata
     for (int i = 0; i < totalChunks; i++) {
@@ -238,8 +238,8 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
         std::string domain = accountStr.substr(accountStr.find('@') + 1);
         std::string truckMsgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" + domain + ">";
         s_taskRepo.insert(accountStr, recipientStr, subjectStr, truckMsgJson.data(),
-                          prevMsgId, truckMsgId, truckMsgId, sessionIdStr, XMailer::FILE_CHUNK);
-        LOG_INFO("email_file_split_and_send: created chunk %d task (0.1.4), msg_id=%s, last_msg_id=%s\n",
+                          prevMsgId, truckMsgId, truckMsgId, sessionIdStr, XMailer::ATTACH_CHUNK);
+        LOG_INFO("email_file_split_and_send: created chunk %d task (1.0.5), msg_id=%s, last_msg_id=%s\n",
                  i, truckMsgId.c_str(), prevMsgId.c_str());
         prevMsgId = truckMsgId; // Next truck points to this one
     }

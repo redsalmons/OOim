@@ -864,31 +864,8 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
 
     LOG_INFO("Outlook send_email_via_graph_api: using session_id=%s\n", sid.c_str());
 
-    // For encrypted types (0.1.2/0.1.3/0.1.4), inject x_message_id and last_message_id into body, then encrypt
-    bool needsEncryption = (x_session_chart_str == XMailer::TEXT || x_session_chart_str == XMailer::FILE_META || x_session_chart_str == XMailer::FILE_CHUNK);
-    if (needsEncryption) {
-        // Inject x_message_id and last_message_id into body JSON before encryption
-        try {
-            auto bodyJson = nlohmann::json::parse(body_str);
-            bodyJson["x_message_id"] = message_id_str;
-            bodyJson["last_message_id"] = in_reply_to_str;
-            body_str = bodyJson.dump();
-        } catch (...) {
-            nlohmann::json bodyJson;
-            bodyJson["text"] = body_str;
-            bodyJson["x_message_id"] = message_id_str;
-            bodyJson["last_message_id"] = in_reply_to_str;
-            body_str = bodyJson.dump();
-        }
-        std::vector<char> encBody(8 * 1024 * 1024);
-        int encRc = email_prepare_data_body(body_str.c_str(), recipient_str.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
-        if (encRc == 0) {
-            body_str = encBody.data();
-            LOG_INFO("Outlook send_email: encrypted data body, len=%zu\n", body_str.size());
-        } else {
-            LOG_INFO("Outlook send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);
-        }
-    }
+    // Legacy encryption disabled — all encryption handled by Signal protocol
+    bool needsEncryption = false;
 
     // Choose sending method based on account type
     LOG_INFO("Outlook send_email: session_id=%s\n", session_id_str.c_str());
@@ -1082,7 +1059,8 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         body.c_str(),
         data_dir_.c_str(),
         json_buffer,
-        sizeof(json_buffer)
+        sizeof(json_buffer),
+        x_session_chart.c_str()
     );
 
     LOG_INFO("Outlook send_email_via_graph_api: insert_result=%d, json_buffer='%s'\n", insert_result, json_buffer);
@@ -1105,8 +1083,8 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                              sid.c_str(), in_reply_to.c_str());
                 }
 
-                // For x_mailer=0.1.0, create session locally
-                if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
+                // For SESSION_INIT, create session locally
+                if (x_session_chart == XMailer::SESSION_INIT && sid.empty()) {
                     int64_t rowid = std::stoll(email_id);
                     char create_json[4096];
                     int create_rc = email_create_session(
@@ -1122,14 +1100,14 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                             }
                         } catch (...) {}
                     }
-                    LOG_INFO("Outlook send_email_via_graph_api: x_mailer=0.1.0, created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
+                    LOG_INFO("Outlook send_email_via_graph_api: SESSION_INIT created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
                 }
 
                 LOG_INFO("Outlook send_email_via_graph_api: using session_id=%s\n", sid.c_str());
                 
                 // Add email to session
                 char session_buffer[8192];
-                int encMethod = (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK) ? 1 : 0;
+                int encMethod = (x_session_chart == XMailer::RATCHET_MSG || x_session_chart == XMailer::ATTACH_META || x_session_chart == XMailer::ATTACH_CHUNK) ? 1 : 0;
                 int session_result = email_add_email_to_session(
                     sid.c_str(),
                     email_id.c_str(),
@@ -1299,9 +1277,10 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
             body.c_str(),
             data_dir_.c_str(),
             json_buffer,
-            sizeof(json_buffer)
+            sizeof(json_buffer),
+            x_session_chart.c_str()
         );
-        
+
         if (insert_result == 0) {
             LOG_INFO("Outlook send_email_via_vmime_smtp: inserted sent email to database\n");
             
@@ -1311,9 +1290,9 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                 if (response.contains("uuid")) {
                     std::string email_id = response["uuid"].get<std::string>();
                     
-                    // For x_mailer=0.1.0, create session locally
+                    // For SESSION_INIT, create session locally
                     std::string sid = session_id;
-                    if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
+                    if (x_session_chart == XMailer::SESSION_INIT && sid.empty()) {
                         int64_t rowid = std::stoll(email_id);
                         char create_json[4096];
                         int create_rc = email_create_session(
@@ -1329,7 +1308,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                                 }
                             } catch (...) {}
                         }
-                        LOG_INFO("Outlook send_email_via_vmime_smtp: x_mailer=0.1.0, created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
+                        LOG_INFO("Outlook send_email_via_vmime_smtp: SESSION_INIT created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
                     }
 
                     // For non-new types, find session via in_reply_to
@@ -1344,7 +1323,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                     
                     // Add email to session
                     char session_buffer[8192];
-                    int encMethod = (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK) ? 1 : 0;
+                    int encMethod = (x_session_chart == XMailer::RATCHET_MSG || x_session_chart == XMailer::ATTACH_META || x_session_chart == XMailer::ATTACH_CHUNK) ? 1 : 0;
                     int session_result = email_add_email_to_session(
                         sid.c_str(),
                         email_id.c_str(),

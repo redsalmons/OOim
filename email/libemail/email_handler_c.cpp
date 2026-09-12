@@ -817,8 +817,10 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             std::string message_id = email_data.value("message_id", "");
             std::string x_session_chart = email_data.value("x_session_chart", "");
 
-            // Filter: only accept emails with X-Mailer in our whitelist
-            if (!XMailer::isValid(x_session_chart)) {
+            // Filter: only skip emails whose X-Mailer value is explicitly invalid.
+            // If X-Mailer is empty, treat it as a normal (non-Signal) email and store it,
+            // so that plain replies can still be associated to sessions via In-Reply-To.
+            if (!x_session_chart.empty() && !XMailer::isValid(x_session_chart)) {
                 LOG_INFO("FetchAndStore_c: skipping email uuid=%s, X-Mailer='%s' not in whitelist\n",
                          uuid.c_str(), x_session_chart.c_str());
                 continue;
@@ -847,15 +849,15 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
 
             if (uuid.empty()) continue;
 
-            // 0.1.4 (file chunk): defer insertion — will be inserted after download_pending_bodies
-            if (x_session_chart == XMailer::FILE_CHUNK) {
+            // 1.0.5 (attach chunk): defer insertion — will be inserted after download_pending_bodies
+            if (x_session_chart == XMailer::ATTACH_CHUNK) {
                 deferredChunks.push_back({uuid, from_addr, sender, subject, date, reply_to,
                     in_reply_to, message_id, x_session_chart, servicerecvtime, bodystructure, flags,
                     email_data.value("to_addr", "")});
                 continue;
             }
 
-            // 0.1.0~0.1.3: download full EML now, then insert with islocal=1
+            // 1.0.0~1.0.4: download full EML now, then insert with islocal=1
             // download_pending_bodies will process (decrypt/session/key) and set islocal=2
 
             // Check if a record with the same message_id already exists (from sent email or previous sync)
@@ -942,7 +944,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             insertRec.folder = folder;
             insertRec.servicerecvtime = servicerecvtime;
             insertRec.toAddr = email_data.value("to_addr", "");
-            // 0.1.0~0.1.3: will download EML now and set islocal=1
+            // 1.0.0~1.0.4: will download EML now and set islocal=1
             insertRec.isLocal = 0;
             insertRec.visible = 1;
             int64_t my_rowid = s_emailRepo.insert(insertRec);
@@ -977,7 +979,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             }
         }
 
-        // Phase 2: Insert 0.1.4 (file chunk) emails with islocal=0 — let download thread handle
+        // Phase 2: Insert 1.0.5 (attach chunk) emails with islocal=0 — let download thread handle
         for (const auto& dc : deferredChunks) {
             bool found_existing = false;
             int64_t existing_id = 0;
@@ -1034,7 +1036,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
 
             if (my_rowid > 0) {
                 stored_count++;
-                LOG_INFO("FetchAndStore_c: deferred 0.1.4 uuid=%s, message_id=%s, islocal=0\n",
+                LOG_INFO("FetchAndStore_c: deferred 1.0.5 uuid=%s, message_id=%s, islocal=0\n",
                          dc.uuid.c_str(), dc.message_id.c_str());
             }
         }

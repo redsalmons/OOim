@@ -737,6 +737,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         std::string x_session_chart  = json_content.value("x_session_chart", "");
         int encrypt_method = json_content.value("encrypt_method", 0);
         std::string members = json_content.value("members", "");
+        std::string original_x_session_chart = x_session_chart;
         
         LOG_INFO("163 send_email - parsed: recipient='%s', subject='%s', in_reply_to='%s', encrypt_method=%d\n", 
                  recipient.c_str(), subject.c_str(), in_reply_to.c_str(), encrypt_method);
@@ -795,6 +796,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         vmime::addressList toList;
         // Split recipient string by comma and add each as a separate mailbox
+        // Filter out sender's own address — sent messages go directly to DB, not sent to self
         {
             std::string recStr(recipient);
             size_t start = 0, end;
@@ -803,7 +805,10 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                 size_t b = addr.find_first_not_of(" \t");
                 size_t e = addr.find_last_not_of(" \t");
                 if (b != std::string::npos) {
-                    toList.appendAddress(vmime::make_shared<vmime::mailbox>(addr.substr(b, e - b + 1)));
+                    std::string trimmed = addr.substr(b, e - b + 1);
+                    if (trimmed != email_) {
+                        toList.appendAddress(vmime::make_shared<vmime::mailbox>(trimmed));
+                    }
                 }
                 start = end + 1;
             }
@@ -811,7 +816,10 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             size_t b = addr.find_first_not_of(" \t");
             size_t e = addr.find_last_not_of(" \t");
             if (b != std::string::npos) {
-                toList.appendAddress(vmime::make_shared<vmime::mailbox>(addr.substr(b, e - b + 1)));
+                std::string trimmed = addr.substr(b, e - b + 1);
+                if (trimmed != email_) {
+                    toList.appendAddress(vmime::make_shared<vmime::mailbox>(trimmed));
+                }
             }
         }
         builder.setRecipients(toList);
@@ -833,6 +841,36 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         LOG_INFO("163 send_email: using session_id=%s\n", sid.c_str());
 
+        // Primary recipient for Signal protocol: first non-self address in recipient list
+        std::string primaryRecipient;
+        {
+            auto trim = [](std::string& s) {
+                size_t b = s.find_first_not_of(" \t");
+                size_t e = s.find_last_not_of(" \t");
+                if (b == std::string::npos) { s.clear(); return; }
+                s = s.substr(b, e - b + 1);
+            };
+
+            std::string recStr(recipient);
+            size_t start = 0, end;
+            while ((end = recStr.find(',', start)) != std::string::npos) {
+                std::string addr = recStr.substr(start, end - start);
+                trim(addr);
+                if (!addr.empty() && addr != email_) {
+                    primaryRecipient = addr;
+                    break;
+                }
+                start = end + 1;
+            }
+            if (primaryRecipient.empty()) {
+                std::string addr = recStr.substr(start);
+                trim(addr);
+                if (!addr.empty() && addr != email_) {
+                    primaryRecipient = addr;
+                }
+            }
+        }
+
         // Generate message_id early so it can be injected into body
         std::string msg_id;
         if (!message_id.empty()) {
@@ -850,8 +888,160 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         // Inject x_message_id and last_message_id into body for encrypted and exchange types
         std::string bodyToSend = body;
-        bool needsEncryption = (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK);
-        bool needsInjection = needsEncryption || x_session_chart == XMailer::EXCHANGE;
+
+        // Signal protocol integration
+        bool useSignal = false;
+        std::string signalSessionId;  // Signal session id (sig_xxx) from session_initiate
+
+        // Check if a Signal session already exists for (account, primaryRecipient)
+        int signalExists = 0;
+        if (!primaryRecipient.empty()) {
+            signalExists = signal_session_exists(email_.c_str(), primaryRecipient.c_str(), "");
+            LOG_INFO("163 send_email: signal_session_exists(account=%s, peer=%s) = %d\n",
+                     email_.c_str(), primaryRecipient.c_str(), signalExists);
+        }
+
+        // New encrypted session: encrypt_method=1 and no existing email session
+        // For new conversations (no session_id and no in_reply_to), always use SESSION_INIT
+        // even if a Signal session exists from a previous conversation
+        if (encrypt_method == 1 && session_id.empty() && in_reply_to.empty() && !primaryRecipient.empty()) {
+            LOG_INFO("163 send_email: using Signal session_initiate for new encrypted session\n");
+            int initRc = signal_init_account(email_.c_str());
+            LOG_INFO("163 send_email: signal_init_account rc=%d\n", initRc);
+
+            char sigBuf[65536];
+            int sigRc = signal_session_initiate(
+                email_.c_str(),
+                primaryRecipient.c_str(),
+                body.c_str(),
+                sigBuf,
+                sizeof(sigBuf),
+                msg_id.c_str(),
+                in_reply_to.c_str()
+            );
+            if (sigRc == 0) {
+                try {
+                    auto sigResp = nlohmann::json::parse(sigBuf);
+                    if (sigResp.value("status", "") == "success") {
+                        auto msgJson = sigResp["message"];
+                        signalSessionId = sigResp.value("session_id", "");
+                        LOG_INFO("163 send_email: Signal session initiated, signal_session_id=%s\n",
+                                 signalSessionId.c_str());
+                        bodyToSend = msgJson.dump();
+                        x_session_chart = XMailer::SESSION_INIT;
+                        useSignal = true;
+                    } else {
+                        LOG_INFO("163 send_email: signal_session_initiate returned error status\n");
+                    }
+                } catch (const std::exception& e) {
+                    LOG_INFO("163 send_email: failed to parse signal_session_initiate resp: %s\n", e.what());
+                }
+            } else {
+                LOG_INFO("163 send_email: signal_session_initiate failed rc=%d, sending PREKEY_BUNDLE instead\n", sigRc);
+                // Send our prekey bundle to the peer so they can initiate a session
+                char prekeyBuf[65536];
+                int prekeyRc = signal_get_prekey_bundle(email_.c_str(), prekeyBuf, sizeof(prekeyBuf));
+                if (prekeyRc == 0) {
+                    bodyToSend = std::string(prekeyBuf);
+                    x_session_chart = XMailer::PREKEY_BUNDLE;
+                    useSignal = true;
+                    // Extract sig_xxx from prekey bundle response for session mapping
+                    try {
+                        auto pkResp = nlohmann::json::parse(prekeyBuf);
+                        signalSessionId = pkResp.value("session_id", "");
+                        LOG_INFO("163 send_email: PREKEY_BUNDLE signal_session_id=%s\n", signalSessionId.c_str());
+                    } catch (...) {}
+                    LOG_INFO("163 send_email: sending PREKEY_BUNDLE to %s\n", primaryRecipient.c_str());
+                } else {
+                    LOG_INFO("163 send_email: signal_get_prekey_bundle failed rc=%d, sending plaintext\n", prekeyRc);
+                    x_session_chart = "";
+                }
+            }
+        } else if (signalExists > 0 && !primaryRecipient.empty() && !sid.empty() &&
+                   original_x_session_chart != XMailer::PREKEY_BUNDLE) {
+            // Existing Signal session: encrypt this message via Double Ratchet
+            // Use the Signal session_id stored for this email session
+            // Skip encryption for PREKEY_BUNDLE — it should be sent as-is (unencrypted)
+            static SessionRepo s_sessionRepo;
+            std::string signalSid = s_sessionRepo.getSignalSessionId(sid);
+            LOG_INFO("163 send_email: using Signal session_encrypt for session %s, signal_session=%s\n",
+                     sid.c_str(), signalSid.c_str());
+            char sigBuf[65536];
+            int sigRc = signal_session_encrypt(
+                email_.c_str(),
+                primaryRecipient.c_str(),
+                signalSid.c_str(),
+                body.c_str(),
+                sigBuf,
+                sizeof(sigBuf),
+                msg_id.c_str(),
+                in_reply_to.c_str()
+            );
+            if (sigRc == 0) {
+                try {
+                    auto sigResp = nlohmann::json::parse(sigBuf);
+                    if (sigResp.value("status", "") == "success") {
+                        auto msgJson = sigResp["message"];
+                        bodyToSend = msgJson.dump();
+                        x_session_chart = XMailer::RATCHET_MSG;
+                        useSignal = true;
+                    } else {
+                        LOG_INFO("163 send_email: signal_session_encrypt returned error status\n");
+                    }
+                } catch (const std::exception& e) {
+                    LOG_INFO("163 send_email: failed to parse signal_session_encrypt resp: %s\n", e.what());
+                }
+            } else {
+                LOG_INFO("163 send_email: signal_session_encrypt failed rc=%d, trying session_initiate\n", sigRc);
+                // Fallback: try session_initiate (session may need re-establishment)
+                int initRc = signal_session_initiate(
+                    email_.c_str(),
+                    primaryRecipient.c_str(),
+                    body.c_str(),
+                    sigBuf,
+                    sizeof(sigBuf),
+                    msg_id.c_str(),
+                    in_reply_to.c_str()
+                );
+                if (initRc == 0) {
+                    try {
+                        auto sigResp = nlohmann::json::parse(sigBuf);
+                        if (sigResp.value("status", "") == "success") {
+                            auto msgJson = sigResp["message"];
+                            bodyToSend = msgJson.dump();
+                            x_session_chart = XMailer::SESSION_INIT;
+                            useSignal = true;
+                            LOG_INFO("163 send_email: fallback session_initiate succeeded\n");
+                        } else {
+                            LOG_INFO("163 send_email: fallback session_initiate returned error status\n");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_INFO("163 send_email: failed to parse fallback session_initiate resp: %s\n", e.what());
+                    }
+                } else {
+                    LOG_INFO("163 send_email: fallback session_initiate also failed rc=%d, sending PREKEY_BUNDLE\n", initRc);
+                    char prekeyBuf[65536];
+                    int prekeyRc = signal_get_prekey_bundle(email_.c_str(), prekeyBuf, sizeof(prekeyBuf));
+                    if (prekeyRc == 0) {
+                        bodyToSend = std::string(prekeyBuf);
+                        x_session_chart = XMailer::PREKEY_BUNDLE;
+                        useSignal = true;
+                        try {
+                            auto pkResp = nlohmann::json::parse(prekeyBuf);
+                            signalSessionId = pkResp.value("session_id", "");
+                        } catch (...) {}
+                        LOG_INFO("163 send_email: sending PREKEY_BUNDLE to %s\n", primaryRecipient.c_str());
+                    } else {
+                        LOG_INFO("163 send_email: signal_get_prekey_bundle failed rc=%d, sending plaintext\n", prekeyRc);
+                        x_session_chart = "";
+                    }
+                }
+            }
+        }
+
+        // Legacy encryption path removed — all encryption handled by Signal protocol above
+        bool needsEncryption = false;
+        bool needsInjection = false;
         if (needsInjection) {
             try {
                 auto bodyJson = nlohmann::json::parse(body);
@@ -875,6 +1065,20 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             } else {
                 LOG_INFO("163 send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);
             }
+        }
+
+        if (!useSignal && original_x_session_chart == XMailer::RATCHET_MSG) {
+            last_error_ = "No active Signal session for peer";
+            LOG_INFO("163 send_email: aborting RATCHET_MSG send due to missing Signal session/prekey\n");
+            return false;
+        }
+
+        // If Signal protocol is not used for this message, do not set any X-Mailer.
+        // This prevents plain emails (encrypt_method=0) from being misclassified as Signal messages
+        // on the receiver side.
+        // Exception: PREKEY_BUNDLE (1.0.0) is sent unencrypted but still needs X-Mailer.
+        if (!useSignal && original_x_session_chart != XMailer::PREKEY_BUNDLE) {
+            x_session_chart.clear();
         }
 
         builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
@@ -932,6 +1136,19 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         char date_str[64];
         strftime(date_str, sizeof(date_str), "%a, %d %b %Y %H:%M:%S %z", tm_info);
 
+        // For Signal-encrypted messages, we still send the JSON envelope (bodyToSend)
+        // over SMTP, but locally we want the .eml file to contain the human-readable
+        // plaintext so the UI conversation view does not show raw JSON.
+        std::string bodyForLocalStr = bodyToSend;
+        if (useSignal) {
+            if (x_session_chart == XMailer::PREKEY_BUNDLE) {
+                bodyForLocalStr = "[Signal prekey bundle sent - waiting for peer to initialize session]";
+            } else {
+                bodyForLocalStr = body;
+            }
+        }
+        const char* bodyForLocal = bodyForLocalStr.c_str();
+
         char json_buffer[8192];
         int insert_result = email_insert_sent_email(
             email_.c_str(),
@@ -942,10 +1159,11 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             date_str,
             msg_id.c_str(),
             in_reply_to.c_str(),
-            bodyToSend.c_str(),
+            bodyForLocal,
             data_dir_.c_str(),
             json_buffer,
-            sizeof(json_buffer)
+            sizeof(json_buffer),
+            x_session_chart.c_str()
         );
 
         if (insert_result == 0) {
@@ -955,8 +1173,10 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                 if (ins_response.contains("uuid")) {
                     std::string email_id = ins_response["uuid"].get<std::string>();
 
-                    // For NEW_SESSION: create session now that we have the rowid
-                    if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
+                    // For SESSION_INIT or PREKEY_BUNDLE: create session now that we have the rowid
+                    // Check both x_session_chart (Signal path) and original_x_session_chart (non-Signal path)
+                    if ((x_session_chart == XMailer::SESSION_INIT || x_session_chart == XMailer::PREKEY_BUNDLE ||
+                         (!useSignal && original_x_session_chart == XMailer::SESSION_INIT)) && sid.empty()) {
                         int64_t rowid = std::stoll(email_id);
                         char create_json[4096];
                         int create_rc = email_create_session(
@@ -972,8 +1192,11 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                                 }
                             } catch (...) {}
                         }
-                        LOG_INFO("163 send_email: NEW_SESSION created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
+                        LOG_INFO("163 send_email: %s created session_id=%s (rowid=%s)\n", x_session_chart.c_str(), sid.c_str(), email_id.c_str());
                     }
+
+                    // Save Signal session_id mapping to email session
+                    // (moved after email_add_email_to_session below, since the session row must exist first)
 
                     char session_buffer[8192];
                     int encMethod = needsEncryption ? 1 : (encrypt_method == 1 ? 1 : 0);
@@ -990,6 +1213,14 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                         LOG_INFO("163 send_email: added email to session %s\n", sid.c_str());
                     } else {
                         LOG_INFO("163 send_email: failed to add email to session\n");
+                    }
+
+                    // Now save Signal session_id mapping (session row exists at this point)
+                    if (!sid.empty() && !signalSessionId.empty()) {
+                        static SessionRepo s_sessionRepo;
+                        s_sessionRepo.setSignalSessionId(sid, signalSessionId);
+                        LOG_INFO("163 send_email: saved signal_session_id=%s for email session=%s\n",
+                                 signalSessionId.c_str(), sid.c_str());
                     }
                 }
             } catch (const std::exception& e) {

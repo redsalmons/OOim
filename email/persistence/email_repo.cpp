@@ -328,8 +328,8 @@ int64_t EmailRepo::insertSentEmail(const std::string& account, const std::string
     sqlite3_bind_text(stmt, 6, subject.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 7, date.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 8, bodystructure.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 9, inReplyTo.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 10, inReplyTo.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, "", -1, SQLITE_TRANSIENT);  // reply_to (Reply-To header, usually empty)
+    sqlite3_bind_text(stmt, 10, inReplyTo.c_str(), -1, SQLITE_TRANSIENT);  // in_reply_to
     sqlite3_bind_text(stmt, 11, messageId.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 12, date.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 13, file.c_str(), -1, SQLITE_TRANSIENT);

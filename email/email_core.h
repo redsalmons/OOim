@@ -1,6 +1,8 @@
 #ifndef EMAIL_CORE_H
 #define EMAIL_CORE_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -184,10 +186,13 @@ int email_fetch_and_store(int configIndex, const char* folder, const char* start
                           char* outJson, int outSize);
 
 // Insert sent email into database. Returns 0 on success, negative on error.
-int email_insert_sent_email(const char* account, const char* sender, const char* from_addr, const char* to_addr, const char* subject, const char* date, const char* message_id, const char* in_reply_to, const char* body, const char* storageDir, char* outJson, int outSize);
+int email_insert_sent_email(const char* account, const char* sender, const char* from_addr, const char* to_addr, const char* subject, const char* date, const char* message_id, const char* in_reply_to, const char* body, const char* storageDir, char* outJson, int outSize, const char* x_mailer = nullptr);
 
 // Query session_id by message_id. Returns 0 on success, negative on error.
 int email_query_session_by_message_id(const char* messageId, const char* account, char* outSessionId, int outSize);
+
+// Query session_id by subject + from_addr + account (fallback). Returns 0 on success, negative on error.
+int email_query_session_by_subject_sender(const char* subject, const char* fromAddr, const char* account, char* outSessionId, int outSize);
 
 // Add an email to an existing session by uuid and session_id. Returns 0 on success, negative on error.
 int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, int encrypt_method, char* outJson, int outSize);
@@ -344,6 +349,68 @@ int addressbook_update(int id, const char* name, const char* groupName, const ch
 int addressbook_delete(int id);
 int addressbook_extract_from_header(const char* headerValue);
 int addressbook_migrate_from_emails();
+
+// --- Signal Protocol API (v1) ---
+
+// Initialize Signal identity + prekeys for an account.
+// Generates identity key, signed prekey, and one-time prekeys if not present.
+// Returns 0 on success, negative on error.
+int signal_init_account(const char* account);
+
+// Build a Prekey Bundle for an account and return as JSON.
+// Returns 0 on success, negative on error.
+int signal_get_prekey_bundle(const char* account, char* outJson, int outSize);
+
+// Initiate a new Signal session: X3DH + first encrypted message.
+// Generates session_id, computes root key, encrypts plaintext.
+// Returns JSON with session_id + encrypted message body in outJson.
+// Returns 0 on success, negative on error.
+int signal_session_initiate(const char* account, const char* peerEmail,
+                            const char* plaintext, char* outJson, int outSize,
+                            const char* messageId,
+                            const char* inReplyTo);
+
+// Encrypt a message in an existing Signal session (Double Ratchet).
+// Returns JSON with encrypted message body in outJson.
+// Returns 0 on success, negative on error.
+int signal_session_encrypt(const char* account, const char* peerEmail,
+                           const char* sessionId, const char* plaintext,
+                           char* outJson, int outSize,
+                           const char* messageId,
+                           const char* inReplyTo);
+
+// Decrypt a received Signal message.
+// Takes the JSON body from the email, identifies the session, and decrypts.
+// If it's a SESSION_INIT (1.0.1), creates the session on the responder side.
+// Returns JSON with plaintext + session_id in outJson.
+// Returns 0 on success, negative on error.
+int signal_session_decrypt(const char* account, const char* peerEmail,
+                           const char* jsonBody, char* outJson, int outSize);
+
+// Check if a Signal session exists for (account, peerEmail, sessionId).
+// If sessionId is non-empty, checks per-session; if empty, checks any session for (account, peer).
+// Returns 1 if exists, 0 if not, negative on error.
+int signal_session_exists(const char* account, const char* peerEmail,
+                          const char* sessionId);
+
+// Check if a Signal session exists for an email session (e.g. session_491).
+// Looks up signal_session_id from the session table, then checks the Signal session.
+// Returns 1 if exists, 0 if not, negative on error.
+int signal_session_exists_for_email_session(const char* account,
+                                             const char* emailSessionId);
+
+// Close/delete a Signal session.
+// Returns 0 on success, negative on error.
+int signal_session_close(const char* account, const char* peerEmail,
+                         const char* sessionId);
+
+// Store a peer's prekey bundle (received in-band) into local cache.
+// keyScope: optional session UUID to scope the peer prekey (for per-session keys).
+// Returns 0 on success, negative on error.
+int signal_store_peer_prekey(const char* account, const char* peerEmail,
+                             const char* ikPub, const char* spkPub,
+                             const char* spkSig, const char* opkPub,
+                             const char* keyScope);
 
 #ifdef __cplusplus
 }

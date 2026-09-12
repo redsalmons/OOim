@@ -27,6 +27,31 @@ std::string SessionRepo::querySessionByMessageId(const std::string& messageId, c
     return result;
 }
 
+std::string SessionRepo::findSessionIdBySignalSessionId(const std::string& account, const std::string& signalSessionId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || signalSessionId.empty()) return "";
+
+    const char* sql =
+        "SELECT s.session_id FROM session s "
+        "JOIN localemail l ON s.email_id = l.id "
+        "WHERE s.signal_session_id = ? AND l.account = ? "
+        "ORDER BY s.id DESC LIMIT 1;";
+
+    sqlite3_stmt* stmt;
+    std::string result;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, signalSessionId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* sid = (const char*)sqlite3_column_text(stmt, 0);
+            if (sid) result = sid;
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
 std::string SessionRepo::querySessionByInReplyTo(const std::string& inReplyTo, const std::string& account) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
@@ -42,6 +67,34 @@ std::string SessionRepo::querySessionByInReplyTo(const std::string& inReplyTo, c
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, inReplyTo.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* sid = (const char*)sqlite3_column_text(stmt, 0);
+            if (sid) result = sid;
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
+std::string SessionRepo::querySessionBySubjectAndSender(const std::string& subject, const std::string& fromAddr, const std::string& account) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || subject.empty()) return "";
+
+    const char* sql =
+        "SELECT s.session_id FROM session s "
+        "JOIN localemail l ON s.email_id = l.id "
+        "WHERE l.subject = ? AND l.account = ? "
+        "AND (l.from_addr LIKE '%' || ? || '%' OR l.to_addr LIKE '%' || ? || '%') "
+        "ORDER BY s.id DESC LIMIT 1;";
+
+    sqlite3_stmt* stmt;
+    std::string result;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, subject.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, fromAddr.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, fromAddr.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* sid = (const char*)sqlite3_column_text(stmt, 0);
             if (sid) result = sid;
@@ -203,4 +256,38 @@ bool SessionRepo::hideSession(const std::string& sessionId) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
+}
+
+bool SessionRepo::setSignalSessionId(const std::string& sessionId, const std::string& signalSessionId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE session SET signal_session_id = ? WHERE session_id = ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, signalSessionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+std::string SessionRepo::getSignalSessionId(const std::string& sessionId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || sessionId.empty()) return "";
+
+    const char* sql = "SELECT signal_session_id FROM session WHERE session_id = ? AND signal_session_id != '' LIMIT 1;";
+    sqlite3_stmt* stmt;
+    std::string result;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* s = (const char*)sqlite3_column_text(stmt, 0);
+            if (s) result = s;
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
 }

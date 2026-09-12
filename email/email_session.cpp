@@ -4,6 +4,7 @@
 #include "db_connection.h"
 #include "email_repo.h"
 #include "session_repo.h"
+#include "signal/signal_protocol.h"
 #include "key_repo.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,7 @@ static SessionRepo s_sessionRepo;
 static KeyRepo s_keyRepo;
 
 // Generate session records for existing emails
-// Now a no-op: sessions are only created via X-Mailer=0.1.0 in download_pending_bodies
+// Now a no-op: sessions are only created via X-Mailer=1.0.1 in download_pending_bodies
 extern "C" int email_generate_sessions(const char* account, char* outJson, int outSize) {
     if (outJson && outSize > 0) {
         snprintf(outJson, outSize, R"({"status":"success","message":"no-op"})");
@@ -137,7 +138,7 @@ extern "C" int email_create_session(const char* account, const char* subject, co
 }
 
 // Insert a sent email record into localemail with a pending uuid
-extern "C" int email_insert_sent_email(const char* account, const char* sender, const char* from_addr, const char* to_addr, const char* subject, const char* date, const char* message_id, const char* in_reply_to, const char* body, const char* storageDir, char* outJson, int outSize) {
+extern "C" int email_insert_sent_email(const char* account, const char* sender, const char* from_addr, const char* to_addr, const char* subject, const char* date, const char* message_id, const char* in_reply_to, const char* body, const char* storageDir, char* outJson, int outSize, const char* x_mailer) {
     auto& conn = DbConnection::instance();
     if (!conn.get()) {
         if (outJson && outSize > 0) {
@@ -223,6 +224,9 @@ extern "C" int email_insert_sent_email(const char* account, const char* sender, 
                 emlFile << "To: " << (to_addr ? to_addr : "") << "\n";
                 emlFile << "Subject: " << (subject ? subject : "") << "\n";
                 emlFile << "Date: " << (date ? date : "") << "\n";
+                if (x_mailer && *x_mailer) {
+                    emlFile << "X-Mailer: " << x_mailer << "\n";
+                }
                 emlFile << "Mime-Version: 1.0\n";
                 emlFile << "Content-Type: text/plain; charset=UTF-8\n";
                 emlFile << "Content-Transfer-Encoding: 8bit\n";
@@ -256,6 +260,22 @@ extern "C" int email_query_session_by_message_id(const char* messageId, const ch
     }
 
     std::string sid = s_sessionRepo.querySessionByMessageId(messageId, account ? account : "");
+    if (outSessionId && outSize > 0) {
+        snprintf(outSessionId, outSize, "%s", sid.c_str());
+    }
+    return 0;
+}
+
+extern "C" int email_query_session_by_subject_sender(const char* subject, const char* fromAddr, const char* account, char* outSessionId, int outSize) {
+    if (!subject || !*subject) {
+        if (outSessionId && outSize > 0) outSessionId[0] = '\0';
+        return -1;
+    }
+
+    std::string sid = s_sessionRepo.querySessionBySubjectAndSender(
+        subject ? subject : "",
+        fromAddr ? fromAddr : "",
+        account ? account : "");
     if (outSessionId && outSize > 0) {
         snprintf(outSessionId, outSize, "%s", sid.c_str());
     }

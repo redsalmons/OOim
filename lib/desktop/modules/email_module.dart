@@ -24,6 +24,7 @@ class EmailModuleState extends State<EmailModule>
   String? _selectedConversationMessageId;
   bool _isConversationView = false;
   bool _showConversationPanel = false;
+  bool _showEmojiPicker = false;
   final TextEditingController _searchController = TextEditingController();
   late final RichTextReplyController _replyController;
   final List<DroppedFile> _droppedFiles = [];
@@ -99,6 +100,10 @@ class EmailModuleState extends State<EmailModule>
   bool get showConversationPanel => _showConversationPanel;
   @override
   set showConversationPanel(bool v) => _showConversationPanel = v;
+  @override
+  bool get showEmojiPicker => _showEmojiPicker;
+  @override
+  set showEmojiPicker(bool v) => _showEmojiPicker = v;
 
   @override
   void initState() {

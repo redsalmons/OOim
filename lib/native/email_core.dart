@@ -424,6 +424,34 @@ typedef _EmailFileTransferReassembleDart = int Function(Pointer<Utf8>, Pointer<U
 typedef _EmailFileTransferCopyOriginalNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailFileTransferCopyOriginalDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
+// Signal protocol operations
+typedef _SignalInitAccountNative = Int32 Function(Pointer<Utf8>);
+typedef _SignalInitAccountDart = int Function(Pointer<Utf8>);
+
+typedef _SignalGetPrekeyBundleNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _SignalGetPrekeyBundleDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _SignalSessionInitiateNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _SignalSessionInitiateDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _SignalSessionEncryptNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _SignalSessionEncryptDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _SignalSessionDecryptNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _SignalSessionDecryptDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
+typedef _SignalSessionExistsNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _SignalSessionExistsDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
+typedef _SignalSessionExistsForEmailSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _SignalSessionExistsForEmailSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
+typedef _SignalSessionCloseNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _SignalSessionCloseDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
+typedef _SignalStorePeerPrekeyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _SignalStorePeerPrekeyDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
 // ---------------------------------------------------------------------------
 // Library loading
 // ---------------------------------------------------------------------------
@@ -545,6 +573,17 @@ final _emailFileTransferQueryPending = _lib.lookupFunction<_EmailFileTransferQue
 final _emailFileTransferReassemble = _lib.lookupFunction<_EmailFileTransferReassembleNative, _EmailFileTransferReassembleDart>('email_file_transfer_reassemble');
 final _emailFileTransferCopyOriginal = _lib.lookupFunction<_EmailFileTransferCopyOriginalNative, _EmailFileTransferCopyOriginalDart>('email_file_transfer_copy_original');
 
+// Signal protocol lookups
+final _signalInitAccount = _lib.lookupFunction<_SignalInitAccountNative, _SignalInitAccountDart>('signal_init_account');
+final _signalGetPrekeyBundle = _lib.lookupFunction<_SignalGetPrekeyBundleNative, _SignalGetPrekeyBundleDart>('signal_get_prekey_bundle');
+final _signalSessionInitiate = _lib.lookupFunction<_SignalSessionInitiateNative, _SignalSessionInitiateDart>('signal_session_initiate');
+final _signalSessionEncrypt = _lib.lookupFunction<_SignalSessionEncryptNative, _SignalSessionEncryptDart>('signal_session_encrypt');
+final _signalSessionDecrypt = _lib.lookupFunction<_SignalSessionDecryptNative, _SignalSessionDecryptDart>('signal_session_decrypt');
+final _signalSessionExists = _lib.lookupFunction<_SignalSessionExistsNative, _SignalSessionExistsDart>('signal_session_exists');
+final _signalSessionExistsForEmailSession = _lib.lookupFunction<_SignalSessionExistsForEmailSessionNative, _SignalSessionExistsForEmailSessionDart>('signal_session_exists_for_email_session');
+final _signalSessionClose = _lib.lookupFunction<_SignalSessionCloseNative, _SignalSessionCloseDart>('signal_session_close');
+final _signalStorePeerPrekey = _lib.lookupFunction<_SignalStorePeerPrekeyNative, _SignalStorePeerPrekeyDart>('signal_store_peer_prekey');
+
 // ---------------------------------------------------------------------------
 // Idiomatic Dart data classes
 // ---------------------------------------------------------------------------
@@ -648,14 +687,23 @@ EmailMessage _emailMessageFromNative(_NativeEmail email) {
 class XMailer {
   static const String header = 'X-Mailer';
 
-  static const String newSession = '0.1.0';  // New session creation
-  static const String exchange    = '0.1.1';  // Key exchange
-  static const String text        = '0.1.2';  // Encrypted text message
-  static const String fileMeta    = '0.1.3';  // File metadata (visible in UI)
-  static const String fileChunk   = '0.1.4';  // File chunk (hidden from UI)
+  // Signal protocol over Email, v1
+  static const String prekeyBundle = '1.0.0';   // Prekey distribution (in-band)
+  static const String sessionInit  = '1.0.1';   // X3DH session init + first encrypted message
+  static const String ratchetMsg   = '1.0.2';   // Double Ratchet encrypted message
+  static const String repairMsg    = '1.0.3';   // Session repair / reset
+  static const String attachMeta   = '1.0.4';   // Encrypted attachment metadata
+  static const String attachChunk  = '1.0.5';   // Attachment chunk data
+
+  // Aliases mapping old names to new 1.0.x values (no 0.1.x backward compat)
+  static const String newSession = sessionInit;    // New session creation
+  static const String exchange   = prekeyBundle;   // Key exchange
+  static const String text       = ratchetMsg;     // Encrypted text message
+  static const String fileMeta   = attachMeta;     // File metadata (visible in UI)
+  static const String fileChunk  = attachChunk;    // File chunk (hidden from UI)
 
   static const List<String> whitelist = [
-    newSession, exchange, text, fileMeta, fileChunk,
+    prekeyBundle, sessionInit, ratchetMsg, repairMsg, attachMeta, attachChunk,
   ];
 
   static bool isValid(String value) => whitelist.contains(value);
@@ -1425,7 +1473,7 @@ class EmailCore {
     }
   }
 
-  /// Decrypts an X-Mailer=0.1.2/0.1.3/0.1.4 email body for the given account.
+  /// Decrypts an X-Mailer=1.0.2/1.0.4/1.0.5 email body for the given account.
   /// Returns 0 on success, negative on error. Output plaintext in outJson.
   static int decryptDataBody(String encryptedBody, String account, Pointer<Utf8> outJson, int outSize) {
     final bodyPtr = encryptedBody.toNativeUtf8();
@@ -1562,7 +1610,9 @@ class EmailCore {
     String messageId = '',
     String xMessageId = '',
     String sessionId = '',
-    String xSessionChart = XMailer.text,
+    // For non-Signal emails, leave xSessionChart empty.
+    // Signal senders (e.g. conversation_view) must pass the appropriate XMailer value explicitly.
+    String xSessionChart = '',
   }) {
     final accountPtr = account.toNativeUtf8();
     final recipientPtr = recipient.toNativeUtf8();
@@ -1726,6 +1776,147 @@ class EmailCore {
       malloc.free(fileIdPtr);
       malloc.free(outputDirPtr);
       malloc.free(outJson);
+    }
+  }
+
+  // --- Signal Protocol API ---
+
+  /// Initialize Signal identity + prekeys for an account.
+  static int signalInitAccount(String account) {
+    final accountPtr = account.toNativeUtf8();
+    try {
+      return _signalInitAccount(accountPtr);
+    } finally {
+      malloc.free(accountPtr);
+    }
+  }
+
+  /// Get Prekey Bundle for an account as JSON.
+  static String signalGetPrekeyBundle(String account) {
+    final accountPtr = account.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      _signalGetPrekeyBundle(accountPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Initiate a new Signal session (X3DH + first encrypted message).
+  /// Returns JSON with session_id and message body.
+  static String signalSessionInitiate(String account, String peerEmail, String plaintext) {
+    final accountPtr = account.toNativeUtf8();
+    final peerPtr = peerEmail.toNativeUtf8();
+    final textPtr = plaintext.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _signalSessionInitiate(accountPtr, peerPtr, textPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(peerPtr);
+      malloc.free(textPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Encrypt a message in an existing Signal session.
+  static String signalSessionEncrypt(String account, String peerEmail, String sessionId, String plaintext) {
+    final accountPtr = account.toNativeUtf8();
+    final peerPtr = peerEmail.toNativeUtf8();
+    final sidPtr = sessionId.toNativeUtf8();
+    final textPtr = plaintext.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _signalSessionEncrypt(accountPtr, peerPtr, sidPtr, textPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(peerPtr);
+      malloc.free(sidPtr);
+      malloc.free(textPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Decrypt a received Signal message.
+  static String signalSessionDecrypt(String account, String peerEmail, String jsonBody) {
+    final accountPtr = account.toNativeUtf8();
+    final peerPtr = peerEmail.toNativeUtf8();
+    final bodyPtr = jsonBody.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _signalSessionDecrypt(accountPtr, peerPtr, bodyPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(peerPtr);
+      malloc.free(bodyPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Check if a Signal session exists for (account, peerEmail, sessionId).
+  static int signalSessionExists(String account, String peerEmail, {String sessionId = ''}) {
+    final accountPtr = account.toNativeUtf8();
+    final peerPtr = peerEmail.toNativeUtf8();
+    final sidPtr = sessionId.toNativeUtf8();
+    try {
+      return _signalSessionExists(accountPtr, peerPtr, sidPtr);
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(peerPtr);
+      malloc.free(sidPtr);
+    }
+  }
+
+  /// Check if a Signal session exists for an email session (e.g. session_491).
+  static int signalSessionExistsForEmailSession(String account, String emailSessionId) {
+    final accountPtr = account.toNativeUtf8();
+    final sidPtr = emailSessionId.toNativeUtf8();
+    try {
+      return _signalSessionExistsForEmailSession(accountPtr, sidPtr);
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(sidPtr);
+    }
+  }
+
+  /// Close a Signal session.
+  static int signalSessionClose(String account, String peerEmail, String sessionId) {
+    final accountPtr = account.toNativeUtf8();
+    final peerPtr = peerEmail.toNativeUtf8();
+    final sidPtr = sessionId.toNativeUtf8();
+    try {
+      return _signalSessionClose(accountPtr, peerPtr, sidPtr);
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(peerPtr);
+      malloc.free(sidPtr);
+    }
+  }
+
+  /// Store a peer's prekey bundle into local cache.
+  static int signalStorePeerPrekey(String account, String peerEmail, String ikPub, String spkPub, String spkSig, String opkPub, {String keyScope = ''}) {
+    final accountPtr = account.toNativeUtf8();
+    final peerPtr = peerEmail.toNativeUtf8();
+    final ikPtr = ikPub.toNativeUtf8();
+    final spkPtr = spkPub.toNativeUtf8();
+    final sigPtr = spkSig.toNativeUtf8();
+    final opkPtr = opkPub.toNativeUtf8();
+    final keyScopePtr = keyScope.toNativeUtf8();
+    try {
+      return _signalStorePeerPrekey(accountPtr, peerPtr, ikPtr, spkPtr, sigPtr, opkPtr, keyScopePtr);
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(peerPtr);
+      malloc.free(ikPtr);
+      malloc.free(spkPtr);
+      malloc.free(sigPtr);
+      malloc.free(opkPtr);
+      malloc.free(keyScopePtr);
     }
   }
 }

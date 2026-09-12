@@ -547,7 +547,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
 
         // Resolve session ID early for potential body encryption
-        // For NEW_SESSION: defer session creation to after email_insert_sent_email (need rowid)
+        // For SESSION_INIT: defer session creation to after email_insert_sent_email (need rowid)
         std::string sid = session_id;
 
         // For non-new types, find session via in_reply_to
@@ -560,32 +560,9 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
 
         LOG_INFO("Gmail send_email: using session_id=%s\n", sid.c_str());
 
-        // For encrypted types (0.1.2/0.1.3/0.1.4), inject x_message_id and last_message_id into body, then encrypt
+        // Legacy encryption disabled — all encryption handled by Signal protocol
         std::string bodyToSend = body;
-        bool needsEncryption = (x_session_chart == XMailer::TEXT || x_session_chart == XMailer::FILE_META || x_session_chart == XMailer::FILE_CHUNK);
-        if (needsEncryption) {
-            // Inject x_message_id and last_message_id into body JSON before encryption
-            try {
-                auto bodyJson = nlohmann::json::parse(body);
-                bodyJson["x_message_id"] = message_id;
-                bodyJson["last_message_id"] = in_reply_to;
-                bodyToSend = bodyJson.dump();
-            } catch (...) {
-                nlohmann::json bodyJson;
-                bodyJson["text"] = body;
-                bodyJson["x_message_id"] = message_id;
-                bodyJson["last_message_id"] = in_reply_to;
-                bodyToSend = bodyJson.dump();
-            }
-            std::vector<char> encBody(8 * 1024 * 1024);
-            int encRc = email_prepare_data_body(bodyToSend.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
-            if (encRc == 0) {
-                bodyToSend = encBody.data();
-                LOG_INFO("Gmail send_email: encrypted data body, len=%zu\n", bodyToSend.size());
-            } else {
-                LOG_INFO("Gmail send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);
-            }
-        }
+        bool needsEncryption = false;
 
         builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
         vmime::shared_ptr<vmime::message> msg = builder.construct();
@@ -634,7 +611,8 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
             email_.c_str(), email_.c_str(), email_.c_str(),
             recipient.c_str(), subject.c_str(), date_str,
             msg_id.c_str(), in_reply_to.c_str(), bodyToSend.c_str(),
-            data_dir_.c_str(), json_buffer, sizeof(json_buffer)
+            data_dir_.c_str(), json_buffer, sizeof(json_buffer),
+            x_session_chart.c_str()
         );
 
         if (insert_result == 0) {
@@ -644,8 +622,8 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                 if (ins_response.contains("uuid")) {
                     std::string email_id = ins_response["uuid"].get<std::string>();
 
-                    // For NEW_SESSION: create session now that we have the rowid
-                    if (x_session_chart == XMailer::NEW_SESSION && sid.empty()) {
+                    // For SESSION_INIT: create session now that we have the rowid
+                    if (x_session_chart == XMailer::SESSION_INIT && sid.empty()) {
                         int64_t rowid = std::stoll(email_id);
                         char create_json[4096];
                         int create_rc = email_create_session(
@@ -661,7 +639,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                                 }
                             } catch (...) {}
                         }
-                        LOG_INFO("Gmail send_email: NEW_SESSION created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
+                        LOG_INFO("Gmail send_email: SESSION_INIT created session_id=%s (rowid=%s)\n", sid.c_str(), email_id.c_str());
                     }
 
                     char session_buffer[8192];

@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:convert';
 import 'dart:isolate';
 import 'package:flutter/material.dart';
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -189,6 +190,8 @@ mixin ConversationViewMixin on State<EmailModule> {
   bool get isConversationView;
   bool get showConversationPanel;
   set showConversationPanel(bool v);
+  bool get showEmojiPicker;
+  set showEmojiPicker(bool v);
   TextEditingController get replyController;
   String get configPath;
   String get emailDataPath;
@@ -672,7 +675,10 @@ mixin ConversationViewMixin on State<EmailModule> {
           top: BorderSide(color: Colors.grey[300]!, width: 0.5),
         ),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
         children: [
           Expanded(
             child: DropTarget(
@@ -734,6 +740,11 @@ mixin ConversationViewMixin on State<EmailModule> {
                           controller: replyController,
                           maxLines: 5,
                           minLines: 2,
+                          onTap: () {
+                            if (showEmojiPicker) {
+                              setState(() => showEmojiPicker = false);
+                            }
+                          },
                           decoration: InputDecoration(
                             hintText: AppStrings.sendMessageHint,
                             hintStyle: TextStyle(fontSize: 14, color: Colors.grey[400]),
@@ -750,11 +761,30 @@ mixin ConversationViewMixin on State<EmailModule> {
                         padding: const EdgeInsets.only(left: 4, bottom: 4),
                         child: Align(
                           alignment: Alignment.centerLeft,
-                          child: IconButton(
-                            icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
-                            onPressed: () {},
-                            constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
-                            padding: EdgeInsets.zero,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
+                                onPressed: () {},
+                                constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+                                padding: EdgeInsets.zero,
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  showEmojiPicker ? Icons.emoji_emotions : Icons.emoji_emotions_outlined,
+                                  size: 20,
+                                  color: showEmojiPicker ? const Color(0xFF07C160) : Colors.grey[600],
+                                ),
+                                onPressed: () {
+                                  setState(() {
+                                    showEmojiPicker = !showEmojiPicker;
+                                  });
+                                },
+                                constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+                                padding: EdgeInsets.zero,
+                              ),
+                            ],
                           ),
                         ),
                       ),
@@ -776,10 +806,50 @@ mixin ConversationViewMixin on State<EmailModule> {
             ),
             onPressed: () {
               native.EmailCore.logWrite('[SEND] Send button tapped');
+              if (showEmojiPicker) {
+                setState(() => showEmojiPicker = false);
+              }
               sendConversationReply(thread);
             },
             child: Text(AppStrings.send, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           ),
+        ],
+          ),
+          if (showEmojiPicker)
+            SizedBox(
+              height: 250,
+              child: EmojiPicker(
+                onEmojiSelected: (category, emoji) {
+                  if (emoji != null) {
+                    final text = replyController.text;
+                    final selection = replyController.selection;
+                    final cursorPos = selection.baseOffset < 0 ? text.length : selection.baseOffset;
+                    final newText = text.substring(0, cursorPos) + emoji.emoji + text.substring(cursorPos);
+                    replyController.value = TextEditingValue(
+                      text: newText,
+                      selection: TextSelection.collapsed(offset: cursorPos + emoji.emoji.length),
+                    );
+                  }
+                },
+                config: Config(
+                  height: 250,
+                  checkPlatformCompatibility: true,
+                  emojiViewConfig: EmojiViewConfig(
+                    emojiSizeMax: 28,
+                    backgroundColor: Colors.white,
+                  ),
+                  categoryViewConfig: CategoryViewConfig(
+                    indicatorColor: const Color(0xFF07C160),
+                    iconColorSelected: const Color(0xFF07C160),
+                    backgroundColor: Colors.white,
+                  ),
+                  searchViewConfig: SearchViewConfig(
+                    backgroundColor: Colors.white,
+                    buttonIconColor: Colors.grey[600] ?? Colors.grey,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -888,6 +958,26 @@ mixin ConversationViewMixin on State<EmailModule> {
 
     native.EmailCore.logWrite('[SEND] Using account: ${myAccount.email}, id: ${myAccount.id}');
 
+    String peerEmail = '';
+    for (final addr in recipients) {
+      if (addr != myAccount.email) {
+        peerEmail = addr;
+        break;
+      }
+    }
+
+    final sessionId = selectedConversationMessageId;
+
+    if (peerEmail.isNotEmpty && (sessionId ?? '').isNotEmpty) {
+      final exists = native.EmailCore.signalSessionExistsForEmailSession(myAccount.email, sessionId ?? '');
+      if (exists <= 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppStrings.sessionCreatedWaiting), duration: const Duration(seconds: 3)),
+        );
+        return;
+      }
+    }
+
     // Show sending indicator
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(AppStrings.sending), duration: const Duration(seconds: 10)),
@@ -902,7 +992,6 @@ mixin ConversationViewMixin on State<EmailModule> {
     final imapPort = myAccount.imapPort;
     final smtpServer = myAccount.smtpServer;
     final smtpPort = myAccount.smtpPort;
-    final sessionId = selectedConversationMessageId;
     // Generate a message_id for this reply
     final replyMessageId = '<${DateTime.now().millisecondsSinceEpoch}.${DateTime.now().microsecond}@${accountEmail.split('@').last}>';
 
@@ -943,7 +1032,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         inReplyTo: inReplyTo,
         messageId: replyMessageId,
         sessionId: sessionId ?? '',
-        xSessionChart: native.XMailer.text,
+        xSessionChart: native.XMailer.ratchetMsg,
       );
     }
 
@@ -1030,6 +1119,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     bool hasAtt = false;
     bool isDownloading = firstEmail.file.isEmpty;
     bool showDownloadingIndicator = false;
+    bool isHandshakeMessage = false;
     String savedEmlPath = '';
     List<EmlAttachment> savedAttachments = [];
 
@@ -1077,6 +1167,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         bodyText = parsed.textBody;
         hasAtt = parsed.hasAttachments;
         isFileMessage = parsed.isFileMessage;
+        isHandshakeMessage = parsed.isHandshakeMessage;
         savedAttachments = parsed.attachments;
         if (isFileMessage) {
           fileCards.add(FileCardInfo(
@@ -1185,6 +1276,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                   maxWidth: MediaQuery.of(context).size.width * 0.5,
                   bodyText: bodyText,
                   showDownloadingIndicator: showDownloadingIndicator,
+                  isHandshakeMessage: isHandshakeMessage,
                   fileCards: fileCards,
                   onSaveFile: (context, fileId, fileName) => _saveFileTransfer(context, fileId, fileName, isMe),
                 ),
@@ -1266,6 +1358,7 @@ class _ChatBubble extends StatelessWidget {
   final double maxWidth;
   final String bodyText;
   final bool showDownloadingIndicator;
+  final bool isHandshakeMessage;
   final List<FileCardInfo> fileCards;
   final void Function(BuildContext, String, String)? onSaveFile;
 
@@ -1275,6 +1368,7 @@ class _ChatBubble extends StatelessWidget {
     required this.maxWidth,
     required this.bodyText,
     required this.showDownloadingIndicator,
+    this.isHandshakeMessage = false,
     this.fileCards = const [],
     this.onSaveFile,
   });
@@ -1308,7 +1402,9 @@ class _ChatBubble extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (bodyText.isNotEmpty)
+              if (isHandshakeMessage)
+                Icon(Icons.handshake, size: 20, color: Colors.grey[500])
+              else if (bodyText.isNotEmpty)
                 SelectableText(
                   bodyText,
                   style: TextStyle(
