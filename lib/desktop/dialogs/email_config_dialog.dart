@@ -277,6 +277,12 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
   void _deleteAccount(int index) {
     _writeToFile('=== 删除按钮被点击 === index=$index');
     _writeToFile('删除前账户数量: ${_accounts.length}');
+    final account = _accounts[index];
+    if (account.email.isNotEmpty) {
+      final storageDir = widget.configPath.replaceAll('/config/oim.conf', '/data');
+      native.EmailCore.deleteAccountData(account.email, storageDir);
+      _writeToFile('已清理账号关联数据: ${account.email}');
+    }
     setState(() {
       _accounts.removeAt(index);
       if (_accounts.isEmpty) {

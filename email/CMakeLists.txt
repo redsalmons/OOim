@@ -17,9 +17,9 @@ find_package(CURL REQUIRED)
 set(OPENSSL_SSL_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libssl.a")
 set(OPENSSL_CRYPTO_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libcrypto.a")
 
-# Use system vmime directly
-set(VMIME_INCLUDE_DIRS "/usr/local/include")
-set(VMIME_LIBRARIES "/usr/local/lib/libvmime.dylib")
+# Use locally built vmime with OpenSSL TLS backend
+set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/include")
+set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/lib/libvmime.dylib")
 set(VMIME_FOUND TRUE)
 
 # Find gsasl
@@ -60,7 +60,7 @@ target_include_directories(EmailComm PUBLIC
     ${OPENSSL_INCLUDE_DIR}
 )
 
-target_link_libraries(EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
+target_link_libraries(EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
 
 # Email core library (static, used by example executable)
 add_library(email_core STATIC
@@ -76,6 +76,8 @@ add_library(email_core STATIC
     signal/signal_protocol.cpp
     signal/signal_message.cpp
     signal/signal_c_api.cpp
+    signal/sender_key.cpp
+    signal/group_c_api.cpp
     email_core.h
     email_core_common.h
     persistence/db_connection.cpp
@@ -88,6 +90,8 @@ add_library(email_core STATIC
     persistence/file_transfer_repo.cpp
     persistence/signal_key_repo.cpp
     persistence/signal_session_repo.cpp
+    persistence/sender_key_repo.cpp
+    persistence/group_session_repo.cpp
 )
 
 # Email core shared library (used by Flutter via dart:ffi)
@@ -104,6 +108,8 @@ add_library(email_core_shared SHARED
     signal/signal_protocol.cpp
     signal/signal_message.cpp
     signal/signal_c_api.cpp
+    signal/sender_key.cpp
+    signal/group_c_api.cpp
     email_core.h
     email_core_common.h
     persistence/db_connection.cpp
@@ -116,6 +122,8 @@ add_library(email_core_shared SHARED
     persistence/file_transfer_repo.cpp
     persistence/signal_key_repo.cpp
     persistence/signal_session_repo.cpp
+    persistence/sender_key_repo.cpp
+    persistence/group_session_repo.cpp
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
@@ -144,8 +152,8 @@ target_include_directories(email_core_shared PUBLIC
 )
 
 # Link SQLite3, EmailComm, and vmime
-target_link_libraries(email_core SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib)
-target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm /usr/local/lib/libvmime.dylib /opt/homebrew/lib/libgsasl.dylib z)
+target_link_libraries(email_core SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib iconv)
+target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib z iconv)
 
 # Sign the shared library on macOS to prevent code signing crashes
 if(APPLE)

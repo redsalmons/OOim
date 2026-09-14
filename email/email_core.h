@@ -191,9 +191,6 @@ int email_insert_sent_email(const char* account, const char* sender, const char*
 // Query session_id by message_id. Returns 0 on success, negative on error.
 int email_query_session_by_message_id(const char* messageId, const char* account, char* outSessionId, int outSize);
 
-// Query session_id by subject + from_addr + account (fallback). Returns 0 on success, negative on error.
-int email_query_session_by_subject_sender(const char* subject, const char* fromAddr, const char* account, char* outSessionId, int outSize);
-
 // Add an email to an existing session by uuid and session_id. Returns 0 on success, negative on error.
 int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, int encrypt_method, char* outJson, int outSize);
 
@@ -212,6 +209,7 @@ int email_get_max_uid(const char* account, const char* folder, char* outUid, int
 // oemailim C wrappers (for Dart FFI)
 int oemailim_system_open(const char* dataDir, const char* configDir, const char* logDir);
 int oemailim_open_new_email(const char* email_id);
+int oemailim_delete_account_data(const char* account, const char* storageDir);
 int oemailim_go(int configIndex);
 int oemailim_authority(int configIndex);
 void oemailim_system_close(int configIndex);
@@ -411,6 +409,80 @@ int signal_store_peer_prekey(const char* account, const char* peerEmail,
                              const char* ikPub, const char* spkPub,
                              const char* spkSig, const char* opkPub,
                              const char* keyScope);
+
+// === Group messaging (Sender Key) ===
+
+// Create a group session.
+// membersJson: JSON array of email strings, e.g. ["alice@...","bob@..."]
+// Returns 0 on success, negative on error.
+int group_create(const char* account, const char* groupId,
+                 const char* groupEmail, const char* subject,
+                 const char* membersJson, char* outJson, int outSize);
+
+// Set the shared x-reply-id for a group (used for x-reply-id based association).
+int group_set_x_reply_id(const char* account, const char* groupId,
+                         const char* xReplyId, char* outJson, int outSize);
+
+// Add a member to a group. Triggers epoch increment.
+// Returns 0 on success, negative on error.
+int group_add_member(const char* account, const char* groupId,
+                     const char* memberEmail, char* outJson, int outSize);
+
+// Remove a member from a group. Triggers epoch increment.
+// Returns 0 on success, negative on error.
+int group_remove_member(const char* account, const char* groupId,
+                        const char* memberEmail, char* outJson, int outSize);
+
+// Get group info (members, epoch, status).
+// Returns 0 on success, negative on error.
+int group_get_info(const char* account, const char* groupId,
+                   char* outJson, int outSize);
+
+// List all active groups for an account.
+// outJson: JSON array of {group_id, group_email, subject, members, epoch}
+// Returns 0 on success, negative on error.
+int group_list(const char* account, char* outJson, int outSize);
+
+// Find an existing 1:1 email session for a peer.
+// outSessionId: the email session_id if one exists, empty string otherwise.
+// Returns 0 on success, negative on error.
+int group_find_1to1_session(const char* account, const char* peerEmail,
+                            char* outSessionId, int outSize);
+
+// Generate a Sender Key for the current account in a group.
+// Returns distribution payload JSON via outJson.
+// Returns 0 on success, negative on error.
+int sender_key_generate(const char* account, const char* groupId,
+                        char* outJson, int outSize);
+
+// Get the distribution payload for our Sender Key (to send to other members).
+// Returns 0 on success, negative on error.
+int sender_key_get_distribution(const char* account, const char* groupId,
+                                 char* outJson, int outSize);
+
+// Store a received Sender Key from another member.
+// Returns 0 on success, negative on error.
+int sender_key_store(const char* account, const char* groupId,
+                     const char* senderEmail, const char* chainKey,
+                     const char* signingPub, int epoch);
+
+// Check if we have Sender Keys for all group members.
+// Returns 1 if ready, 0 if not, negative on error.
+int sender_key_check_ready(const char* account, const char* groupId);
+
+// Encrypt a group message.
+// outJson: {group_id, sender, iteration, epoch, ciphertext, signature}
+// Returns 0 on success, negative on error.
+int group_encrypt(const char* account, const char* groupId,
+                  const char* plaintext, char* outJson, int outSize);
+
+// Decrypt a group message.
+// outJson: {status:"success", plaintext} or {status:"error", error}
+// Returns 0 on success, negative on error.
+int group_decrypt(const char* account, const char* groupId,
+                  const char* senderEmail, int iteration, int epoch,
+                  const char* ciphertext, const char* signature,
+                  char* outJson, int outSize);
 
 #ifdef __cplusplus
 }

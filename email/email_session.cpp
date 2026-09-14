@@ -196,7 +196,8 @@ extern "C" int email_insert_sent_email(const char* account, const char* sender, 
         message_id ? message_id : "",
         in_reply_to ? in_reply_to : "",
         bodystructureStr,
-        filename);
+        filename,
+        x_mailer ? x_mailer : "");
     if (rowid > 0) {
         std::string rowidStr = std::to_string(rowid);
         LOG_INFO("[DB] email_insert_sent_email: inserted with pending uuid='%s', id='%s', file='%s'\n", pending_uuid.c_str(), rowidStr.c_str(), filename.c_str());
@@ -266,22 +267,6 @@ extern "C" int email_query_session_by_message_id(const char* messageId, const ch
     return 0;
 }
 
-extern "C" int email_query_session_by_subject_sender(const char* subject, const char* fromAddr, const char* account, char* outSessionId, int outSize) {
-    if (!subject || !*subject) {
-        if (outSessionId && outSize > 0) outSessionId[0] = '\0';
-        return -1;
-    }
-
-    std::string sid = s_sessionRepo.querySessionBySubjectAndSender(
-        subject ? subject : "",
-        fromAddr ? fromAddr : "",
-        account ? account : "");
-    if (outSessionId && outSize > 0) {
-        snprintf(outSessionId, outSize, "%s", sid.c_str());
-    }
-    return 0;
-}
-
 extern "C" int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, int encrypt_method, char* outJson, int outSize) {
     auto& conn = DbConnection::instance();
     if (!conn.get()) {
@@ -306,7 +291,17 @@ extern "C" int email_add_email_to_session(const char* sessionId, const char* uui
         emailId = std::stoll(std::string(uuid));
     }
 
-    bool ok = s_sessionRepo.addEmailToSession(sessionId ? sessionId : "", emailId, encrypt_method);
+    bool ok = false;
+    std::string sid = sessionId ? sessionId : "";
+    if (sid.compare(0, 6, "group_") == 0) {
+        int64_t groupId = 0;
+        if (sid.size() > 6) {
+            try { groupId = std::stoll(sid.substr(6)); } catch (...) { groupId = 0; }
+        }
+        ok = s_emailRepo.addEmailToGroupSession(account ? account : "", groupId, emailId, encrypt_method);
+    } else {
+        ok = s_sessionRepo.addEmailToSession(sid, emailId, encrypt_method);
+    }
     if (!ok) {
         LOG_INFO("[DB] email_add_email_to_session: failed, session_id=%s, email_id=%lld\n", sessionId ? sessionId : "", emailId);
     } else {
@@ -379,6 +374,8 @@ extern "C" int email_query_thread(const char* sessionId, char* outJson, int outS
         email_obj["to_addr"] = e.toAddr;
         email_obj["rowid"] = e.rowid;
         email_obj["file"] = e.file;
+        email_obj["x_mailer"] = e.xMailer;
+        email_obj["is_sent"] = e.isSent;
         emails_array.push_back(email_obj);
     }
 

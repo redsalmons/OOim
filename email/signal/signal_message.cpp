@@ -22,10 +22,10 @@ nlohmann::json encode_session_init(
     j["from"] = fromAccount;
     j["to"] = toRecipients;
     if (!messageId.empty()) {
-        j["message_id"] = messageId;
+        j["x_message_id"] = messageId;
     }
     if (!inReplyTo.empty()) {
-        j["in_reply_to"] = inReplyTo;
+        j["x_reply_to"] = inReplyTo;
     }
 
     j["signal_header"] = {
@@ -70,10 +70,10 @@ nlohmann::json encode_ratchet_msg(
     j["from"] = fromAccount;
     j["to"] = toRecipients;
     if (!messageId.empty()) {
-        j["message_id"] = messageId;
+        j["x_message_id"] = messageId;
     }
     if (!inReplyTo.empty()) {
-        j["in_reply_to"] = inReplyTo;
+        j["x_reply_to"] = inReplyTo;
     }
 
     j["signal_header"] = {
@@ -151,8 +151,8 @@ bool decode_signal_message(const nlohmann::json& j, ParsedSignalMessage& out) {
         out.version = j.value("version", 1);
         out.sessionId = j.value("session_id", "");
         out.fromAccount = j.value("from", "");
-        out.messageId = j.value("message_id", "");
-        out.inReplyTo = j.value("in_reply_to", "");
+        out.messageId = j.value("x_message_id", "");
+        out.inReplyTo = j.value("x_reply_to", "");
 
         if (j.contains("to") && j["to"].is_array()) {
             for (const auto& r : j["to"]) {

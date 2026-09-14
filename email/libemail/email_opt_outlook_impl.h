@@ -6,6 +6,8 @@
 #include <memory>
 #include <atomic>
 #include <functional>
+#include <mutex>
+#include <chrono>
 #include <vmime/vmime.hpp>
 
 namespace EmailComm {
@@ -71,6 +73,10 @@ public:
     // Get data directory
     std::string get_data_dir() const;
 
+    // Ensure a valid access token exists (refresh or re-authorize if needed).
+    // Thread-safe; blocks until a token is obtained or all options fail.
+    bool ensure_authenticated();
+
     // IMAP operations
     bool select_folder(const std::string& folder_name) override;
     std::vector<std::string> fetch_emails_since_uid(const std::string& folder, const std::string& start_uid) override;
@@ -96,12 +102,13 @@ private:
     static constexpr const char* DEFAULT_SCOPE = "openid email https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send https://graph.microsoft.com/Mail.Send offline_access";
     // Scope for Outlook IMAP/SMTP token refresh
     static constexpr const char* OUTLOOK_SCOPE = "openid email https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access";
-    // Scope for Microsoft Graph sendMail token
-    static constexpr const char* GRAPH_SCOPE = "https://graph.microsoft.com/Mail.Send";
+    // Scope for Microsoft Graph sendMail and readMail token
+    static constexpr const char* GRAPH_SCOPE = "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Read";
     static constexpr const char* DEFAULT_REDIRECT_URI = "http://localhost:9871";
     std::string email_;
     std::string access_token_;
     std::string graph_access_token_;
+    std::chrono::system_clock::time_point graph_token_expiry_;
     std::string refresh_token_;
     std::string last_error_;
     bool is_valid_;
@@ -128,7 +135,24 @@ private:
     vmime::shared_ptr<vmime::net::session> session_;
     vmime::shared_ptr<vmime::net::store> store_;
 
+    // Mutex to protect connect_() from concurrent access
+    std::mutex connect_mutex_;
+
+    // Mutex to serialize authentication/authorization (ensure_authenticated)
+    std::mutex auth_mutex_;
+
+    // Access token expiration timestamp (UTC)
+    std::chrono::system_clock::time_point access_token_expiry_;
+
+    // Graph API delta query state
+    std::string last_graph_delta_link_;
+    std::vector<std::string> pending_message_ids_;
+    std::mutex graph_delta_mutex_;
+
     // Helper methods
+    std::string graph_state_path() const;
+    void load_graph_state();
+    void save_graph_state();
     std::string generate_random_string(size_t length = 32);
     std::string generate_code_verifier();
     std::string generate_code_challenge(const std::string& verifier);
@@ -146,7 +170,20 @@ private:
                                  const std::string& code_verifier);
     bool refresh_graph_token();
     std::string parse_json_field(const std::string& json, const std::string& field);
-    
+
+    // Parse token response and set expiry from 'expires_in' (seconds)
+    void set_token_expiry_from_response(const std::string& response);
+
+    // Return true if no usable access token or it is near/after expiry
+    bool needs_token_refresh() const;
+
+    // Graph API helpers
+    bool ensure_graph_token();
+    std::string graph_request(const std::string& url, const std::string& method = "GET", const std::string& body = "");
+    std::vector<std::string> graph_delta_query(const std::string& folder);
+    std::string graph_get_message_mime(const std::string& id);
+    std::string parse_mime_to_json(const std::string& mime, const std::string& id);
+
     // Helper methods for sending email
     bool send_email_via_graph_api(const std::string& recipient, const std::string& subject, 
                                    const std::string& body, const std::string& in_reply_to, 

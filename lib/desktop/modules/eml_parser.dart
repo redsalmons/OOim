@@ -49,12 +49,12 @@ void clearEmlCache() {
   _emlCache.clear();
 }
 
-EmlParsedContent parseEmlFile(String filePath, {String? account}) {
+EmlParsedContent parseEmlFile(String filePath, {String? account, String? sessionId, String? fromAddr, String? xMailer, int isSent = 0}) {
   // Clear cache if it grows too large
   if (_emlCache.length > 1000) {
     _emlCache.clear();
   }
-  final cacheKey = account != null ? '$filePath|$account' : filePath;
+  final cacheKey = [filePath, account ?? '', sessionId ?? '', fromAddr ?? '', xMailer ?? '', isSent].join('|');
   if (_emlCache.containsKey(cacheKey)) {
     return _emlCache[cacheKey]!;
   }
@@ -74,7 +74,8 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
     final htmlBody = decoded['html_body'] as String? ?? '';
     final hasAtt = decoded['has_attachments'] as bool? ?? false;
     final attList = decoded['attachments'] as List? ?? [];
-    final xMailer = decoded['x_mailer'] as String? ?? '';
+    final fileXMailer = (decoded['x_mailer'] as String? ?? '').trim();
+    final effectiveXMailer = (xMailer ?? fileXMailer).trim();
 
     // Check if body is encrypted data (JSON with "text" and "session_info")
     if (textBody.isNotEmpty && textBody.contains('"text"') && textBody.contains('"session_info"')) {
@@ -171,10 +172,58 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
       }
     }
 
-    // Check if this is a handshake message (PREKEY_BUNDLE 1.0.0 or SESSION_INIT 1.0.1)
+    // Group message (1.1.1): decrypt using the local Sender Key ratchet
+    if (effectiveXMailer == '1.1.1' &&
+        account != null && account.isNotEmpty &&
+        sessionId != null && sessionId.startsWith('group_') &&
+        textBody.isNotEmpty) {
+      try {
+        final bodyJson = jsonDecode(textBody);
+        if (bodyJson is Map && bodyJson.containsKey('ciphertext')) {
+          if (isSent == 1) {
+            // Self-sent message: use plaintext directly, no decryption needed
+            textBody = bodyJson['plaintext'] as String? ?? '';
+          } else {
+            final groupId = sessionId.substring(6);
+            final gSender = (bodyJson['sender'] as String? ?? '').isNotEmpty
+                ? (bodyJson['sender'] as String? ?? '')
+                : (fromAddr ?? '');
+            final gIteration = bodyJson['iteration'] as int? ?? 0;
+            final gEpoch = bodyJson['epoch'] as int? ?? 0;
+            final gCiphertext = bodyJson['ciphertext'] as String? ?? '';
+            final gSignature = bodyJson['signature'] as String? ?? '';
+            if (gSender.isNotEmpty && gCiphertext.isNotEmpty && gSignature.isNotEmpty) {
+              final decJson = native.EmailCore.groupDecrypt(account, groupId, gSender, gIteration, gEpoch, gCiphertext, gSignature);
+              final dec = jsonDecode(decJson);
+              if (dec is Map && dec['status'] == 'success') {
+                textBody = dec['plaintext'] as String? ?? '';
+              } else {
+                textBody = '[Group decrypt failed]';
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // If body is not the encrypted JSON (already decrypted), keep as-is.
+        // Otherwise mark decryption failure.
+        if (textBody.contains('"ciphertext"') || textBody.contains('"signature"')) {
+          textBody = '[Group decrypt failed]';
+        }
+        native.EmailCore.logWrite('[EML] group msg parse/decrypt error: $e');
+      }
+    }
+
+    // Check if this is a handshake message (PREKEY_BUNDLE 1.0.0, SESSION_INIT 1.0.1,
+    // or group SENDER_KEY_DIST 1.1.0)
     // Use X-Mailer header first (most reliable), then fall back to body JSON detection
     bool isHandshakeMessage = false;
-    if (xMailer == '1.0.0' || xMailer == '1.0.1') {
+    if (effectiveXMailer == '1.0.0' ||
+        effectiveXMailer == '1.0.1' ||
+        effectiveXMailer.startsWith('1.1.0')) {
+      isHandshakeMessage = true;
+      textBody = '';
+    } else if (textBody.toLowerCase().contains('sender_key_distribution') ||
+               textBody.contains('[Sender Key distribution received]')) {
       isHandshakeMessage = true;
       textBody = '';
     } else if (textBody.isNotEmpty &&
@@ -209,6 +258,8 @@ EmlParsedContent parseEmlFile(String filePath, {String? account}) {
       contentType: a['content_type'] as String? ?? '',
       size: a['size'] as int? ?? 0,
     )).toList();
+
+    native.EmailCore.logWrite('[EML] effectiveXMailer=$effectiveXMailer, isHandshake=$isHandshakeMessage, textLen=${textBody.length}');
 
     final displayBody = textBody.isNotEmpty ? textBody : _stripHtml(htmlBody);
 

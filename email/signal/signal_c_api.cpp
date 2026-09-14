@@ -308,14 +308,14 @@ extern "C" int signal_session_decrypt(const char* account, const char* peerEmail
         j["status"] = "success";
         j["plaintext"] = result.plaintext;
         j["session_id"] = result.sessionId;
-        j["message_id"] = parsed.messageId;
-        j["in_reply_to"] = parsed.inReplyTo;
+        j["x_message_id"] = parsed.messageId;
+        j["x_reply_to"] = parsed.inReplyTo;
     } else {
         j["status"] = "error";
         j["error"] = result.error;
         j["session_id"] = result.sessionId;
-        j["message_id"] = parsed.messageId;
-        j["in_reply_to"] = parsed.inReplyTo;
+        j["x_message_id"] = parsed.messageId;
+        j["x_reply_to"] = parsed.inReplyTo;
     }
 
     std::string s = j.dump();

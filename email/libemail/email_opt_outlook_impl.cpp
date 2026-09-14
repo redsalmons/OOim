@@ -18,6 +18,7 @@
 #include <vmime/net/imap/IMAPMessage.hpp>
 #include <vmime/net/imap/IMAPFolder.hpp>
 #include <vmime/net/imap/IMAPUtils.hpp>
+#include <vmime/net/tls/TLSProperties.hpp>
 #include <vmime/net/folder.hpp>
 #include <vmime/net/message.hpp>
 #include <vmime/net/fetchAttributes.hpp>
@@ -27,14 +28,20 @@
 #include <openssl/sha.h>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
+#include <cctype>
 #include <cstring>
 #include <cstdlib>
 #include <unistd.h>
+#include <iconv.h>
 #include <fcntl.h>
 #include <algorithm>
 #include <cctype>
 #include <curl/curl.h>
 #include <vmime/header.hpp>
+#include <vmime/message.hpp>
+#include <vmime/utility/inputStreamStringAdapter.hpp>
+#include <vmime/utility/outputStreamStringAdapter.hpp>
 #include <vmime/mediaType.hpp>
 #include <vmime/net/socket.hpp>
 #include <vmime/text.hpp>
@@ -59,6 +66,48 @@ public:
     }
 };
 
+// Custom XOAuth2 SASL authenticator that directly provides username and access token,
+// bypassing the property-lookup mechanism in defaultAuthenticator which can fail to
+// find the "auth.accesstoken" property on the service/store.
+class DirectXOAuth2Authenticator : public vmime::security::sasl::XOAuth2SASLAuthenticator {
+public:
+    DirectXOAuth2Authenticator(
+        const vmime::string& username,
+        const vmime::string& accessToken,
+        Mode mode = MODE_EXCLUSIVE
+    ) : vmime::security::sasl::XOAuth2SASLAuthenticator(mode),
+        m_username(username),
+        m_accessToken(accessToken) {}
+
+    const vmime::string getUsername() const override {
+        return m_username;
+    }
+
+    const vmime::string getAccessToken() const override {
+        return m_accessToken;
+    }
+
+    const vmime::string getPassword() const override {
+        return m_accessToken;
+    }
+
+    const vmime::string getHostname() const override {
+        return vmime::string();
+    }
+
+    const vmime::string getAnonymousToken() const override {
+        return m_username;
+    }
+
+    const vmime::string getServiceName() const override {
+        return vmime::string();
+    }
+
+private:
+    vmime::string m_username;
+    vmime::string m_accessToken;
+};
+
 
 namespace EmailComm {
 
@@ -75,7 +124,9 @@ EmailOptOutlookImpl::EmailOptOutlookImpl(std::shared_ptr<::oemailim::EmailHandle
       smtp_server_("smtp.office365.com"),
       smtp_port_(587),
       data_dir_(""),
-      account_type_("personal") {
+      account_type_("personal"),
+      access_token_expiry_(std::chrono::system_clock::from_time_t(0)),
+      graph_token_expiry_(std::chrono::system_clock::from_time_t(0)) {
 }
 
 EmailOptOutlookImpl::~EmailOptOutlookImpl() {
@@ -86,27 +137,34 @@ bool EmailOptOutlookImpl::connect() {
 }
 
 bool EmailOptOutlookImpl::connect_() {
+    // 1. Ensure a valid access token before touching the network.
+    if (!ensure_authenticated()) {
+        LOG_INFO("Outlook connect_ - ensure_authenticated failed: %s\n", last_error_.c_str());
+        return false;
+    }
+
+    // Lock to prevent concurrent connect_() calls from multiple threads
+    std::lock_guard<std::mutex> lock(connect_mutex_);
+
     // Check if already connected
     if (store_ && store_->isConnected()) {
         LOG_INFO("Outlook connect_ - already connected, returning true\n");
         return true;
     }
 
-    LOG_INFO("Outlook connect_ - checking access token...\n");
     LOG_INFO("Outlook connect_ - email_: %s\n", email_.c_str());
     LOG_INFO("Outlook connect_ - access_token_ length: %zu\n", access_token_.length());
-    is_valid_ = !access_token_.empty();
-    if (!is_valid_) {
-        LOG_INFO("Outlook connect_ - no access token, connection failed\n");
-        return false;
-    }
 
     if (email_.empty()) {
         LOG_INFO("Outlook connect_ - email is empty, connection failed\n");
         return false;
     }
 
-    LOG_INFO("Outlook connect_ - establishing TCP connection to outlook.office365.com:993...\n");
+    // Clean up any previous connection objects before creating new ones
+    store_.reset();
+    session_.reset();
+
+    LOG_INFO("Outlook connect_ - establishing TCP connection to %s:%d...\n", imap_server_.c_str(), imap_port_);
 
     try {
         // Initialize vmime platform handler (only once)
@@ -119,20 +177,31 @@ bool EmailOptOutlookImpl::connect_() {
         session_->getProperties()["connection.timeout"] = "30";
         session_->getProperties()["imap.timeout"] = "30";
 
-        // Use official VMime XOAuth2SASLAuthenticator
-        vmime::shared_ptr<vmime::security::sasl::XOAuth2SASLAuthenticator> xoauth2Auth =
-            vmime::make_shared<vmime::security::sasl::XOAuth2SASLAuthenticator>(
-                vmime::security::sasl::XOAuth2SASLAuthenticator::MODE_EXCLUSIVE
-            );
+        // GnuTLS default cipher suite includes %SSL3_RECORD_VERSION, which
+        // causes Outlook IMAPS connections to reset. Set a plain "NORMAL"
+        // priority string to let GnuTLS and the server negotiate naturally.
+        vmime::shared_ptr<vmime::net::tls::TLSProperties> tlsProps =
+            vmime::make_shared<vmime::net::tls::TLSProperties>();
+        tlsProps->setCipherSuite("NORMAL");
+        session_->setTLSProperties(tlsProps);
 
-        // Create IMAP store with imaps:// protocol and authenticator
+        // Set authentication properties on the SESSION.
+        // vmime's defaultAuthenticator reads properties with the service prefix:
+        //   "store.imaps.auth.username", "store.imaps.auth.password", "store.imaps.auth.accesstoken"
+        // (prefix is "store.imaps." for imaps://, "store.imap." for imap://).
+        const std::string prefix = "store.imaps.";
+        session_->getProperties()[prefix + "auth.username"] = email_;
+        session_->getProperties()[prefix + "auth.password"] = access_token_;
+        session_->getProperties()[prefix + "auth.accesstoken"] = access_token_;
+
+        LOG_INFO("Outlook connect_ - session properties set: username=%s, accesstoken_len=%zu\n",
+                  email_.c_str(), access_token_.length());
+
+        // Create IMAP store — use "imaps://" for implicit TLS on port 993.
         vmime::utility::url store_url("imaps", imap_server_, imap_port_);
-        store_ = session_->getStore(store_url, xoauth2Auth);
+        store_ = session_->getStore(store_url);
 
-        // Set authentication properties on the store
-        store_->setProperty("options.need-authentication", true);
-        store_->setProperty("auth.username", email_);
-        store_->setProperty("auth.accesstoken", access_token_);
+        LOG_INFO("Outlook connect_ - store created (imaps://, default authenticator)\n");
 
         // Set custom certificate verifier that accepts all certificates
         vmime::shared_ptr<TrustAllCertificateVerifier> verifier = vmime::make_shared<TrustAllCertificateVerifier>();
@@ -162,18 +231,85 @@ bool EmailOptOutlookImpl::connect_() {
     }
 }
 
-bool EmailOptOutlookImpl::authority(int timeout_seconds) {
-    LOG_INFO("Outlook authority: Starting authority with timeout %ds\n", timeout_seconds);
+bool EmailOptOutlookImpl::needs_token_refresh() const {
+    if (access_token_.empty()) {
+        return true;
+    }
+    // Treat token as stale 60 seconds before actual expiry to avoid race conditions
+    auto now = std::chrono::system_clock::now();
+    return now >= access_token_expiry_ - std::chrono::seconds(60);
+}
 
-    // If we already have a refresh token, use it to get a new access token
-    if (!refresh_token_.empty()) {
-        LOG_INFO("Outlook authority: Using existing refresh token\n");
-        return refresh_token();
+void EmailOptOutlookImpl::set_token_expiry_from_response(const std::string& response) {
+    std::string expires_str = parse_json_field(response, "expires_in");
+    int expires_in = 3600; // Default to 1 hour if not provided
+    if (!expires_str.empty()) {
+        try {
+            expires_in = std::stoi(expires_str);
+        } catch (const std::exception& e) {
+            LOG_INFO("Outlook set_token_expiry: failed to parse expires_in '%s', using default 3600\n", expires_str.c_str());
+        }
+    }
+    access_token_expiry_ = std::chrono::system_clock::now() + std::chrono::seconds(expires_in);
+    LOG_INFO("Outlook set_token_expiry: token expires in %d seconds\n", expires_in);
+}
+
+bool EmailOptOutlookImpl::ensure_authenticated() {
+    std::lock_guard<std::mutex> lock(auth_mutex_);
+
+    LOG_INFO("Outlook ensure_authenticated: checking access token...\n");
+
+    if (!needs_token_refresh()) {
+        LOG_INFO("Outlook ensure_authenticated: existing access token still valid\n");
+        is_valid_ = true;
+        return true;
     }
 
-    LOG_INFO("Outlook authority: Starting full OAuth flow\n");
+    LOG_INFO("Outlook ensure_authenticated: access token missing or expired\n");
 
-    // Otherwise, perform full OAuth flow to get refresh token
+    // Try refresh token first. Authority (interactive browser) is intentionally
+    // NOT called here; it must be triggered explicitly by the UI via authority().
+    if (!refresh_token_.empty()) {
+        LOG_INFO("Outlook ensure_authenticated: attempting refresh_token()\n");
+        if (refresh_token()) {
+            LOG_INFO("Outlook ensure_authenticated: refresh_token() succeeded\n");
+            return true;
+        }
+        LOG_INFO("Outlook ensure_authenticated: refresh_token() failed: %s\n", last_error_.c_str());
+    } else {
+        LOG_INFO("Outlook ensure_authenticated: no refresh token available\n");
+    }
+
+    LOG_INFO("Outlook ensure_authenticated: cannot obtain token without interactive authorization\n");
+    last_error_ = "Access token expired and refresh failed; authorization required";
+    return false;
+}
+
+bool EmailOptOutlookImpl::authority(int timeout_seconds) {
+    std::lock_guard<std::mutex> lock(auth_mutex_);
+
+    LOG_INFO("Outlook authority: Starting full OAuth flow with timeout %ds\n", timeout_seconds);
+
+    // Avoid popping a browser window if we already have a usable token.
+    // 1. Valid access token? Return immediately.
+    // 2. Valid refresh token? Try a silent refresh first.
+    // 3. Only if both fail, open the interactive OAuth consent page.
+    if (!needs_token_refresh()) {
+        LOG_INFO("Outlook authority: access token still valid, no OAuth needed\n");
+        return true;
+    }
+
+    if (!refresh_token_.empty()) {
+        LOG_INFO("Outlook authority: attempting silent refresh before OAuth\n");
+        if (refresh_token()) {
+            LOG_INFO("Outlook authority: silent refresh succeeded, no OAuth needed\n");
+            return true;
+        }
+        LOG_INFO("Outlook authority: silent refresh failed: %s\n", last_error_.c_str());
+    }
+
+    LOG_INFO("Outlook authority: no valid tokens, opening browser for OAuth\n");
+
     // Generate PKCE code verifier and challenge
     LOG_INFO("Outlook authority: Generating PKCE code verifier\n");
     code_verifier_ = generate_code_verifier();
@@ -337,6 +473,10 @@ bool EmailOptOutlookImpl::authority(int timeout_seconds) {
 
 bool EmailOptOutlookImpl::refresh_token() {
     LOG_INFO("Outlook refresh_token: Starting refresh\n");
+    if (!access_token_.empty() && !needs_token_refresh()) {
+        LOG_INFO("Outlook refresh_token: access token still valid, skipping network refresh\n");
+        return true;
+    }
     if (refresh_token_.empty()) {
         LOG_INFO("Outlook refresh_token: No refresh token available\n");
         last_error_ = "No refresh token available";
@@ -389,6 +529,7 @@ bool EmailOptOutlookImpl::refresh_token() {
 
         access_token_ = access_token;
         is_valid_ = true;
+        set_token_expiry_from_response(response);
         LOG_INFO("Outlook refresh_token: Successfully refreshed access token (len=%zu)\n", access_token.length());
 
         // Log scope from the token response
@@ -403,6 +544,7 @@ bool EmailOptOutlookImpl::refresh_token() {
         std::string new_refresh_token = parse_json_field(response, "refresh_token");
         if (!new_refresh_token.empty()) {
             refresh_token_ = new_refresh_token;
+            LOG_INFO("Outlook refresh_token: new refresh token stored (len=%zu)\n", refresh_token_.length());
         }
 
         return true;
@@ -415,6 +557,11 @@ bool EmailOptOutlookImpl::refresh_token() {
 
 bool EmailOptOutlookImpl::refresh_graph_token() {
     LOG_INFO("Outlook refresh_graph_token: Starting refresh\n");
+    if (!graph_access_token_.empty() &&
+        std::chrono::system_clock::now() < graph_token_expiry_ - std::chrono::seconds(60)) {
+        LOG_INFO("Outlook refresh_graph_token: graph access token still valid, skipping network refresh\n");
+        return true;
+    }
     if (refresh_token_.empty()) {
         LOG_INFO("Outlook refresh_graph_token: No refresh token available\n");
         last_error_ = "No refresh token available";
@@ -465,6 +612,8 @@ bool EmailOptOutlookImpl::refresh_graph_token() {
         }
 
         graph_access_token_ = access_token;
+        set_token_expiry_from_response(response);
+        graph_token_expiry_ = access_token_expiry_;  // temporarily share expiry
         LOG_INFO("Outlook refresh_graph_token: Successfully refreshed graph access token (len=%zu)\n", access_token.length());
 
         std::string new_refresh_token = parse_json_field(response, "refresh_token");
@@ -518,6 +667,79 @@ void EmailOptOutlookImpl::set_data_dir(const std::string& dir) {
 
 std::string EmailOptOutlookImpl::get_data_dir() const {
     return data_dir_;
+}
+
+std::string EmailOptOutlookImpl::graph_state_path() const {
+    if (data_dir_.empty()) return "";
+    if (email_.empty()) return data_dir_ + "/outlook_graph_state.json";
+    return data_dir_ + "/" + email_ + "_graph_state.json";
+}
+
+void EmailOptOutlookImpl::load_graph_state() {
+    if (email_.empty()) return;
+
+    sqlite3* db = email_core_get_db();
+    if (!db) {
+        LOG_INFO("Outlook load_graph_state: db not open\n");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(email_core_get_db_mutex());
+    const char* sql = "SELECT identify FROM code WHERE account = ? AND session_uuid = 'outlook_graph_state' ORDER BY id DESC LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, email_.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* s = (const char*)sqlite3_column_text(stmt, 0);
+            if (s) {
+                last_graph_delta_link_ = s;
+                LOG_INFO("Outlook load_graph_state: loaded delta link for %s, len=%zu\n", email_.c_str(), last_graph_delta_link_.length());
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+}
+
+void EmailOptOutlookImpl::save_graph_state() {
+    if (email_.empty()) return;
+
+    sqlite3* db = email_core_get_db();
+    if (!db) {
+        LOG_INFO("Outlook save_graph_state: db not open\n");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(email_core_get_db_mutex());
+    const char* check = "SELECT id FROM code WHERE account = ? AND session_uuid = 'outlook_graph_state' LIMIT 1;";
+    sqlite3_stmt* check_stmt = nullptr;
+    bool exists = false;
+    if (sqlite3_prepare_v2(db, check, -1, &check_stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(check_stmt, 1, email_.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(check_stmt) == SQLITE_ROW) {
+            exists = true;
+        }
+        sqlite3_finalize(check_stmt);
+    }
+
+    if (exists) {
+        const char* sql = "UPDATE code SET identify = ? WHERE account = ? AND session_uuid = 'outlook_graph_state';";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, last_graph_delta_link_.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, email_.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    } else {
+        const char* sql = "INSERT INTO code (account, identify, session_uuid) VALUES (?, ?, 'outlook_graph_state');";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, email_.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, last_graph_delta_link_.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
 }
 
 std::string EmailOptOutlookImpl::generate_random_string(size_t length) {
@@ -716,41 +938,14 @@ std::vector<std::string> EmailOptOutlookImpl::fetch_emails_since_uid(const std::
 }
 
 std::string EmailOptOutlookImpl::get_email(const std::string& folder, const std::string& uid) {
-    if (!store_ || !store_->isConnected()) {
-        LOG_INFO("Outlook get_email - not connected, calling connect_()\n");
-        if (!connect_()) {
-            last_error_ = "get_email: connect failed";
-            return "";
-        }
-    }
-
-    try {
-        vmime::shared_ptr<vmime::net::folder> folder_obj = store_->getFolder(vmime::utility::path(folder));
-        folder_obj->open(vmime::net::folder::MODE_READ_ONLY);
-
-        vmime::net::messageSet allMessages = vmime::net::messageSet::byNumber(1, folder_obj->getMessageCount());
-        std::vector<vmime::shared_ptr<vmime::net::message>> messages = folder_obj->getMessages(allMessages);
-        for (const auto& msg : messages) {
-            std::string msg_uid = msg->getUID();
-            if (msg_uid == uid) {
-                std::ostringstream oss;
-                vmime::utility::outputStreamAdapter osa(oss);
-                msg->extract(osa);
-                folder_obj->close(false);
-                LOG_INFO("Outlook get_email - successfully fetched email with uid: %s\n", uid.c_str());
-                return oss.str();
-            }
-        }
-
-        folder_obj->close(false);
-        last_error_ = "get_email: email not found for uid " + uid;
-        LOG_INFO("Outlook get_email - email not found for uid: %s\n", uid.c_str());
-        return "";
-    } catch (const vmime::exception& e) {
-        last_error_ = std::string("get_email: vmime exception: ") + e.what();
-        LOG_INFO("Outlook get_email - vmime exception: %s\n", e.what());
+    // Use Microsoft Graph API to fetch the full MIME message by id
+    if (!ensure_graph_token()) {
+        LOG_INFO("Outlook get_email: graph token not available\n");
         return "";
     }
+    std::string mime = graph_get_message_mime(uid);
+    LOG_INFO("Outlook get_email: mime length=%zu for id=%s\n", mime.length(), uid.c_str());
+    return mime;
 }
 
 // Upload context for libcurl callback
@@ -1369,479 +1564,84 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
 }
 
 std::string EmailOptOutlookImpl::fetch_email_headers(const std::string& folder, const std::string& start_uid) {
-    // Ensure we are connected using connect_()
-    if (!store_ || !store_->isConnected()) {
-        LOG_INFO("Outlook fetch_email_headers - not connected, calling connect_()");
-        if (!connect_()) {
-            return R"({"status":"failed","error":"connect_failed"})";
-        }
+    // Use Microsoft Graph API to fetch pending messages, then parse MIME with vmime
+    LOG_INFO("Outlook fetch_email_headers - using Graph API for folder %s", folder.c_str());
+
+    if (!ensure_graph_token()) {
+        return R"({"status":"failed","error":"graph_token_failed"})";
     }
 
-    try {
-        LOG_INFO("Outlook fetch_email_headers - using vmime folder API with existing connection");
+    nlohmann::json response;
+    response["status"] = "success";
+    response["folder"] = folder;
+    response["emails"] = nlohmann::json::array();
 
-        vmime::shared_ptr<vmime::net::imap::IMAPStore> imapStore =
-            vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
-        if (!imapStore) {
-            return R"({"status":"failed","error":"not_imap_store"})";
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::mutex> lock(graph_delta_mutex_);
+        if (!pending_message_ids_.empty()) {
+            ids = std::move(pending_message_ids_);
+            pending_message_ids_.clear();
         }
+    }
+    if (ids.empty()) {
+        ids = graph_delta_query(folder);
+    }
 
-        vmime::shared_ptr<vmime::net::imap::IMAPConnection> conn = imapStore->getConnection();
-        if (!conn) {
-            return R"({"status":"failed","error":"no_connection"})";
+    for (const auto& id : ids) {
+        LOG_INFO("Outlook fetch_email_headers - fetching MIME for id=%s", id.c_str());
+        std::string mime = graph_get_message_mime(id);
+        if (mime.empty()) {
+            LOG_INFO("Outlook fetch_email_headers - empty MIME for id=%s", id.c_str());
+            continue;
         }
+        LOG_INFO("Outlook fetch_email_headers - MIME length=%zu", mime.length());
 
-        // Get folder object (constructor uses store's existing connection, does NOT create new one)
-        vmime::shared_ptr<vmime::net::folder> f = store_->getDefaultFolder();
-        if (folder != "INBOX") {
-            vmime::net::folder::path path;
-            path.appendComponent(vmime::net::folder::path::component(folder));
-            f = store_->getFolder(path);
-        }
-        auto imapFolder = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPFolder>(f);
-
-        // SELECT via sendCommand on existing connection
-        vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
-            vmime::net::imap::IMAPCommand::createCommand("SELECT " + folder);
-        conn->sendCommand(selectCmd);
-        vmime::shared_ptr<vmime::net::imap::IMAPParser::response> selectResp(conn->readResponse());
-
-        bool selectOk = false;
-
-        if (selectResp && !selectResp->isBad()) {
-            selectOk = true;
-        }
-
-        LOG_INFO("Outlook fetch_email_headers - selectOk=%d", selectOk);
-
-        if (!selectOk) {
-            return R"({"status":"failed","error":"select_failed"})";
-        }
-
-        // Build message set - fetch all messages, will filter by UID later
-        // This is more reliable than byUID range which may not work correctly
-        vmime::net::messageSet msgs = vmime::net::messageSet::byNumber(1, -1);  // all messages
-
-        // Build fetch attributes
-        vmime::net::fetchAttributes fetchAttrs;
-        fetchAttrs.add(vmime::net::fetchAttributes::UID);
-        fetchAttrs.add(vmime::net::fetchAttributes::ENVELOPE);
-        fetchAttrs.add(vmime::net::fetchAttributes::STRUCTURE);
-        fetchAttrs.add(vmime::net::fetchAttributes::PEEK);
-        fetchAttrs.add("Subject");
-        fetchAttrs.add("From");
-        fetchAttrs.add("Sender");
-        fetchAttrs.add("To");
-        fetchAttrs.add("Date");
-        fetchAttrs.add("Reply-To");
-        fetchAttrs.add("In-Reply-To");
-        fetchAttrs.add("Message-ID");
-        fetchAttrs.add("X-Mailer");
-        fetchAttrs.add(vmime::net::fetchAttributes::FLAGS);
-
-        // Ensure UID is included
-        vmime::net::fetchAttributes attribsWithUID(fetchAttrs);
-        attribsWithUID.add(vmime::net::fetchAttributes::UID);
-
-        // Send FETCH via IMAPUtils::buildFetchCommand on existing connection
-        vmime::shared_ptr<vmime::net::imap::IMAPCommand> fetchCmd =
-            vmime::net::imap::IMAPUtils::buildFetchCommand(conn, msgs, attribsWithUID);
-        LOG_INFO("Outlook fetch_email_headers - sending FETCH via IMAPUtils");
-        fetchCmd->send(conn);
-
-        // Read FETCH response
-        vmime::shared_ptr<vmime::net::imap::IMAPParser::response> fetchResp(conn->readResponse());
-        LOG_INFO("Outlook fetch_email_headers - FETCH response received");
-
-        if (!fetchResp || fetchResp->isBad()) {
-            return R"({"status":"failed","error":"fetch_bad_response"})";
-        }
-
-        // Helper: recursively parse vmime xbody into JSON
-        std::function<nlohmann::json(const vmime::net::imap::IMAPParser::xbody*)> parseXbody =
-            [&](const vmime::net::imap::IMAPParser::xbody* xb) -> nlohmann::json {
-            nlohmann::json j;
-            if (!xb) return j;
-
-            if (xb->body_type_mpart) {
-                auto* mpart = xb->body_type_mpart.get();
-                j["type"] = "multipart";
-                if (mpart->media_subtype) {
-                    j["subtype"] = mpart->media_subtype->value;
-                }
-                j["parts"] = nlohmann::json::array();
-                for (auto& part : mpart->list) {
-                    j["parts"].push_back(parseXbody(part.get()));
-                }
-            } else if (xb->body_type_1part) {
-                auto* p1 = xb->body_type_1part.get();
-                std::string mediaType;
-                std::string mediaSubtype;
-
-                if (p1->body_type_text) {
-                    mediaType = "text";
-                    if (p1->body_type_text->media_text && p1->body_type_text->media_text->media_subtype) {
-                        mediaSubtype = p1->body_type_text->media_text->media_subtype->value;
-                    }
-                    if (p1->body_type_text->body_fields && p1->body_type_text->body_fields->body_fld_enc) {
-                        j["encoding"] = p1->body_type_text->body_fields->body_fld_enc->value;
-                    }
-                    if (p1->body_type_text->body_fields && p1->body_type_text->body_fields->body_fld_octets) {
-                        j["size"] = p1->body_type_text->body_fields->body_fld_octets->value;
-                    }
-                } else if (p1->body_type_msg) {
-                    mediaType = "message";
-                    mediaSubtype = "rfc822";
-                } else if (p1->body_type_basic) {
-                    auto* basic = p1->body_type_basic.get();
-                    if (basic->media_basic && basic->media_basic->media_type) {
-                        mediaType = basic->media_basic->media_type->value;
-                    }
-                    if (basic->media_basic && basic->media_basic->media_subtype) {
-                        mediaSubtype = basic->media_basic->media_subtype->value;
-                    }
-                    if (basic->body_fields && basic->body_fields->body_fld_enc) {
-                        j["encoding"] = basic->body_fields->body_fld_enc->value;
-                    }
-                    if (basic->body_fields && basic->body_fields->body_fld_octets) {
-                        j["size"] = basic->body_fields->body_fld_octets->value;
-                    }
-                }
-
-                j["type"] = mediaType;
-                j["subtype"] = mediaSubtype;
-            }
-            return j;
-        };
-
-        // Parse FETCH response into JSON
-        nlohmann::json response;
-        response["status"] = "success";
-        response["folder"] = folder;
-        response["emails"] = nlohmann::json::array();
-
-        // Parse start_uid for filtering
-        int start_uid_int = 0;
+        std::string emailJsonStr = parse_mime_to_json(mime, id);
         try {
-            start_uid_int = std::stoi(start_uid);
-        } catch (...) {
-            start_uid_int = 0;
-        }
-
-        for (auto& item : fetchResp->continue_req_or_response_data) {
-            if (!item || !item->response_data) continue;
-            auto* msgData = item->response_data->message_data.get();
-            if (!msgData || msgData->type != vmime::net::imap::IMAPParser::message_data::FETCH) continue;
-            if (!msgData->msg_att) continue;
-
-            nlohmann::json emailJson;
-            std::string headerData;
-
-            for (auto& attItem : msgData->msg_att->items) {
-                if (!attItem) continue;
-
-                if (attItem->type == vmime::net::imap::IMAPParser::msg_att_item::UID) {
-                    if (attItem->uniqueid) {
-                        emailJson["uuid"] = std::to_string(attItem->uniqueid->value);
-                    }
-                } else if (attItem->type == vmime::net::imap::IMAPParser::msg_att_item::BODY_SECTION) {
-                    if (attItem->nstring && !attItem->nstring->isNIL) {
-                        headerData = attItem->nstring->value;
-                    }
-                } else if (attItem->type == vmime::net::imap::IMAPParser::msg_att_item::BODY_STRUCTURE) {
-                    if (attItem->body) {
-                        emailJson["bodystructure"] = parseXbody(attItem->body.get());
-                    }
-                } else if (attItem->type == vmime::net::imap::IMAPParser::msg_att_item::FLAGS) {
-                    if (attItem->flag_list) {
-                        nlohmann::json flagsArray = nlohmann::json::array();
-                        for (auto& flag : attItem->flag_list->flags) {
-                            if (flag) {
-                                std::string flagStr;
-                                switch (flag->type) {
-                                    case vmime::net::imap::IMAPParser::flag::ANSWERED:
-                                        flagStr = "\\Answered";
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::FLAGGED:
-                                        flagStr = "\\Flagged";
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::DELETED:
-                                        flagStr = "\\Deleted";
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::SEEN:
-                                        flagStr = "\\Seen";
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::DRAFT:
-                                        flagStr = "\\Draft";
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::STAR:
-                                        flagStr = "\\*";
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::KEYWORD_OR_EXTENSION:
-                                        if (flag->flag_keyword) {
-                                            flagStr = flag->flag_keyword->value;
-                                        }
-                                        break;
-                                    case vmime::net::imap::IMAPParser::flag::UNKNOWN:
-                                        flagStr = flag->name;
-                                        break;
-                                }
-                                if (!flagStr.empty()) {
-                                    flagsArray.push_back(flagStr);
-                                }
-                            }
-                        }
-                        emailJson["flags"] = flagsArray;
-                    }
-                }
-            }
-
-            // Filter by UID - only include emails with UUID >= start_uid
-            if (emailJson.contains("uuid")) {
-                int current_uid = 0;
-                try {
-                    current_uid = std::stoi(emailJson["uuid"].get<std::string>());
-                } catch (...) {
-                    current_uid = 0;
-                }
-                if (current_uid <= start_uid_int) {
-                    continue;  // Skip this email, it's already stored (uid <= max stored uid)
-                }
-            }
-
-            // Parse all headers using vmime to handle folding and case-insensitivity
-            auto caseInsensitiveLess = [](const std::string& a, const std::string& b) {
-                return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(),
-                    [](char c1, char c2) { return ::tolower(c1) < ::tolower(c2); });
-            };
-            std::map<std::string, std::string, decltype(caseInsensitiveLess)> headerMap(caseInsensitiveLess);
-            {
-                vmime::parsingContext parseCtx;
-                size_t pos = 0;
-                const size_t end = headerData.size();
-                while (pos < end) {
-                    auto field = vmime::headerField::parseNext(parseCtx, headerData, pos, end, &pos);
-                    if (!field) break;
-                    std::string fName = field->getName();
-                    std::string fValue;
-                    auto val = field->getValue();
-                    if (val) {
-                        // Generate the value as string
-                        std::string generated;
-                        vmime::utility::outputStreamStringAdapter os(generated);
-                        val->generate(vmime::generationContext::getDefaultContext(), os, 0);
-                        os.flush();
-                        fValue = generated;
-                    }
-                    headerMap[fName] = fValue;
-                }
-            }
-
-            auto getHeader = [&](const std::string& name) -> std::string {
-                auto it = headerMap.find(name);
-                if (it != headerMap.end()) return it->second;
-                return "";
-            };
-
-            auto decodeHeader = [](const std::string& raw) -> std::string {
-                if (raw.empty()) return raw;
-                try {
-                    auto decoded = vmime::text::decodeAndUnfold(raw);
-                    if (decoded) {
-                        return decoded->getConvertedText(vmime::charset("utf-8"));
-                    }
-                    return raw;
-                } catch (...) {
-                    return raw;
-                }
-            };
-
-            emailJson["from"] = decodeHeader(getHeader("From"));
-            emailJson["subject"] = decodeHeader(getHeader("Subject"));
-            emailJson["date"] = getHeader("Date");
-            emailJson["reply_to"] = decodeHeader(getHeader("Reply-To"));
-            emailJson["in_reply_to"] = decodeHeader(getHeader("In-Reply-To"));
-            std::string xMailer = decodeHeader(getHeader("X-Mailer"));
-            std::string stdMsgId = decodeHeader(getHeader("Message-ID"));
-            emailJson["message_id"] = stdMsgId;
-            emailJson["x_session_chart"] = xMailer;
-            emailJson["to_addr"] = decodeHeader(getHeader("To"));
-
+            nlohmann::json emailJson = nlohmann::json::parse(emailJsonStr);
             response["emails"].push_back(emailJson);
+        } catch (const std::exception& e) {
+            LOG_INFO("Outlook fetch_email_headers - failed to parse email JSON: %s", e.what());
         }
-
-        LOG_INFO("Outlook fetch_email_headers - parsed %zu emails", response["emails"].size());
-        return response.dump();
-    } catch (const vmime::exception& e) {
-        last_error_ = std::string("Failed to fetch email headers: ") + e.what();
-        LOG_INFO("Outlook fetch_email_headers - vmime exception: %s", e.what());
-        return std::string(R"({"status":"failed","error":"vmime_exception:})") + e.what() + "\"}";
-    } catch (const std::exception& e) {
-        last_error_ = std::string("Failed to fetch email headers: ") + e.what();
-        LOG_INFO("Outlook fetch_email_headers - std exception: %s", e.what());
-        return std::string(R"({"status":"failed","error":"std_exception"})");
     }
+
+    LOG_INFO("Outlook fetch_email_headers - parsed %zu emails", response["emails"].size());
+    return response.dump();
 }
 
+
 bool EmailOptOutlookImpl::idle_wait(const std::string& folder, int timeout_seconds) {
-    if (!store_ || !store_->isConnected()) {
-        if (!connect_()) {
-            last_error_ = "IDLE: connect failed";
-            return false;
-        }
+    // Use Microsoft Graph delta query for Outlook watch
+    LOG_INFO("Outlook [WATCH] Using Graph API delta query for folder %s (timeout=%d)\n", folder.c_str(), timeout_seconds);
+
+    if (!ensure_graph_token()) {
+        LOG_INFO("Outlook [WATCH] failed to ensure graph token: %s\n", last_error_.c_str());
+        return false;
     }
 
-    try {
-        auto imapStore = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
-        if (!imapStore) {
-            last_error_ = "IDLE: not IMAP store";
-            return false;
-        }
-
-        auto conn = imapStore->getConnection();
-        if (!conn) {
-            last_error_ = "IDLE: no connection";
-            return false;
-        }
-
-        // SELECT the folder before entering IDLE
-        LOG_INFO("Outlook [IDLE] Selecting folder: %s", folder.c_str());
-        vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
-            vmime::net::imap::IMAPCommand::createCommand("SELECT " + folder);
-        conn->sendCommand(selectCmd);
-        vmime::shared_ptr<vmime::net::imap::IMAPParser::response> selectResp(conn->readResponse());
-
-        bool selectOk = false;
-        if (selectResp && !selectResp->isBad()) {
-            selectOk = true;
-        }
-
-        LOG_INFO("Outlook [IDLE] SELECT result: %s", selectOk ? "OK" : "FAILED");
-
-        if (!selectOk) {
-            last_error_ = "IDLE: SELECT failed for folder " + folder;
-            return false;
-        }
-
-        auto constSocket = conn->getSocket();
-        if (!constSocket) {
-            last_error_ = "IDLE: no socket";
-            return false;
-        }
-        auto sok = vmime::const_pointer_cast<vmime::net::socket>(constSocket);
-        auto timeoutHandler = sok->getTimeoutHandler();
-
-        // Send IDLE command via vmime's sendCommand (handles tag generation)
-        vmime::shared_ptr<vmime::net::imap::IMAPCommand> idleCmd =
-            vmime::net::imap::IMAPCommand::createCommand("IDLE");
-        conn->sendCommand(idleCmd);
-        LOG_INFO("Outlook [IDLE] IDLE command sent, waiting for continuation...");
-
-        // Read the continuation response ("+ idling" or "+") directly from socket
-        std::string rawBuffer;
-        bool gotContinuation = false;
-
-        while (!gotContinuation) {
-            try {
-                if (timeoutHandler) timeoutHandler->resetTimeOut();
-                sok->waitForRead(5000);
-                if (timeoutHandler) timeoutHandler->resetTimeOut();
-                std::string chunk;
-                sok->receive(chunk);
-                if (chunk.empty()) continue;
-
-                rawBuffer += chunk;
-
-                size_t pos;
-                while ((pos = rawBuffer.find('\n')) != std::string::npos) {
-                    std::string line = rawBuffer.substr(0, pos);
-                    rawBuffer.erase(0, pos + 1);
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-
-                    if (!line.empty() && line[0] == '+') {
-                        gotContinuation = true;
-                    }
-                }
-            } catch (const vmime::exceptions::operation_timed_out&) {
-                if (timeoutHandler) timeoutHandler->resetTimeOut();
-                continue;
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        auto ids = graph_delta_query(folder);
+        {
+            std::lock_guard<std::mutex> lock(graph_delta_mutex_);
+            if (!ids.empty()) {
+                pending_message_ids_.insert(pending_message_ids_.end(), ids.begin(), ids.end());
+            }
+            if (!pending_message_ids_.empty()) {
+                LOG_INFO("Outlook [WATCH] found %zu new message(s)\n", pending_message_ids_.size());
+                return true;
             }
         }
 
-        if (!gotContinuation) {
-            last_error_ = "IDLE: no continuation response from server";
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= timeout_seconds) {
+            LOG_INFO("Outlook [WATCH] timeout, no new messages\n");
             return false;
         }
 
-        LOG_INFO("Outlook [IDLE] Waiting for new emails...");
-        bool gotNotification = false;
-
-        auto idleStart = std::chrono::steady_clock::now();
-
-        // TLS socket's receive() is non-blocking. We must call waitForRead() first
-        while (!gotNotification) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - idleStart).count();
-            if (elapsed >= timeout_seconds) {
-                LOG_INFO("Outlook [IDLE] Timeout after %lld seconds, exiting IDLE...", elapsed);
-                break;
-            }
-
-            try {
-                if (timeoutHandler) timeoutHandler->resetTimeOut();
-                sok->waitForRead(5000);
-                if (timeoutHandler) timeoutHandler->resetTimeOut();
-
-                std::string chunk;
-                sok->receive(chunk);
-
-                if (chunk.empty()) continue;
-
-                rawBuffer += chunk;
-
-                size_t pos;
-                while ((pos = rawBuffer.find('\n')) != std::string::npos) {
-                    std::string line = rawBuffer.substr(0, pos);
-                    rawBuffer.erase(0, pos + 1);
-
-                    if (!line.empty() && line.back() == '\r') {
-                        line.pop_back();
-                    }
-
-                    if (line.find("EXISTS") != std::string::npos) {
-                        LOG_INFO("Outlook [IDLE] New email detected: %s", line.c_str());
-                        gotNotification = true;
-                    }
-                    if (line.find("EXPUNGE") != std::string::npos) {
-                        gotNotification = true;
-                    }
-                }
-            } catch (const vmime::exceptions::operation_timed_out&) {
-                if (timeoutHandler) timeoutHandler->resetTimeOut();
-                continue;
-            }
-        }
-
-        // Send DONE to exit IDLE mode
-        LOG_INFO("Outlook [IDLE] Exiting IDLE mode...");
-        std::string doneCmd = "DONE\r\n";
-        conn->sendRaw(vmime::utility::stringUtils::bytesFromString(doneCmd), doneCmd.size());
-
-        // Read the tagged response for DONE
-        conn->readResponse();
-
-        return gotNotification;
-    } catch (const vmime::exceptions::operation_timed_out& e) {
-        last_error_ = std::string("IDLE wait failed: ") + e.what();
-        return false;
-    } catch (const vmime::exception& e) {
-        last_error_ = std::string("IDLE wait failed: ") + e.what();
-        LOG_INFO("Outlook [IDLE] vmime exception: %s", e.what());
-        return false;
-    } catch (const std::exception& e) {
-        last_error_ = std::string("IDLE wait failed: ") + e.what();
-        LOG_INFO("Outlook [IDLE] std exception: %s", e.what());
-        return false;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 }
 
@@ -1981,6 +1781,7 @@ bool EmailOptOutlookImpl::exchange_code_for_token(const std::string& code,
         access_token_ = access_token;
         refresh_token_ = refresh_token;
         is_valid_ = true;
+        set_token_expiry_from_response(response);
 
         // Parse email from id_token (JWT)
         if (!id_token.empty()) {
@@ -2091,6 +1892,642 @@ std::string EmailOptOutlookImpl::parse_json_field(const std::string& json, const
     size_t end = json.find_first_of(",}", pos);
     if (end == std::string::npos) return "";
     return json.substr(pos, end - pos);
+}
+
+bool EmailOptOutlookImpl::ensure_graph_token() {
+    if (graph_access_token_.empty() || graph_token_expiry_ <= std::chrono::system_clock::now()) {
+        return refresh_graph_token();
+    }
+    return true;
+}
+
+std::string EmailOptOutlookImpl::graph_request(const std::string& url, const std::string& method, const std::string& body) {
+    LOG_INFO("Outlook graph_request: %s %s\n", method.c_str(), url.c_str());
+    std::string header = "Authorization: Bearer " + graph_access_token_;
+    std::string escaped_url;
+    for (char c : url) {
+        if (c == '$' || c == '\\' || c == '"' || c == '`') {
+            escaped_url += '\\';
+        }
+        escaped_url += c;
+    }
+    std::string cmd = "curl -s --connect-timeout 10 --max-time 30 -X " + method + " \"" + escaped_url + "\" " +
+                      "-H \"" + header + "\" " +
+                      "-H \"Accept: application/json\"";
+    if (!body.empty()) {
+        cmd += " -H \"Content-Type: application/json\" -d '\"" + body + "\"'";
+    }
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        LOG_INFO("Outlook graph_request: failed to run curl\n");
+        return "";
+    }
+    char buffer[8192];
+    std::string response;
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        response += buffer;
+    }
+    pclose(pipe);
+    LOG_INFO("Outlook graph_request: response length=%zu\n", response.length());
+    return response;
+}
+
+std::vector<std::string> EmailOptOutlookImpl::graph_delta_query(const std::string& folder) {
+    std::lock_guard<std::mutex> lock(graph_delta_mutex_);
+    std::vector<std::string> new_ids;
+
+    if (last_graph_delta_link_.empty()) {
+        // Try to restore persisted cursor; otherwise start an initial full sync
+        load_graph_state();
+    }
+
+    if (last_graph_delta_link_.empty()) {
+        // No persisted cursor: start from the beginning using delta query
+        last_graph_delta_link_ = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$top=200";
+    }
+
+    // Loop through all pages of the delta sync
+    while (true) {
+        std::string response = graph_request(last_graph_delta_link_);
+        if (response.empty()) {
+            LOG_INFO("Outlook graph_delta_query: empty response\n");
+            break;
+        }
+
+        LOG_INFO("Outlook graph_delta_query: response length=%zu\n", response.length());
+
+        nlohmann::json j;
+        try {
+            j = nlohmann::json::parse(response);
+        } catch (const std::exception& e) {
+            LOG_INFO("Outlook graph_delta_query: failed to parse response: %s\n", e.what());
+            break;
+        }
+
+        if (!j.contains("value")) {
+            break;
+        }
+
+        for (const auto& item : j["value"].items()) {
+            const auto& v = item.value();
+            if (v.contains("@removed")) {
+                continue;
+            }
+            if (v.contains("id")) {
+                std::string id = v["id"].get<std::string>();
+                LOG_INFO("Outlook graph_delta_query: id=%s\n", id.c_str());
+                new_ids.push_back(id);
+            }
+        }
+
+        // Update cursor: continue with nextLink, finish when deltaLink is returned
+        if (j.contains("@odata.nextLink")) {
+            last_graph_delta_link_ = j["@odata.nextLink"].get<std::string>();
+            continue;  // fetch next page
+        }
+        if (j.contains("@odata.deltaLink")) {
+            last_graph_delta_link_ = j["@odata.deltaLink"].get<std::string>();
+        }
+        break;
+    }
+
+    save_graph_state();
+    return new_ids;
+}
+
+static std::string sanitize_utf8(const std::string& input) {
+    std::string output;
+    output.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c < 0x80) {
+            output += c;
+            ++i;
+        } else if (c >= 0xC2 && c <= 0xDF) {
+            if (i + 1 < input.size() && (static_cast<unsigned char>(input[i + 1]) & 0xC0) == 0x80) {
+                output += c;
+                output += input[i + 1];
+                i += 2;
+            } else {
+                output += '?';
+                ++i;
+            }
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            if (i + 2 < input.size() &&
+                (static_cast<unsigned char>(input[i + 1]) & 0xC0) == 0x80 &&
+                (static_cast<unsigned char>(input[i + 2]) & 0xC0) == 0x80) {
+                unsigned char c1 = input[i + 1];
+                unsigned char c2 = input[i + 2];
+                bool ok = true;
+                if (c == 0xE0 && c1 < 0xA0) ok = false;
+                if (c == 0xED && c1 >= 0xA0) ok = false;
+                uint32_t cp = ((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+                if (cp > 0x10FFFF) ok = false;
+                if (ok) {
+                    output += c;
+                    output += c1;
+                    output += c2;
+                    i += 3;
+                } else {
+                    output += '?';
+                    ++i;
+                }
+            } else {
+                output += '?';
+                ++i;
+            }
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            if (i + 3 < input.size() &&
+                (static_cast<unsigned char>(input[i + 1]) & 0xC0) == 0x80 &&
+                (static_cast<unsigned char>(input[i + 2]) & 0xC0) == 0x80 &&
+                (static_cast<unsigned char>(input[i + 3]) & 0xC0) == 0x80) {
+                unsigned char c1 = input[i + 1];
+                unsigned char c2 = input[i + 2];
+                unsigned char c3 = input[i + 3];
+                bool ok = true;
+                if (c == 0xF0 && c1 < 0x90) ok = false;
+                if (c == 0xF4 && c1 > 0x8F) ok = false;
+                uint32_t cp = ((c & 0x07) << 18) | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+                if (cp > 0x10FFFF) ok = false;
+                if (ok) {
+                    output += c;
+                    output += c1;
+                    output += c2;
+                    output += c3;
+                    i += 4;
+                } else {
+                    output += '?';
+                    ++i;
+                }
+            } else {
+                output += '?';
+                ++i;
+            }
+        } else {
+            output += '?';
+            ++i;
+        }
+    }
+    return output;
+}
+
+static std::string extract_charset(const std::string& contentType) {
+    auto pos = contentType.find("charset");
+    if (pos == std::string::npos) return "UTF-8";
+    pos = contentType.find("=", pos);
+    if (pos == std::string::npos || pos + 1 >= contentType.size()) return "UTF-8";
+    ++pos;
+    while (pos < contentType.size() && (contentType[pos] == ' ' || contentType[pos] == '\t')) ++pos;
+    if (pos >= contentType.size()) return "UTF-8";
+    if (contentType[pos] == '"' || contentType[pos] == '\'') {
+        char quote = contentType[pos++];
+        auto end = contentType.find(quote, pos);
+        if (end == std::string::npos) return "UTF-8";
+        return contentType.substr(pos, end - pos);
+    }
+    auto end = contentType.find_first_of(" ;\t\r\n", pos);
+    return contentType.substr(pos, end - pos);
+}
+
+static std::string iconv_to_utf8(const std::string& raw, const std::string& charset) {
+    if (raw.empty()) return "";
+    std::vector<std::string> names;
+    names.push_back(charset);
+    // Common aliases / fallbacks for Chinese and legacy encodings
+    names.push_back("GBK");
+    names.push_back("gbk");
+    names.push_back("GB18030");
+    names.push_back("gb18030");
+    names.push_back("GB2312");
+    names.push_back("gb2312");
+    names.push_back("CP936");
+    names.push_back("cp936");
+    names.push_back("BIG5");
+    names.push_back("big5");
+    names.push_back("ISO-8859-1");
+    names.push_back("iso-8859-1");
+    names.push_back("WINDOWS-1252");
+    names.push_back("windows-1252");
+
+    for (const auto& name : names) {
+        iconv_t cd = iconv_open("UTF-8", name.c_str());
+        if (cd == (iconv_t)-1) continue;
+
+        std::string out;
+        size_t out_size = raw.size() * 4 + 16;
+        out.resize(out_size);
+        char* outbuf = &out[0];
+        size_t outleft = out_size;
+
+        char* inbuf = const_cast<char*>(raw.data());
+        size_t inleft = raw.size();
+
+        size_t r = iconv(cd, &inbuf, &inleft, &outbuf, &outleft);
+        iconv_close(cd);
+
+        if (r != (size_t)-1) {
+            out.resize(out_size - outleft);
+            return out;
+        }
+    }
+    return "";
+}
+
+static std::string convert_to_utf8(const std::string& raw, const std::string& charset) {
+    if (charset.empty() || charset == "UTF-8" || charset == "utf-8") return sanitize_utf8(raw);
+    std::string out = iconv_to_utf8(raw, charset);
+    if (!out.empty()) return sanitize_utf8(out);
+    try {
+        vmime::charset::convert(raw, out, vmime::charset(charset), vmime::charset("UTF-8"));
+        return sanitize_utf8(out);
+    } catch (const std::exception& e) {
+        LOG_INFO("Outlook convert_to_utf8: conversion failed for charset %s: %s\n", charset.c_str(), e.what());
+        return sanitize_utf8(raw);
+    }
+}
+
+static std::string b64_decode_word(const std::string& in) {
+    static const std::string b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int group[4] = {0, 0, 0, 0};
+    int gcount = 0;
+    for (char cc : in) {
+        unsigned char c = static_cast<unsigned char>(cc);
+        if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
+        if (c == '=') {
+            group[gcount++] = -1;
+        } else {
+            size_t pos = b64.find(c);
+            if (pos == std::string::npos) continue;
+            group[gcount++] = static_cast<int>(pos);
+        }
+        if (gcount == 4) {
+            if (group[0] == -1 || group[1] == -1) {
+                // invalid, skip
+            } else if (group[2] == -1) {
+                unsigned char b0 = (group[0] << 2) | (group[1] >> 4);
+                out.push_back(static_cast<char>(b0));
+            } else if (group[3] == -1) {
+                unsigned char b0 = (group[0] << 2) | (group[1] >> 4);
+                unsigned char b1 = (group[1] << 4) | (group[2] >> 2);
+                out.push_back(static_cast<char>(b0));
+                out.push_back(static_cast<char>(b1));
+            } else {
+                unsigned char b0 = (group[0] << 2) | (group[1] >> 4);
+                unsigned char b1 = (group[1] << 4) | (group[2] >> 2);
+                unsigned char b2 = (group[2] << 6) | group[3];
+                out.push_back(static_cast<char>(b0));
+                out.push_back(static_cast<char>(b1));
+                out.push_back(static_cast<char>(b2));
+            }
+            gcount = 0;
+        }
+    }
+    return out;
+}
+
+static std::string qp_decode_word(const std::string& in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        if (c == '_') {
+            out.push_back(' ');
+        } else if (c == '=') {
+            if (i + 2 < in.size() && std::isxdigit(static_cast<unsigned char>(in[i + 1])) && std::isxdigit(static_cast<unsigned char>(in[i + 2]))) {
+                unsigned int b;
+                std::sscanf(in.substr(i + 1, 2).c_str(), "%02x", &b);
+                out.push_back(static_cast<char>(b));
+                i += 2;
+            } else if (i + 1 < in.size() && (in[i + 1] == '\r' || in[i + 1] == '\n' || in[i + 1] == '\0')) {
+                // soft line break / null, skip
+                ++i;
+            } else {
+                out.push_back(c);
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+static std::string decode_header(const std::string& text) {
+    std::string result;
+    size_t i = 0;
+    while (i < text.size()) {
+        if (i + 1 < text.size() && text[i] == '=' && text[i + 1] == '?') {
+            size_t q1 = text.find('?', i + 2);
+            if (q1 == std::string::npos) { result += text[i++]; continue; }
+            std::string charset = text.substr(i + 2, q1 - (i + 2));
+            size_t q2 = text.find('?', q1 + 1);
+            if (q2 == std::string::npos) { result += text[i++]; continue; }
+            std::string encoding = text.substr(q1 + 1, q2 - (q1 + 1));
+            size_t q3 = text.find("?=", q2 + 1);
+            if (q3 == std::string::npos) { result += text[i++]; continue; }
+            std::string encoded = text.substr(q2 + 1, q3 - (q2 + 1));
+
+            std::string decoded;
+            if (encoding == "B" || encoding == "b") {
+                decoded = b64_decode_word(encoded);
+            } else if (encoding == "Q" || encoding == "q") {
+                decoded = qp_decode_word(encoded);
+            } else {
+                decoded = encoded;
+            }
+
+            std::string utf8 = iconv_to_utf8(decoded, charset);
+            if (!utf8.empty()) {
+                result += utf8;
+            } else {
+                result += "=?" + charset + "?" + encoding + "?" + encoded + "?=";
+            }
+
+            i = q3 + 2;
+            // RFC 2047: whitespace between adjacent encoded-words is ignored
+            if (i < text.size() && text[i] == ' ' &&
+                i + 2 < text.size() && text[i + 1] == '=' && text[i + 2] == '?') {
+                ++i;
+            }
+        } else {
+            result += text[i++];
+        }
+    }
+    return sanitize_utf8(result);
+}
+
+static std::string decode_qp_body(const std::string& in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        if (c == '=') {
+            if (i + 2 < in.size() && std::isxdigit(static_cast<unsigned char>(in[i + 1])) && std::isxdigit(static_cast<unsigned char>(in[i + 2]))) {
+                unsigned int b;
+                std::sscanf(in.substr(i + 1, 2).c_str(), "%02x", &b);
+                out.push_back(static_cast<char>(b));
+                i += 2;
+            } else if (i + 1 < in.size() && (in[i + 1] == '\r' || in[i + 1] == '\n' || in[i + 1] == '\0')) {
+                // soft line break
+                ++i;
+            } else {
+                out.push_back(c);
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+static std::string extract_mime_header_value(const std::string& mime, const std::string& name) {
+    std::istringstream in(mime);
+    std::string line;
+    std::string value;
+    bool in_header = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) break;
+        if (line[0] == ' ' || line[0] == '\t') {
+            if (in_header) {
+                while (!line.empty() && (line[0] == ' ' || line[0] == '\t')) line = line.substr(1);
+                value += " " + line;
+            }
+            continue;
+        }
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string hname = line.substr(0, colon);
+        if (hname.size() == name.size() &&
+            std::equal(hname.begin(), hname.end(), name.begin(),
+                [](char a, char b){ return std::tolower(a) == std::tolower(b); })) {
+            in_header = true;
+            value = line.substr(colon + 1);
+            while (!value.empty() && (value[0] == ' ' || value[0] == '\t')) value = value.substr(1);
+        } else {
+            in_header = false;
+        }
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r' || value.back() == '\n')) value.pop_back();
+    return value;
+}
+
+static std::string extract_mime_body(const std::string& mime) {
+    std::istringstream in(mime);
+    std::string line;
+    // skip headers
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) break;
+    }
+    std::ostringstream body;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        body << line << "\n";
+    }
+    return body.str();
+}
+
+static std::string url_encode_path(const std::string& value) {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+    for (char c : value) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+        } else {
+            escaped << std::uppercase;
+            escaped << '%' << std::setw(2) << int(static_cast<unsigned char>(c));
+            escaped << std::nouppercase;
+        }
+    }
+    return escaped.str();
+}
+
+std::string EmailOptOutlookImpl::graph_get_message_mime(const std::string& id) {
+    std::string url = "https://graph.microsoft.com/v1.0/me/messages/" + url_encode_path(id) + "/$value";
+    std::string escaped_url;
+    for (char c : url) {
+        if (c == '$' || c == '\\' || c == '"' || c == '`') {
+            escaped_url += '\\';
+        }
+        escaped_url += c;
+    }
+    std::string header = "Authorization: Bearer " + graph_access_token_;
+    std::string cmd = "curl -s --connect-timeout 10 --max-time 30 -X GET \"" + escaped_url + "\" " +
+                      "-H \"" + header + "\" " +
+                      "-H \"Accept: text/plain\"";
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        LOG_INFO("Outlook graph_get_message_mime: failed to run curl\n");
+        return "";
+    }
+    char buffer[65536];
+    std::string mime;
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        mime += buffer;
+    }
+    pclose(pipe);
+    return mime;
+}
+
+std::string EmailOptOutlookImpl::parse_mime_to_json(const std::string& mime, const std::string& id) {
+    nlohmann::json email;
+    email["uuid"] = id;
+    email["message_id"] = "";
+    email["in_reply_to"] = "";
+    email["subject"] = "";
+    email["from"] = "";
+    email["to_addr"] = "";
+    email["date"] = "";
+    email["x_session_chart"] = "";
+    email["headers"] = "";
+    email["body"] = "";
+
+    try {
+        vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
+        vmime::shared_ptr<vmime::utility::inputStream> input =
+            vmime::make_shared<vmime::utility::inputStreamStringAdapter>(mime);
+        msg->parse(input, mime.length());
+
+        auto header = msg->getHeader();
+        if (header) {
+            auto subjectField = header->findField("Subject");
+            if (subjectField) {
+                email["subject"] = decode_header(subjectField->getValue()->generate());
+            }
+            auto fromField = header->findField("From");
+            if (fromField) {
+                email["from"] = decode_header(fromField->getValue()->generate());
+            }
+            auto toField = header->findField("To");
+            if (toField) {
+                email["to_addr"] = decode_header(toField->getValue()->generate());
+            }
+            auto dateField = header->findField("Date");
+            if (dateField) {
+                email["date"] = sanitize_utf8(dateField->getValue()->generate());
+            }
+            auto msgIdField = header->findField("Message-Id");
+            if (msgIdField) {
+                email["message_id"] = sanitize_utf8(msgIdField->getValue()->generate());
+            }
+            auto inReplyToField = header->findField("In-Reply-To");
+            if (inReplyToField) {
+                email["in_reply_to"] = sanitize_utf8(inReplyToField->getValue()->generate());
+            }
+            auto xMailerField = header->findField("X-Mailer");
+            if (xMailerField) {
+                email["x_session_chart"] = sanitize_utf8(xMailerField->getValue()->generate());
+            }
+
+            LOG_INFO("Outlook parse_mime_to_json: id=%s from_raw=[%s] subject_raw=[%s]\n",
+                id.c_str(),
+                (fromField && fromField->getValue() ? fromField->getValue()->generate().c_str() : "N/A"),
+                (subjectField && subjectField->getValue() ? subjectField->getValue()->generate().c_str() : "N/A"));
+        }
+
+        std::string mainContentType;
+        if (header && header->ContentType()) {
+            mainContentType = header->ContentType()->getValue()->generate();
+        }
+
+        // Extract text body from vmime
+        auto body = msg->getBody();
+        if (body) {
+            auto contents = body->getContents();
+            if (contents) {
+                std::ostringstream body_os;
+                vmime::utility::outputStreamAdapter body_out(body_os);
+                contents->extract(body_out);
+                email["body"] = convert_to_utf8(body_os.str(), extract_charset(mainContentType));
+            }
+
+            // If multipart, also look for text/plain parts
+            for (size_t i = 0; i < body->getPartCount(); ++i) {
+                auto part = body->getPartAt(i);
+                if (!part) continue;
+                auto partBody = part->getBody();
+                if (!partBody) continue;
+                auto partContents = partBody->getContents();
+                if (!partContents) continue;
+                auto contentType = part->getHeader()->ContentType()->getValue()->generate();
+                if (contentType.find("text/plain") != std::string::npos) {
+                    std::ostringstream body_os;
+                    vmime::utility::outputStreamAdapter body_out(body_os);
+                    partContents->extract(body_out);
+                    email["body"] = convert_to_utf8(body_os.str(), extract_charset(contentType));
+                    break;
+                }
+            }
+        }
+
+        // Raw headers as string
+        std::ostringstream headers_os;
+        vmime::utility::outputStreamAdapter headers_out(headers_os);
+        header->generate(headers_out);
+        email["headers"] = sanitize_utf8(headers_os.str());
+    } catch (const vmime::exception& e) {
+        LOG_INFO("Outlook parse_mime_to_json: vmime exception: %s\n", e.what());
+    } catch (const std::exception& e) {
+        LOG_INFO("Outlook parse_mime_to_json: std exception: %s\n", e.what());
+    }
+
+    // Fallback manual extraction if vmime did not populate fields (common for raw RFC 5322 messages)
+    auto get_str = [](const nlohmann::json& j) -> std::string {
+        try { return j.get<std::string>(); } catch (...) { return ""; }
+    };
+    if (get_str(email["from"]).empty()) {
+        email["from"] = decode_header(extract_mime_header_value(mime, "From"));
+    }
+    if (get_str(email["subject"]).empty()) {
+        email["subject"] = decode_header(extract_mime_header_value(mime, "Subject"));
+    }
+    if (get_str(email["to_addr"]).empty()) {
+        email["to_addr"] = decode_header(extract_mime_header_value(mime, "To"));
+    }
+    if (get_str(email["date"]).empty()) {
+        email["date"] = sanitize_utf8(extract_mime_header_value(mime, "Date"));
+    }
+    if (get_str(email["message_id"]).empty()) {
+        email["message_id"] = sanitize_utf8(extract_mime_header_value(mime, "Message-Id"));
+    }
+    if (get_str(email["in_reply_to"]).empty()) {
+        email["in_reply_to"] = sanitize_utf8(extract_mime_header_value(mime, "In-Reply-To"));
+    }
+    if (get_str(email["x_session_chart"]).empty()) {
+        email["x_session_chart"] = sanitize_utf8(extract_mime_header_value(mime, "X-Mailer"));
+    }
+    if (get_str(email["body"]).empty()) {
+        std::string rawBody = extract_mime_body(mime);
+        std::string cte = extract_mime_header_value(mime, "Content-Transfer-Encoding");
+        std::string ctype = extract_mime_header_value(mime, "Content-Type");
+        std::transform(cte.begin(), cte.end(), cte.begin(), [](unsigned char c){ return std::tolower(c); });
+        std::string decoded;
+        if (cte.find("quoted-printable") != std::string::npos) {
+            decoded = decode_qp_body(rawBody);
+        } else if (cte.find("base64") != std::string::npos) {
+            decoded = b64_decode_word(rawBody);
+        } else {
+            decoded = rawBody;
+        }
+        email["body"] = convert_to_utf8(decoded, extract_charset(ctype));
+    }
+
+    LOG_INFO("Outlook parse_mime_to_json: id=%s final from=[%s] subject=[%s]\n",
+        id.c_str(),
+        get_str(email["from"]).c_str(),
+        get_str(email["subject"]).c_str());
+
+    email["bodystructure"] = get_str(email["body"]);
+
+    try {
+        return email.dump();
+    } catch (const std::exception& e) {
+        LOG_INFO("Outlook parse_mime_to_json: json dump failed: %s\n", e.what());
+        return "{}";
+    }
 }
 
 } // namespace EmailComm

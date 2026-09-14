@@ -153,18 +153,16 @@ int Authority_c(int configIndex) {
         }
         
         LOG_INFO("Authority_c: Calling email->authority()\n");
-        // Call authority directly
+        // Call authority directly — this performs OAuth and stores tokens.
+        // Do NOT call connect() here. The IMAP watch loop establishes its own
+        // persistent connection via connect_() when it needs to fetch emails.
+        // Sending emails uses a temporary connection (Graph API or SMTP session).
+        // Calling connect() here would race with the watch loop's connect_()
+        // on the same EmailOptOutlookImpl instance.
         bool authorityResult = email->authority();
         LOG_INFO("Authority_c: authority() returned: %d\n", authorityResult);
         if (authorityResult) {
-            // After successful OAuth, establish TCP connection
-            bool connectResult = email->connect();
-            LOG_INFO("Authority_c: connect() returned: %d\n", connectResult);
-            if (connectResult) {
-                return 0;
-            } else {
-                return -3;
-            }
+            return 0;
         } else {
             return -4;
         }
@@ -816,6 +814,10 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             std::string in_reply_to = email_data.value("in_reply_to", "");
             std::string message_id = email_data.value("message_id", "");
             std::string x_session_chart = email_data.value("x_session_chart", "");
+            x_session_chart.erase(
+                std::remove_if(x_session_chart.begin(), x_session_chart.end(),
+                    [](unsigned char c) { return c == '\r' || c == '\n' || std::isspace(c); }),
+                x_session_chart.end());
 
             // Filter: only skip emails whose X-Mailer value is explicitly invalid.
             // If X-Mailer is empty, treat it as a normal (non-Signal) email and store it,
@@ -870,8 +872,12 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                 }
             }
             // Fallback: if message_id not found, try matching sent email (uuid=0) by in_reply_to
-            // This handles the case where SMTP rewrote the Message-ID
-            if (!found_existing && !in_reply_to.empty()) {
+            // This handles the case where SMTP rewrote the Message-ID.
+            // Group messages (SENDER_KEY_DIST, GROUP_MSG) share the same in_reply_to thread id,
+            // so they must not overwrite the pending sent row; always insert a new row.
+            if (!found_existing && !in_reply_to.empty() &&
+                x_session_chart != XMailer::SENDER_KEY_DIST &&
+                x_session_chart != XMailer::GROUP_MSG) {
                 existing_id = s_emailRepo.findSentByInReplyTo(in_reply_to, accountStr);
                 if (existing_id > 0) {
                     found_existing = true;
@@ -947,6 +953,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             // 1.0.0~1.0.4: will download EML now and set islocal=1
             insertRec.isLocal = 0;
             insertRec.visible = 1;
+            insertRec.xMailer = x_session_chart;
             int64_t my_rowid = s_emailRepo.insert(insertRec);
 
             if (my_rowid > 0 && folder == "INBOX") {
@@ -1032,6 +1039,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             insertRec.toAddr = dc.to_addr;
             insertRec.isLocal = 0;
             insertRec.visible = 0;
+            insertRec.xMailer = dc.x_session_chart;
             int64_t my_rowid = s_emailRepo.insert(insertRec);
 
             if (my_rowid > 0) {

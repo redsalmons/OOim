@@ -6,6 +6,7 @@ import 'email_module_base.dart';
 import 'conversation_view.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
+import '../dialogs/create_group_dialog.dart';
 import '../../i18n/app_strings.dart';
 
 mixin EmailListViewMixin on State<EmailModule> {
@@ -27,6 +28,16 @@ mixin EmailListViewMixin on State<EmailModule> {
   Set<int> get unreadIndices;
   Map<String, int> get configIndexMap;
   String get configPath;
+
+  // Group state
+  List<Map<String, dynamic>> get groupList;
+  String? get selectedGroupId;
+  set selectedGroupId(String? v);
+  bool get isGroupView;
+  set isGroupView(bool v);
+  List<native.EmailMessage> get groupMessages;
+  void loadGroupList();
+  void loadGroupMessages(String groupId);
 
   void refreshEmails() {}
   void fetchEmailsFromAccounts() {}
@@ -50,6 +61,18 @@ mixin EmailListViewMixin on State<EmailModule> {
 
   List<Widget> buildGroupedEmailList() {
     final List<Widget> widgets = [];
+
+    // Section 0: 群组 (groups)
+    if (groupList.isNotEmpty) {
+      final sectionKey = 'groups';
+      final isCollapsed = collapsedSections.contains(sectionKey);
+      widgets.add(_buildGroupSectionHeader('群组', groupList.length, sectionKey, isCollapsed));
+      if (!isCollapsed) {
+        for (final group in groupList) {
+          widgets.add(_buildGroupItem(group));
+        }
+      }
+    }
 
     // Section 1: 会话 (conversations) - 一级分组
     {
@@ -219,6 +242,14 @@ mixin EmailListViewMixin on State<EmailModule> {
             ),
             const Spacer(),
             GestureDetector(
+              onTap: () => _showCreateGroupDialog(),
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                child: Icon(Icons.group_add, size: 18, color: Colors.green[700]),
+              ),
+            ),
+            const SizedBox(width: 4),
+            GestureDetector(
               onTap: () => _showCreateSessionDialog(),
               child: Container(
                 padding: const EdgeInsets.all(2),
@@ -258,6 +289,198 @@ mixin EmailListViewMixin on State<EmailModule> {
         accounts: accounts,
         configPath: configPath,
         onCreated: () => refreshEmails(),
+      ),
+    );
+  }
+
+  void _showCreateGroupDialog() {
+    final config = native.EmailCore.loadConfig(configPath);
+    final accounts = config?.accounts
+            .where((a) => a.email.isNotEmpty)
+            .map((a) => a.email)
+            .toList() ??
+        <String>[];
+    if (accounts.isEmpty) {
+      showDialog(
+        context: context,
+        builder: (context) => EmailConfigDialog(
+          configPath: configPath,
+          onDone: () async {
+            fetchEmailsFromAccounts();
+          },
+        ),
+      );
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (context) => CreateGroupDialog(
+        accounts: accounts,
+        configPath: configPath,
+        onCreated: () => refreshEmails(),
+      ),
+    );
+  }
+
+  Widget _buildGroupSectionHeader(String title, int count, String key, bool isCollapsed) {
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          if (isCollapsed) {
+            collapsedSections.remove(key);
+          } else {
+            collapsedSections.add(key);
+          }
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+        color: const Color(0xFFC8E6C9),
+        child: Row(
+          children: [
+            Icon(Icons.group, size: 16, color: Colors.green[800]),
+            const SizedBox(width: 6),
+            Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800])),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(8)),
+              child: Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+            ),
+            const Spacer(),
+            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 18, color: Colors.grey[600]),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGroupItem(Map<String, dynamic> group) {
+    final groupId = group['group_id'] as String;
+    final subject = group['subject'] as String? ?? '群组';
+    final members = (group['members'] as List?)?.cast<String>() ?? [];
+    final ready = group['ready'] as bool? ?? false;
+    final isSelected = isGroupView && selectedGroupId == groupId;
+
+    final memberCount = members.length;
+    final displayMembers = members.take(3).join(', ');
+    final memberText = memberCount > 3 ? '$displayMembers 等$memberCount人' : displayMembers;
+
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          selectedGroupId = groupId;
+          isGroupView = true;
+          isConversationView = false;
+          loadGroupMessages(groupId);
+        });
+      },
+      onSecondaryTapDown: (details) {
+        showMenu<String>(
+          context: context,
+          position: RelativeRect.fromLTRB(
+            details.globalPosition.dx, details.globalPosition.dy,
+            details.globalPosition.dx, details.globalPosition.dy,
+          ),
+          items: [
+            const PopupMenuItem<String>(value: 'info', child: Text('群组信息')),
+          ],
+        ).then((value) {
+          if (value == 'info') {
+            _showGroupInfoDialog(groupId);
+          }
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFFE8F5E9) : Colors.transparent,
+          border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Colors.green[100],
+              child: Icon(Icons.group, size: 18, color: Colors.green[700]),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          subject,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey[800]),
+                        ),
+                      ),
+                      if (!ready)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(color: Colors.orange[100], borderRadius: BorderRadius.circular(4)),
+                          child: Text('等待密钥', style: TextStyle(fontSize: 10, color: Colors.orange[700])),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    memberText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showGroupInfoDialog(String groupId) {
+    final config = native.EmailCore.loadConfig(configPath);
+    final account = config?.accounts.firstWhere((a) => a.email.isNotEmpty).email ?? '';
+    if (account.isEmpty) return;
+    final infoJson = native.EmailCore.groupGetInfo(account, groupId);
+    Map<String, dynamic> info;
+    try {
+      info = jsonDecode(infoJson) as Map<String, dynamic>;
+    } catch (_) {
+      info = {};
+    }
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('群组信息'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('群组: ${info['subject'] ?? ''}'),
+            const SizedBox(height: 8),
+            Text('Epoch: ${info['epoch'] ?? 0}'),
+            const SizedBox(height: 8),
+            const Text('成员:', style: TextStyle(fontWeight: FontWeight.w500)),
+            const SizedBox(height: 4),
+            ...((info['members'] as List?)?.cast<String>() ?? []).map((m) => Padding(
+              padding: const EdgeInsets.only(left: 16, top: 2),
+              child: Text(m, style: const TextStyle(fontSize: 13)),
+            )),
+            const SizedBox(height: 8),
+            Text('就绪: ${info['ready'] == true ? '是' : '否'}',
+                style: TextStyle(color: info['ready'] == true ? Colors.green : Colors.orange)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text(AppStrings.cancel)),
+        ],
       ),
     );
   }
@@ -386,6 +609,7 @@ mixin EmailListViewMixin on State<EmailModule> {
         setState(() {
           selectedConversationMessageId = sessionId;
           isConversationView = true;
+          isGroupView = false;
           if (index >= 0) {
             selectedEmail = index;
             unreadIndices.remove(index);

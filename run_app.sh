@@ -83,7 +83,11 @@ for f in "$FRAMEWORKS_DIR"/*.dylib; do
     codesign --force --sign - "$f" 2>&1
 done
 
+# Re-sign the app bundle with sandbox entitlements so it uses the container path
+echo "Re-signing app bundle..."
+codesign --force --deep --sign - --entitlements /Users/steven/Cascade/OIM/macos/Runner/DebugProfile.entitlements "$APP_PATH" 2>&1
+
 # Launch app
 echo "Launching app..."
 open "$APP_PATH"
-echo "App launched. Check logs at: ~/Library/Application Support/com.redsalmon.oim/oim.log"
+echo "App launched. Check sandbox logs at: ~/Library/Containers/com.redsalmon.oim/Data/Library/Application Support/com.redsalmon.oim/log/oim.log"

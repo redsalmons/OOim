@@ -311,23 +311,17 @@ void childEntryPoint(SendPort supervisorPort) {
   Future<bool> runFetchCycle() async {
     if (configIndex == null || email == null || folder == null) return false;
 
-    // For Outlook, refresh token is already set from config loading, just refresh
-    if (accountType == 'outlook.com') {
-      final refreshResult = native.EmailCore.refreshToken(configIndex!);
-      if (refreshResult != 0) {
-        log('refreshToken failed: $refreshResult');
-        return false;
-      }
-    } else { // 163
+    // For 163/QQ, set credentials before connecting. Outlook uses on-demand Graph/IMAP auth.
+    if (accountType != 'outlook.com') {
       final credResult = native.EmailCore.setEmailCredentials(configIndex!, email!, authCode!);
       if (credResult != 0) {
         log('setEmailCredentials failed: $credResult');
         return false;
       }
-    }
 
-    // Always reconnect to avoid stale connection issues
-    native.EmailCore.connectEmail(configIndex!);
+      // Always reconnect to avoid stale connection issues
+      native.EmailCore.connectEmail(configIndex!);
+    }
 
     // Fetch and store new emails from the specified folder
     final fetchResult = native.EmailCore.fetchAndStoreEmails(configIndex!, folder!, email!, storageDir ?? '');
@@ -430,18 +424,15 @@ void childEntryPoint(SendPort supervisorPort) {
 
         log('Found $pendingCount pending emails, connecting to download...');
 
-        // Refresh token for Outlook before connecting
-        if (accountType == 'outlook.com') {
-          native.EmailCore.refreshToken(configIndex!);
-        } else {
-          // For 163/QQ, set credentials before connecting
+        // For 163/QQ, set credentials and connect. Outlook handles auth on demand.
+        if (accountType != 'outlook.com') {
           final credResult = native.EmailCore.setEmailCredentials(configIndex!, email!, authCode!);
           log('Download loop: setEmailCredentials result=$credResult');
-        }
 
-        // Connect to ensure IMAP session is alive
-        final connectResult = native.EmailCore.connectEmail(configIndex!);
-        log('Download loop: connectEmail result=$connectResult');
+          // Connect to ensure IMAP session is alive
+          final connectResult = native.EmailCore.connectEmail(configIndex!);
+          log('Download loop: connectEmail result=$connectResult');
+        }
 
         // Download pending bodies (islocal=0)
         final result = native.EmailCore.downloadPendingBodies(configIndex!, email!, storageDir!);
@@ -486,10 +477,8 @@ void childEntryPoint(SendPort supervisorPort) {
 
     while (!shouldStop) {
       try {
-        // Set credentials for SMTP
-        if (accountType == 'outlook.com' || accountType == 'gmail.com') {
-          native.EmailCore.refreshToken(configIndex!);
-        } else {
+        // Outlook handles Graph/SMTP auth on demand; 163/QQ need credentials
+        if (accountType != 'outlook.com' && accountType != 'gmail.com') {
           native.EmailCore.setEmailCredentials(configIndex!, email!, authCode!);
         }
 
@@ -582,8 +571,11 @@ void childEntryPoint(SendPort supervisorPort) {
           while (!fetchOk && !shouldStop) {
             fetchOk = await runFetchCycle();
             if (!fetchOk) {
-              log('Initial fetch failed, retrying in 5s...');
-              await Future.delayed(const Duration(seconds: 5));
+              // Outlook server rate-limits aggressive reconnection attempts.
+              // Use a longer retry interval to avoid being blocked.
+              final retrySecs = (accountType == 'outlook.com') ? 30 : 5;
+              log('Initial fetch failed, retrying in ${retrySecs}s...');
+              await Future.delayed(Duration(seconds: retrySecs));
             }
           }
 

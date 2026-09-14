@@ -183,7 +183,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
     // file is not empty: parse .eml file using file field
     final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
     native.EmailCore.logWrite('[EmailDetail] emlPath=$emlPath');
-    final parsed = parseEmlFile(emlPath, account: email.account);
+    final parsed = parseEmlFile(emlPath, account: email.account, sessionId: email.sessionId, fromAddr: email.sender, xMailer: email.xMailer, isSent: email.isSent);
     final bodyText = parsed.textBody.isNotEmpty ? parsed.textBody : AppStrings.noContent;
 
     return Column(

@@ -61,6 +61,7 @@ native.EmailMessage _emailMessageFromJson(Map<String, dynamic> json) {
     file: json['file'] ?? '',
     account: json['account'] ?? '',
     visible: json['visible'] ?? 1,
+    isSent: json['is_sent'] is int ? json['is_sent'] : (int.tryParse(json['is_sent']?.toString() ?? '0') ?? 0),
   );
 }
 
@@ -352,12 +353,8 @@ mixin ConversationViewMixin on State<EmailModule> {
         .where((e) => !e.messageId.startsWith('<truck_'))
         .toList();
 
-    // Sort by rowid (insertion order = chronological)
-    thread.sort((a, b) {
-      return a.rowid.compareTo(b.rowid);
-    });
-
-    return thread;
+    // Order by the in_reply_to chain (rowid only as tie-breaker)
+    return sortByReplyChain(thread);
   }
 
   List<ThreadItem> buildMergedThread(String sessionId) {
@@ -374,7 +371,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       String? batchId;
       if (email.file.isNotEmpty) {
         final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
-        final parsed = parseEmlFile(emlPath, account: email.account);
+        final parsed = parseEmlFile(emlPath, account: email.account, sessionId: email.sessionId, fromAddr: email.sender, xMailer: email.xMailer, isSent: email.isSent);
         if (parsed.isFileMessage && parsed.batchId.isNotEmpty) {
           batchId = parsed.batchId;
         }
@@ -529,8 +526,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                             itemBuilder: (context, index) {
                               final item = mergedThread[index];
                               final firstEmail = item.emails.first;
-                              final senderEmail = _extractEmailAddress(firstEmail.sender);
-                              final isMe = senderEmail == firstEmail.recipient.toLowerCase();
+                              final isMe = firstEmail.isSent == 1;
                               return buildChatBubble(item, isMe);
                             },
                           ),
@@ -1132,7 +1128,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         final email = item.emails[i];
         if (email.file.isEmpty) continue;
         final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
-        final parsed = parseEmlFile(emlPath, account: email.account);
+        final parsed = parseEmlFile(emlPath, account: email.account, sessionId: email.sessionId, fromAddr: email.sender, xMailer: email.xMailer, isSent: email.isSent);
         if (parsed.isFileMessage) {
           // Text comes from the first file message that has non-empty text
           if (batchText.isEmpty && parsed.textBody.isNotEmpty) {
@@ -1163,7 +1159,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       if (!isDownloading) {
         final emlPath = '$emailDataPath/${email.account}/${email.file}.eml';
         savedEmlPath = emlPath;
-        final parsed = parseEmlFile(emlPath, account: email.account);
+        final parsed = parseEmlFile(emlPath, account: email.account, sessionId: email.sessionId, fromAddr: email.sender, xMailer: email.xMailer, isSent: email.isSent);
         bodyText = parsed.textBody;
         hasAtt = parsed.hasAttachments;
         isFileMessage = parsed.isFileMessage;
@@ -1195,7 +1191,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         final file = File(emlPath);
         if (file.existsSync()) {
           savedEmlPath = emlPath;
-          final parsed = parseEmlFile(emlPath, account: email.account);
+          final parsed = parseEmlFile(emlPath, account: email.account, sessionId: email.sessionId, fromAddr: email.sender, xMailer: email.xMailer, isSent: email.isSent);
           savedAttachments = parsed.attachments;
           if (savedAttachments.isEmpty) {
             // Parser may have cleared attachments for encrypted messages.
@@ -1403,7 +1399,7 @@ class _ChatBubble extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (isHandshakeMessage)
-                Icon(Icons.handshake, size: 20, color: Colors.grey[500])
+                const Text('🤝', style: TextStyle(fontSize: 20))
               else if (bodyText.isNotEmpty)
                 SelectableText(
                   bodyText,

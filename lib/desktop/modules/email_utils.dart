@@ -155,7 +155,57 @@ Color avatarColor(String name) {
   return colors[hash.abs() % colors.length];
 }
 
+/// Orders messages by following the reply chain: each message's `inReplyTo` points
+/// to the (locally generated) `messageId` of the previous message. Roots are messages
+/// whose parent is empty or not present in [messages]. Siblings (several replies to the
+/// same parent, e.g. two members sending concurrently) and multiple roots fall back to
+/// rowid order.
+List<native.EmailMessage> sortByReplyChain(List<native.EmailMessage> messages) {
+  final byId = <String, native.EmailMessage>{};
+  for (final m in messages) {
+    if (m.messageId.isNotEmpty) byId.putIfAbsent(m.messageId, () => m);
+  }
+
+  final children = <String, List<native.EmailMessage>>{};
+  final roots = <native.EmailMessage>[];
+  for (final m in messages) {
+    final parent = m.inReplyTo;
+    if (parent.isNotEmpty && byId.containsKey(parent) && byId[parent] != m) {
+      children.putIfAbsent(parent, () => []).add(m);
+    } else {
+      roots.add(m);
+    }
+  }
+
+  int byRowid(native.EmailMessage a, native.EmailMessage b) => a.rowid.compareTo(b.rowid);
+  roots.sort(byRowid);
+  for (final list in children.values) {
+    list.sort(byRowid);
+  }
+
+  final ordered = <native.EmailMessage>[];
+  final visited = <native.EmailMessage>{};
+  void walk(native.EmailMessage m) {
+    if (!visited.add(m)) return;
+    ordered.add(m);
+    for (final c in children[m.messageId] ?? const <native.EmailMessage>[]) {
+      walk(c);
+    }
+  }
+  for (final r in roots) {
+    walk(r);
+  }
+  // Safety net: anything unreachable (cycles) keeps rowid order at the end
+  for (final m in messages) {
+    if (!visited.contains(m)) ordered.add(m);
+  }
+  return ordered;
+}
+
 String previewFor(native.EmailMessage email) {
+  if (native.XMailer.isKeyExchange(email.xMailer)) {
+    return '🤝 已交换密钥';
+  }
   final body = email.body;
   // body currently stores bodystructure JSON, not actual email text
   if (body.startsWith('{') || body.startsWith('[')) return '';

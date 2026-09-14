@@ -20,11 +20,13 @@ struct EmailRecord {
     std::string flags;
     std::string folder;
     int isLocal = 0;
+    int isSent = 0;
     int visible = 1;
     std::string sessionId;
     std::string servicerecvtime;
     int64_t rowid = 0;
     std::string file;
+    std::string xMailer;
 };
 
 struct PendingEmail {
@@ -43,6 +45,14 @@ public:
 
     // Query all emails in a session thread
     std::vector<EmailRecord> queryThread(const std::string& sessionId);
+
+    // Associate an email with a group session
+    bool addEmailToGroupSession(const std::string& account, int64_t groupId, int64_t emailId, int encryptMethod);
+
+    // Resolve the group of a message by its (local) message_id via group_session_email.
+    // Used to follow the in_reply_to chain: a reply belongs to the same group as its parent.
+    // Returns 0 if not found.
+    int64_t findGroupIdByMessageId(const std::string& account, const std::string& messageId);
 
     // Check if email exists by message_id + account, return uuid if found
     std::string findUuidByMessageId(const std::string& messageId, const std::string& account);
@@ -73,7 +83,8 @@ public:
         const std::string& fromAddr, const std::string& toAddr,
         const std::string& subject, const std::string& date,
         const std::string& messageId, const std::string& inReplyTo,
-        const std::string& bodystructure, const std::string& file);
+        const std::string& bodystructure, const std::string& file,
+        const std::string& xMailer);
 
     // Update email after download (set islocal=2, message_id, in_reply_to, file)
     bool updateAfterDownload(const std::string& uuid, const std::string& account,

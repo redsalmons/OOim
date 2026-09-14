@@ -33,8 +33,8 @@ nlohmann::json encode_session_init(
     const std::string& ikPub,        // sender's identity key (PEM)
     const std::string& ekPub,        // sender's ephemeral key (PEM)
     const PrekeyBundle& senderBundle, // sender's prekey bundle (for in-band exchange)
-    const std::string& messageId = "",  // current email's locally generated message_id
-    const std::string& inReplyTo = "",  // message_id of the email being replied to
+    const std::string& messageId = "",  // current email's locally generated message_id (body key: x_message_id)
+    const std::string& inReplyTo = "",  // message_id of the email being replied to (body key: x_reply_to)
     const std::string& peerSpkPub = "",  // peer's SPK pub that initiator used (so responder can look up matching priv)
     const std::string& peerIkPub = ""   // peer's IK pub that initiator used (so responder can look up matching priv)
 );
@@ -45,8 +45,8 @@ nlohmann::json encode_ratchet_msg(
     const std::string& fromAccount,
     const std::vector<std::string>& toRecipients,
     const EncryptedMessage& encMsg,
-    const std::string& messageId = "",  // current email's locally generated message_id
-    const std::string& inReplyTo = ""   // message_id of the email being replied to
+    const std::string& messageId = "",  // current email's locally generated message_id (body key: x_message_id)
+    const std::string& inReplyTo = ""   // message_id of the email being replied to (body key: x_reply_to)
 );
 
 // Build a PREKEY_BUNDLE (1.0.0) message JSON
@@ -79,8 +79,8 @@ struct ParsedSignalMessage {
     std::string peerIkPub;        // only for init: peer's IK pub that initiator used
     PrekeyBundle senderBundle;    // only for prekey_bundle / init
     std::string repairReason;     // only for repair
-    std::string messageId;         // current email's locally generated message_id
-    std::string inReplyTo;         // message_id of the email being replied to
+    std::string messageId;         // current email's locally generated message_id (body key: x_message_id)
+    std::string inReplyTo;         // message_id of the email being replied to (body key: x_reply_to)
     bool hasPrekeyBundle = false;
     bool isInit = false;
     bool isRepair = false;

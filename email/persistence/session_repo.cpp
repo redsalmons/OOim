@@ -76,34 +76,6 @@ std::string SessionRepo::querySessionByInReplyTo(const std::string& inReplyTo, c
     return result;
 }
 
-std::string SessionRepo::querySessionBySubjectAndSender(const std::string& subject, const std::string& fromAddr, const std::string& account) {
-    auto& conn = DbConnection::instance();
-    sqlite3* db = conn.get();
-    if (!db || subject.empty()) return "";
-
-    const char* sql =
-        "SELECT s.session_id FROM session s "
-        "JOIN localemail l ON s.email_id = l.id "
-        "WHERE l.subject = ? AND l.account = ? "
-        "AND (l.from_addr LIKE '%' || ? || '%' OR l.to_addr LIKE '%' || ? || '%') "
-        "ORDER BY s.id DESC LIMIT 1;";
-
-    sqlite3_stmt* stmt;
-    std::string result;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, subject.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, fromAddr.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, fromAddr.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* sid = (const char*)sqlite3_column_text(stmt, 0);
-            if (sid) result = sid;
-        }
-        sqlite3_finalize(stmt);
-    }
-    return result;
-}
-
 bool SessionRepo::addEmailToSession(const std::string& sessionId, int64_t emailId, int encryptMethod) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
