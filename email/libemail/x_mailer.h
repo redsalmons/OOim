@@ -17,10 +17,16 @@ constexpr const char* REPAIR_MSG     = "1.0.3";  // Session repair / reset
 constexpr const char* ATTACH_META    = "1.0.4";  // Encrypted attachment metadata
 constexpr const char* ATTACH_CHUNK   = "1.0.5";  // Attachment chunk data
 
-// Group messaging (Sender Key, v1.1)
-constexpr const char* SENDER_KEY_DIST = "1.1.0";  // Sender Key distribution (via 1:1 DR)
-constexpr const char* GROUP_MSG       = "1.1.1";  // Group message (Sender Key encrypted)
-constexpr const char* GROUP_UPDATE     = "1.1.2";  // Group member update notification
+// Group messaging (MLS / RFC 9420, v2.0). Independent from the 1:1 Double Ratchet channel.
+// Body is JSON; the chain uses body x_message_id / x_reply_to.
+constexpr const char* MLS_KEY_PACKAGE = "2.0.0";  // body.type = mls_invite (root, from owner) | mls_key_package (member -> owner)
+constexpr const char* MLS_WELCOME     = "2.0.1";  // owner -> member: Welcome + RatchetTree
+constexpr const char* MLS_COMMIT      = "2.0.2";  // owner -> existing members: Commit (tree change)
+constexpr const char* MLS_APP_MSG     = "2.0.3";  // group application message (MLS ciphertext)
+
+inline bool isMls(const std::string& v) {
+    return v == MLS_KEY_PACKAGE || v == MLS_WELCOME || v == MLS_COMMIT || v == MLS_APP_MSG;
+}
 
 // Aliases mapping old names to new 1.0.x values (no 0.1.x backward compat)
 constexpr const char* NEW_SESSION  = SESSION_INIT;   // New session creation
@@ -42,9 +48,7 @@ inline bool isValid(const std::string& value) {
            value == REPAIR_MSG ||
            value == ATTACH_META ||
            value == ATTACH_CHUNK ||
-           value == SENDER_KEY_DIST ||
-           value == GROUP_MSG ||
-           value == GROUP_UPDATE ||
+           isMls(value) ||
            value == LEGACY_PREKEY_BUNDLE ||
            value == LEGACY_SESSION_INIT ||
            value == LEGACY_RAT_MSG;

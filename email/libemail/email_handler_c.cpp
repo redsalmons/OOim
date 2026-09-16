@@ -873,11 +873,10 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             }
             // Fallback: if message_id not found, try matching sent email (uuid=0) by in_reply_to
             // This handles the case where SMTP rewrote the Message-ID.
-            // Group messages (SENDER_KEY_DIST, GROUP_MSG) share the same in_reply_to thread id,
-            // so they must not overwrite the pending sent row; always insert a new row.
+            // MLS group messages share the same in_reply_to thread id, so they must not
+            // overwrite the pending sent row; always insert a new row.
             if (!found_existing && !in_reply_to.empty() &&
-                x_session_chart != XMailer::SENDER_KEY_DIST &&
-                x_session_chart != XMailer::GROUP_MSG) {
+                !XMailer::isMls(x_session_chart)) {
                 existing_id = s_emailRepo.findSentByInReplyTo(in_reply_to, accountStr);
                 if (existing_id > 0) {
                     found_existing = true;

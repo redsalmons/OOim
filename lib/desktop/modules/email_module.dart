@@ -332,11 +332,17 @@ class EmailModuleState extends State<EmailModule>
             _logToFile('Background: new emails for ${msg.account}, count=${msg.data?['count']}');
             clearEmlCache();
             await _loadEmailsFromDb();
+            if (_selectedGroupId != null) {
+              loadGroupMessages(_selectedGroupId!);
+            }
             break;
           case 'email_sent':
             _logToFile('Background: email sent for ${msg.account}, message_id=${msg.data?['message_id']}');
             clearEmlCache();
             await _loadEmailsFromDb();
+            if (_selectedGroupId != null) {
+              loadGroupMessages(_selectedGroupId!);
+            }
             break;
           case 'log':
             _logToFile('Background: ${msg.data?['msg']}');
@@ -366,6 +372,9 @@ class EmailModuleState extends State<EmailModule>
             }
             clearEmlCache();
             await _loadEmailsFromDb();
+            if (_selectedGroupId != null) {
+              loadGroupMessages(_selectedGroupId!);
+            }
             break;
           default:
             _logToFile('Background: ${msg.type} ${msg.data}');
@@ -1354,35 +1363,7 @@ class EmailModuleState extends State<EmailModule>
 
     native.EmailCore.logWrite('[GROUP_SEND] groupId=$groupId, text=$text');
 
-    // Encrypt with group Sender Key
-    final encResult = native.EmailCore.groupEncrypt(myEmail, groupId, text);
-    Map<String, dynamic> encJson;
-    try {
-      encJson = jsonDecode(encResult);
-    } catch (e) {
-      native.EmailCore.logWrite('[GROUP_SEND] groupEncrypt parse error: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('加密失败: $e'), duration: const Duration(seconds: 3)),
-      );
-      return;
-    }
-
-    if (encJson['status'] != 'success') {
-      final err = encJson['error'] ?? 'unknown';
-      native.EmailCore.logWrite('[GROUP_SEND] groupEncrypt failed: $err');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('加密失败: $err'), duration: const Duration(seconds: 3)),
-      );
-      return;
-    }
-
-    final ciphertext = encJson['ciphertext'] as String;
-    final signature = encJson['signature'] as String;
-    final iteration = encJson['iteration'] as int;
-    final epoch = encJson['epoch'] as int;
-
-    // Reply chain: in_reply_to = local x_message_id of the last message in this group
-    // (groupMessages is already ordered by the chain). Never the server-rewritten id.
+    // Reply chain: in_reply_to = local x_message_id of the last message in this group.
     final chain = groupMessages.where((m) => m.messageId.isNotEmpty).toList();
     if (chain.isEmpty) {
       native.EmailCore.logWrite('[GROUP_SEND] no root message in group=$groupId, cannot chain');
@@ -1392,36 +1373,32 @@ class EmailModuleState extends State<EmailModule>
       return;
     }
     final inReplyTo = chain.last.messageId;
-    final messageId = '<${DateTime.now().millisecondsSinceEpoch}.${myEmail.hashCode.abs()}@${myEmail.split('@').last}>';
 
-    // Build group message body (no local group_id)
-    // Include plaintext for self-display (sender's own copy doesn't need decryption)
-    final msgBody = jsonEncode({
-      'x_message_id': messageId,
-      'x_reply_to': inReplyTo,
-      'sender': myEmail,
-      'iteration': iteration,
-      'epoch': epoch,
-      'ciphertext': ciphertext,
-      'signature': signature,
-      'plaintext': text,
-    });
+    // MLS: group_send_message encrypts the plaintext and queues the task internally.
+    final result = native.EmailCore.groupSendMessage(myEmail, groupId, text, inReplyTo);
+    native.EmailCore.logWrite('[GROUP_SEND] groupSendMessage result: $result');
 
-    // Send to all other members via task queue
-    final recipientStr = members.where((m) => m != myEmail).join(', ');
+    Map<String, dynamic> resultJson;
+    try {
+      resultJson = jsonDecode(result);
+    } catch (e) {
+      native.EmailCore.logWrite('[GROUP_SEND] parse error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('发送失败: $e'), duration: const Duration(seconds: 3)),
+      );
+      return;
+    }
 
-    final rc = native.EmailCore.taskInsert(
-      account: myEmail,
-      recipient: recipientStr,
-      subject: '群消息',
-      body: msgBody,
-      inReplyTo: inReplyTo,
-      messageId: messageId,
-      xSessionChart: native.XMailer.groupMsg,
-    );
+    if (resultJson['status'] != 'success') {
+      final err = resultJson['error'] ?? 'unknown';
+      native.EmailCore.logWrite('[GROUP_SEND] failed: $err');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('发送失败: $err'), duration: const Duration(seconds: 3)),
+      );
+      return;
+    }
 
-    native.EmailCore.logWrite('[GROUP_SEND] taskInsert rc=$rc, recipients=$recipientStr');
-
+    final rc = resultJson['task_id'] as int? ?? 0;
     if (rc > 0) {
       _replyController.clear();
       setState(() {});

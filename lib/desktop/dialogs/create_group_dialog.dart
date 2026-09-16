@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
 import '../../i18n/app_strings.dart';
@@ -8,12 +7,18 @@ class CreateGroupDialog extends StatefulWidget {
   final List<String> accounts;
   final String configPath;
   final VoidCallback? onCreated;
+  final String? initialTitle;
+  final String? initialAccount;
+  final List<String>? initialMembers;
 
   const CreateGroupDialog({
     super.key,
     required this.accounts,
     required this.configPath,
     this.onCreated,
+    this.initialTitle,
+    this.initialAccount,
+    this.initialMembers,
   });
 
   @override
@@ -30,7 +35,13 @@ class _CreateGroupDialogState extends State<CreateGroupDialog> {
   @override
   void initState() {
     super.initState();
-    _selectedAccount = widget.accounts.isNotEmpty ? widget.accounts.first : '';
+    _selectedAccount = widget.initialAccount ?? (widget.accounts.isNotEmpty ? widget.accounts.first : '');
+    if (widget.initialTitle != null) {
+      _titleController.text = widget.initialTitle!;
+    }
+    if (widget.initialMembers != null) {
+      _members.addAll(widget.initialMembers!);
+    }
   }
 
   void _addMember() {
@@ -48,13 +59,6 @@ class _CreateGroupDialogState extends State<CreateGroupDialog> {
     setState(() {
       _members.remove(member);
     });
-  }
-
-  String _generateMessageId(String account) {
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    final rand = Random().nextInt(0xFFFFFF);
-    final domain = account.split('@').last;
-    return '<$ts.$rand@$domain>';
   }
 
   Future<void> _createGroup() async {
@@ -84,9 +88,11 @@ class _CreateGroupDialogState extends State<CreateGroupDialog> {
 
     native.EmailCore.logWrite('[CREATE_GROUP] members=$allMembers');
 
-    // 1. Create group session in DB (group_id and group_email are auto-generated)
+    // MLS group creation: the C++ side creates the group, sends the invite to all
+    // members, and queues the tasks. Members reply with KeyPackages, the owner
+    // sends Welcomes — all handled by group_create / group_handle_incoming.
     final createResult = native.EmailCore.groupCreate(
-      _selectedAccount, '', '', title, allMembers);
+      _selectedAccount, title, allMembers);
     native.EmailCore.logWrite('[CREATE_GROUP] groupCreate result: $createResult');
 
     final createJson = jsonDecode(createResult);
@@ -97,61 +103,6 @@ class _CreateGroupDialogState extends State<CreateGroupDialog> {
       );
       return;
     }
-    final groupId = createJson['group_id'].toString();
-
-    // 2. Generate our own Sender Key
-    final skResult = native.EmailCore.senderKeyGenerate(_selectedAccount, groupId);
-    native.EmailCore.logWrite('[CREATE_GROUP] senderKeyGenerate result: $skResult');
-
-    // 3. Get distribution payload
-    final distPayload = native.EmailCore.senderKeyGetDistribution(_selectedAccount, groupId);
-    native.EmailCore.logWrite('[CREATE_GROUP] distribution payload: $distPayload');
-    final distPayloadJson = jsonDecode(distPayload);
-
-    // 4. Distribute to each member via 1:1 DR
-    // The creator's SENDER_KEY_DIST is the root of the group's reply chain:
-    //   x_message_id = locally generated id
-    //   in_reply_to  = '' (root)
-    // send_email() performs the actual Signal encryption; we just queue the plaintext wrapper
-    String rootMessageId = '';
-    for (final member in _members) {
-      if (member == _selectedAccount) continue;
-      try {
-        final sessionId = _getActiveSessionId(_selectedAccount, member);
-        final messageId = _generateMessageId(_selectedAccount);
-        if (rootMessageId.isEmpty) rootMessageId = messageId;
-
-        final distWrapper = jsonEncode({
-          'type': 'sender_key_distribution',
-          'x_message_id': messageId,
-          'x_reply_to': '',
-          'subject': title,
-          'members': allMembers,
-          'owner': _selectedAccount,
-          'sender_key': distPayloadJson,
-        });
-
-        final rc = native.EmailCore.taskInsert(
-          account: _selectedAccount,
-          recipient: member,
-          subject: title,
-          body: distWrapper,
-          inReplyTo: '',
-          messageId: messageId,
-          sessionId: sessionId,
-          xSessionChart: native.XMailer.senderKeyDist,
-        );
-        native.EmailCore.logWrite('[CREATE_GROUP] SenderKey queued to $member (session=$sessionId) task rc=$rc');
-      } catch (e) {
-        native.EmailCore.logWrite('[CREATE_GROUP] Failed to distribute to $member: $e');
-      }
-    }
-
-    // 5. Record the root message_id on the group session
-    if (rootMessageId.isNotEmpty) {
-      final setXResult = native.EmailCore.groupSetXReplyId(_selectedAccount, groupId, rootMessageId);
-      native.EmailCore.logWrite('[CREATE_GROUP] groupSetXReplyId(root=$rootMessageId) result: $setXResult');
-    }
 
     setState(() => _creating = false);
 
@@ -159,19 +110,8 @@ class _CreateGroupDialogState extends State<CreateGroupDialog> {
     if (mounted) Navigator.of(context).pop();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('群组创建成功'), duration: const Duration(seconds: 2)),
+        SnackBar(content: Text('群组创建成功，等待成员加入...'), duration: const Duration(seconds: 2)),
       );
-    }
-  }
-
-  String _getActiveSessionId(String account, String peerEmail) {
-    try {
-      final sid = native.EmailCore.groupFind1to1Session(account, peerEmail);
-      native.EmailCore.logWrite('[CREATE_GROUP] _getActiveSessionId($peerEmail) = "$sid"');
-      return sid;
-    } catch (e) {
-      native.EmailCore.logWrite('[CREATE_GROUP] _getActiveSessionId($peerEmail) error: $e');
-      return '';
     }
   }
 

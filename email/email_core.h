@@ -410,79 +410,54 @@ int signal_store_peer_prekey(const char* account, const char* peerEmail,
                              const char* spkSig, const char* opkPub,
                              const char* keyScope);
 
-// === Group messaging (Sender Key) ===
+// === Group messaging (MLS / RFC 9420, X-Mailer 2.0.x) ===
+// Implemented in signal/group_c_api.cpp on top of signal/mls_group.{h,cpp}.
+// Fully independent from the 1:1 Double Ratchet channel.
 
-// Create a group session.
-// membersJson: JSON array of email strings, e.g. ["alice@...","bob@..."]
-// Returns 0 on success, negative on error.
-int group_create(const char* account, const char* groupId,
-                 const char* groupEmail, const char* subject,
+// Create a group: inserts the group_session row, creates the MLS group and queues the
+// root invite (2.0.0 / mls_invite) to every member. membersJson: JSON array of emails
+// (may include the account itself). outJson: {status, group_id, root_message_id}.
+int group_create(const char* account, const char* subject,
                  const char* membersJson, char* outJson, int outSize);
 
-// Set the shared x-reply-id for a group (used for x-reply-id based association).
-int group_set_x_reply_id(const char* account, const char* groupId,
-                         const char* xReplyId, char* outJson, int outSize);
-
-// Add a member to a group. Triggers epoch increment.
-// Returns 0 on success, negative on error.
-int group_add_member(const char* account, const char* groupId,
-                     const char* memberEmail, char* outJson, int outSize);
-
-// Remove a member from a group. Triggers epoch increment.
-// Returns 0 on success, negative on error.
-int group_remove_member(const char* account, const char* groupId,
-                        const char* memberEmail, char* outJson, int outSize);
-
-// Get group info (members, epoch, status).
-// Returns 0 on success, negative on error.
+// Get group info (members, epoch, ready). Returns 0 on success, negative on error.
 int group_get_info(const char* account, const char* groupId,
                    char* outJson, int outSize);
 
 // List all active groups for an account.
-// outJson: JSON array of {group_id, group_email, subject, members, epoch}
-// Returns 0 on success, negative on error.
+// outJson: {status, groups:[{group_id, group_email, x_reply_id, subject, owner, members, account, epoch, ready}]}
 int group_list(const char* account, char* outJson, int outSize);
 
-// Find an existing 1:1 email session for a peer.
-// outSessionId: the email session_id if one exists, empty string otherwise.
-// Returns 0 on success, negative on error.
-int group_find_1to1_session(const char* account, const char* peerEmail,
-                            char* outSessionId, int outSize);
+// Queue an application message (2.0.3). The task body holds the plaintext; the task
+// processor MLS-encrypts it right before sending and keeps the plaintext in the local .eml.
+// inReplyTo: local x_message_id of the last message of the group (chain parent).
+// outJson: {status, task_id, message_id}. Returns 0 on success, negative on error.
+int group_send_message(const char* account, const char* groupId,
+                       const char* plaintext, const char* inReplyTo,
+                       char* outJson, int outSize);
 
-// Generate a Sender Key for the current account in a group.
-// Returns distribution payload JSON via outJson.
-// Returns 0 on success, negative on error.
-int sender_key_generate(const char* account, const char* groupId,
-                        char* outJson, int outSize);
+// Receive-side handler for any 2.0.x mail (called by download_pending).
+// bodyText = JSON body; message_id/in_reply_to = local ids from the body (header fallback).
+// On success writes the local group_id to outGroupId and returns 0 and, for 2.0.3,
+// the decrypted plaintext to outPlaintext. Returns 1 if the message must be retried later
+// (e.g. Commit before Welcome), negative on permanent failure.
+int group_handle_incoming(const char* account, const char* fromAddr,
+                          const char* xMailer, const char* bodyText,
+                          const char* message_id, const char* in_reply_to,
+                          char* outGroupId, int gidSize,
+                          char* outPlaintext, int ptSize);
 
-// Get the distribution payload for our Sender Key (to send to other members).
-// Returns 0 on success, negative on error.
-int sender_key_get_distribution(const char* account, const char* groupId,
-                                 char* outJson, int outSize);
-
-// Store a received Sender Key from another member.
-// Returns 0 on success, negative on error.
-int sender_key_store(const char* account, const char* groupId,
-                     const char* senderEmail, const char* chainKey,
-                     const char* signingPub, int epoch);
-
-// Check if we have Sender Keys for all group members.
-// Returns 1 if ready, 0 if not, negative on error.
-int sender_key_check_ready(const char* account, const char* groupId);
-
-// Encrypt a group message.
-// outJson: {group_id, sender, iteration, epoch, ciphertext, signature}
-// Returns 0 on success, negative on error.
-int group_encrypt(const char* account, const char* groupId,
-                  const char* plaintext, char* outJson, int outSize);
-
-// Decrypt a group message.
-// outJson: {status:"success", plaintext} or {status:"error", error}
-// Returns 0 on success, negative on error.
-int group_decrypt(const char* account, const char* groupId,
-                  const char* senderEmail, int iteration, int epoch,
-                  const char* ciphertext, const char* signature,
-                  char* outJson, int outSize);
+// Send-side hooks for the task processor.
+// Before send: for 2.0.3 replace the plaintext body with the MLS ciphertext body.
+// outBody receives the wire body. Returns 0 on success, negative on error.
+int group_prepare_outgoing(const char* account, const char* xMailer,
+                           const char* body, const char* inReplyTo,
+                           char* outBody, int outSize);
+// After send: resolve the group of a sent 2.0.x mail (by chain / root id) and
+// associate the sent row; for 2.0.3 rewrite the local .eml body with `localBody`.
+int group_after_sent(const char* account, const char* xMailer,
+                     const char* messageId, const char* inReplyTo,
+                     const char* localBody, const char* dataDir);
 
 #ifdef __cplusplus
 }

@@ -455,18 +455,9 @@ typedef _SignalSessionCloseDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Poi
 typedef _SignalStorePeerPrekeyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
 typedef _SignalStorePeerPrekeyDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
 
-// Group messaging (Sender Key) typedefs
-typedef _GroupCreateNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupCreateDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
-
-typedef _GroupSetXReplyIdNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupSetXReplyIdDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
-
-typedef _GroupAddMemberNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupAddMemberDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
-
-typedef _GroupRemoveMemberNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupRemoveMemberDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+// Group messaging (MLS / RFC 9420) typedefs
+typedef _GroupCreateNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _GroupCreateDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _GroupGetInfoNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _GroupGetInfoDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
@@ -474,26 +465,17 @@ typedef _GroupGetInfoDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<U
 typedef _GroupListNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _GroupListDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _GroupFind1to1SessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupFind1to1SessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _GroupSendMessageNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _GroupSendMessageDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _SenderKeyGenerateNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _SenderKeyGenerateDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _GroupHandleIncomingNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Int32);
+typedef _GroupHandleIncomingDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, int);
 
-typedef _SenderKeyGetDistributionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _SenderKeyGetDistributionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _GroupPrepareOutgoingNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _GroupPrepareOutgoingDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _SenderKeyStoreNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _SenderKeyStoreDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
-
-typedef _SenderKeyCheckReadyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
-typedef _SenderKeyCheckReadyDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
-
-typedef _GroupEncryptNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupEncryptDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
-
-typedef _GroupDecryptNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int32, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _GroupDecryptDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, int, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _GroupAfterSentNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _GroupAfterSentDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
 
 // ---------------------------------------------------------------------------
 // Library loading
@@ -628,20 +610,14 @@ final _signalSessionExistsForEmailSession = _lib.lookupFunction<_SignalSessionEx
 final _signalSessionClose = _lib.lookupFunction<_SignalSessionCloseNative, _SignalSessionCloseDart>('signal_session_close');
 final _signalStorePeerPrekey = _lib.lookupFunction<_SignalStorePeerPrekeyNative, _SignalStorePeerPrekeyDart>('signal_store_peer_prekey');
 
-// Group messaging lookups
+// Group messaging lookups (MLS)
 final _groupCreate = _lib.lookupFunction<_GroupCreateNative, _GroupCreateDart>('group_create');
-final _groupSetXReplyId = _lib.lookupFunction<_GroupSetXReplyIdNative, _GroupSetXReplyIdDart>('group_set_x_reply_id');
-final _groupAddMember = _lib.lookupFunction<_GroupAddMemberNative, _GroupAddMemberDart>('group_add_member');
-final _groupRemoveMember = _lib.lookupFunction<_GroupRemoveMemberNative, _GroupRemoveMemberDart>('group_remove_member');
 final _groupGetInfo = _lib.lookupFunction<_GroupGetInfoNative, _GroupGetInfoDart>('group_get_info');
 final _groupList = _lib.lookupFunction<_GroupListNative, _GroupListDart>('group_list');
-final _groupFind1to1Session = _lib.lookupFunction<_GroupFind1to1SessionNative, _GroupFind1to1SessionDart>('group_find_1to1_session');
-final _senderKeyGenerate = _lib.lookupFunction<_SenderKeyGenerateNative, _SenderKeyGenerateDart>('sender_key_generate');
-final _senderKeyGetDistribution = _lib.lookupFunction<_SenderKeyGetDistributionNative, _SenderKeyGetDistributionDart>('sender_key_get_distribution');
-final _senderKeyStore = _lib.lookupFunction<_SenderKeyStoreNative, _SenderKeyStoreDart>('sender_key_store');
-final _senderKeyCheckReady = _lib.lookupFunction<_SenderKeyCheckReadyNative, _SenderKeyCheckReadyDart>('sender_key_check_ready');
-final _groupEncrypt = _lib.lookupFunction<_GroupEncryptNative, _GroupEncryptDart>('group_encrypt');
-final _groupDecrypt = _lib.lookupFunction<_GroupDecryptNative, _GroupDecryptDart>('group_decrypt');
+final _groupSendMessage = _lib.lookupFunction<_GroupSendMessageNative, _GroupSendMessageDart>('group_send_message');
+final _groupHandleIncoming = _lib.lookupFunction<_GroupHandleIncomingNative, _GroupHandleIncomingDart>('group_handle_incoming');
+final _groupPrepareOutgoing = _lib.lookupFunction<_GroupPrepareOutgoingNative, _GroupPrepareOutgoingDart>('group_prepare_outgoing');
+final _groupAfterSent = _lib.lookupFunction<_GroupAfterSentNative, _GroupAfterSentDart>('group_after_sent');
 
 // ---------------------------------------------------------------------------
 // Idiomatic Dart data classes
@@ -767,23 +743,26 @@ class XMailer {
   static const String fileMeta   = attachMeta;     // File metadata (visible in UI)
   static const String fileChunk  = attachChunk;    // File chunk (hidden from UI)
 
-  // Group messaging (Sender Key, v1.1)
-  static const String senderKeyDist = '1.1.0';  // Sender Key distribution (via 1:1 DR)
-  static const String groupMsg       = '1.1.1';  // Group message (Sender Key encrypted)
-  static const String groupUpdate     = '1.1.2';  // Group member update notification
+  // Group messaging (MLS / RFC 9420, v2.0). Independent from 1:1 Double Ratchet.
+  static const String mlsKeyPackage = '2.0.0';  // KeyPackage publish / invite
+  static const String mlsWelcome    = '2.0.1';  // Welcome (invite to join group)
+  static const String mlsCommit     = '2.0.2';  // Commit (tree change: add/remove)
+  static const String mlsAppMsg     = '2.0.3';  // Group application message
 
   static const List<String> whitelist = [
     prekeyBundle, sessionInit, ratchetMsg, repairMsg, attachMeta, attachChunk,
-    senderKeyDist, groupMsg, groupUpdate,
+    mlsKeyPackage, mlsWelcome, mlsCommit, mlsAppMsg,
   ];
 
   static const List<String> keyExchange = [
-    exchange, newSession, senderKeyDist,
+    exchange, newSession, mlsKeyPackage,
   ];
 
   static bool isValid(String value) => whitelist.contains(value);
   static bool isKeyExchange(String? value) =>
       value != null && value.isNotEmpty && keyExchange.contains(value);
+  static bool isMls(String value) =>
+      value == mlsKeyPackage || value == mlsWelcome || value == mlsCommit || value == mlsAppMsg;
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,81 +1997,28 @@ class EmailCore {
     }
   }
 
-  // === Group messaging (Sender Key) ===
+  // === Group messaging (MLS / RFC 9420) ===
 
-  static String groupCreate(String account, String groupId, String groupEmail, String subject, List<String> members) {
+  /// Create a new MLS group. The owner sends an MLS invite to all members;
+  /// members reply with their KeyPackages, and the owner then sends Welcomes.
+  /// Returns JSON: {status, group_id, root_message_id, task_id}
+  static String groupCreate(String account, String subject, List<String> members) {
     final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final groupEmailPtr = groupEmail.toNativeUtf8();
     final subjectPtr = subject.toNativeUtf8();
     final membersJson = jsonEncode(members);
     final membersPtr = membersJson.toNativeUtf8();
     final outBuf = malloc<Uint8>(65536);
     try {
-      final rc = _groupCreate(accountPtr, groupIdPtr, groupEmailPtr, subjectPtr, membersPtr, outBuf.cast<Utf8>(), 65536);
+      final rc = _groupCreate(accountPtr, subjectPtr, membersPtr, outBuf.cast<Utf8>(), 65536);
       final result = outBuf.cast<Utf8>().toDartString();
       if (rc != 0) {
-        logWrite('[Group] groupCreate failed: rc=$rc, resp=$result');
+        logWrite('[MLS] groupCreate failed: rc=$rc, resp=$result');
       }
       return result;
     } finally {
       malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(groupEmailPtr);
       malloc.free(subjectPtr);
       malloc.free(membersPtr);
-      malloc.free(outBuf);
-    }
-  }
-
-  static String groupSetXReplyId(String account, String groupId, String xReplyId) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final xPtr = xReplyId.toNativeUtf8();
-    final outBuf = malloc<Uint8>(4096);
-    try {
-      final rc = _groupSetXReplyId(accountPtr, groupIdPtr, xPtr, outBuf.cast<Utf8>(), 4096);
-      final result = outBuf.cast<Utf8>().toDartString();
-      if (rc != 0) {
-        logWrite('[Group] groupSetXReplyId failed: rc=$rc, resp=$result');
-      }
-      return result;
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(xPtr);
-      malloc.free(outBuf);
-    }
-  }
-
-  static String groupAddMember(String account, String groupId, String memberEmail) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final memberPtr = memberEmail.toNativeUtf8();
-    final outBuf = malloc<Uint8>(4096);
-    try {
-      final rc = _groupAddMember(accountPtr, groupIdPtr, memberPtr, outBuf.cast<Utf8>(), 4096);
-      return outBuf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(memberPtr);
-      malloc.free(outBuf);
-    }
-  }
-
-  static String groupRemoveMember(String account, String groupId, String memberEmail) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final memberPtr = memberEmail.toNativeUtf8();
-    final outBuf = malloc<Uint8>(4096);
-    try {
-      final rc = _groupRemoveMember(accountPtr, groupIdPtr, memberPtr, outBuf.cast<Utf8>(), 4096);
-      return outBuf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(memberPtr);
       malloc.free(outBuf);
     }
   }
@@ -2123,109 +2049,58 @@ class EmailCore {
     }
   }
 
-  static String groupFind1to1Session(String account, String peerEmail) {
-    final accountPtr = account.toNativeUtf8();
-    final peerEmailPtr = peerEmail.toNativeUtf8();
-    final outBuf = malloc<Uint8>(512);
-    try {
-      _groupFind1to1Session(accountPtr, peerEmailPtr, outBuf.cast<Utf8>(), 512);
-      return outBuf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(peerEmailPtr);
-      malloc.free(outBuf);
-    }
-  }
-
-  static String senderKeyGenerate(String account, String groupId) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final outBuf = malloc<Uint8>(8192);
-    try {
-      _senderKeyGenerate(accountPtr, groupIdPtr, outBuf.cast<Utf8>(), 8192);
-      return outBuf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(outBuf);
-    }
-  }
-
-  static String senderKeyGetDistribution(String account, String groupId) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final outBuf = malloc<Uint8>(8192);
-    try {
-      _senderKeyGetDistribution(accountPtr, groupIdPtr, outBuf.cast<Utf8>(), 8192);
-      return outBuf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(outBuf);
-    }
-  }
-
-  static int senderKeyStore(String account, String groupId, String senderEmail, String chainKey, String signingPub, int epoch) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final senderPtr = senderEmail.toNativeUtf8();
-    final chainKeyPtr = chainKey.toNativeUtf8();
-    final signingPubPtr = signingPub.toNativeUtf8();
-    try {
-      return _senderKeyStore(accountPtr, groupIdPtr, senderPtr, chainKeyPtr, signingPubPtr, epoch);
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(senderPtr);
-      malloc.free(chainKeyPtr);
-      malloc.free(signingPubPtr);
-    }
-  }
-
-  static int senderKeyCheckReady(String account, String groupId) {
-    final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    try {
-      return _senderKeyCheckReady(accountPtr, groupIdPtr);
-    } finally {
-      malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-    }
-  }
-
-  static String groupEncrypt(String account, String groupId, String plaintext) {
+  /// Send a group application message. Returns JSON: {status, task_id, message_id}
+  static String groupSendMessage(String account, String groupId, String plaintext, String inReplyTo) {
     final accountPtr = account.toNativeUtf8();
     final groupIdPtr = groupId.toNativeUtf8();
     final plaintextPtr = plaintext.toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
     final outBuf = malloc<Uint8>(65536);
     try {
-      _groupEncrypt(accountPtr, groupIdPtr, plaintextPtr, outBuf.cast<Utf8>(), 65536);
-      return outBuf.cast<Utf8>().toDartString();
+      final rc = _groupSendMessage(accountPtr, groupIdPtr, plaintextPtr, inReplyToPtr, outBuf.cast<Utf8>(), 65536);
+      final result = outBuf.cast<Utf8>().toDartString();
+      if (rc != 0) {
+        logWrite('[MLS] groupSendMessage failed: rc=$rc, resp=$result');
+      }
+      return result;
     } finally {
       malloc.free(accountPtr);
       malloc.free(groupIdPtr);
       malloc.free(plaintextPtr);
+      malloc.free(inReplyToPtr);
       malloc.free(outBuf);
     }
   }
 
-  static String groupDecrypt(String account, String groupId, String senderEmail, int iteration, int epoch, String ciphertext, String signature) {
+  /// Handle an incoming MLS protocol message (invite/key_package/welcome/commit/app_msg).
+  /// Returns a Map with: {rc, group_id, plaintext}
+  static Map<String, dynamic> groupHandleIncoming(String account, String fromAddr, String xMailer, String bodyText, String messageId, String inReplyTo) {
     final accountPtr = account.toNativeUtf8();
-    final groupIdPtr = groupId.toNativeUtf8();
-    final senderPtr = senderEmail.toNativeUtf8();
-    final ciphertextPtr = ciphertext.toNativeUtf8();
-    final signaturePtr = signature.toNativeUtf8();
-    final outBuf = malloc<Uint8>(65536);
+    final fromPtr = fromAddr.toNativeUtf8();
+    final xMailerPtr = xMailer.toNativeUtf8();
+    final bodyPtr = bodyText.toNativeUtf8();
+    final msgIdPtr = messageId.toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
+    final gidBuf = malloc<Uint8>(128);
+    final ptBuf = malloc<Uint8>(65536);
     try {
-      _groupDecrypt(accountPtr, groupIdPtr, senderPtr, iteration, epoch, ciphertextPtr, signaturePtr, outBuf.cast<Utf8>(), 65536);
-      return outBuf.cast<Utf8>().toDartString();
+      final rc = _groupHandleIncoming(
+          accountPtr, fromPtr, xMailerPtr, bodyPtr, msgIdPtr, inReplyToPtr,
+          gidBuf.cast<Utf8>(), 128, ptBuf.cast<Utf8>(), 65536);
+      return {
+        'rc': rc,
+        'group_id': gidBuf.cast<Utf8>().toDartString(),
+        'plaintext': ptBuf.cast<Utf8>().toDartString(),
+      };
     } finally {
       malloc.free(accountPtr);
-      malloc.free(groupIdPtr);
-      malloc.free(senderPtr);
-      malloc.free(ciphertextPtr);
-      malloc.free(signaturePtr);
-      malloc.free(outBuf);
+      malloc.free(fromPtr);
+      malloc.free(xMailerPtr);
+      malloc.free(bodyPtr);
+      malloc.free(msgIdPtr);
+      malloc.free(inReplyToPtr);
+      malloc.free(gidBuf);
+      malloc.free(ptBuf);
     }
   }
 }

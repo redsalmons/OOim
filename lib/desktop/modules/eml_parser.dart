@@ -172,58 +172,45 @@ EmlParsedContent parseEmlFile(String filePath, {String? account, String? session
       }
     }
 
-    // Group message (1.1.1): decrypt using the local Sender Key ratchet
-    if (effectiveXMailer == '1.1.1' &&
-        account != null && account.isNotEmpty &&
+    // Group application message (2.0.3): C++ side rewrites received .eml bodies
+    // with the decrypted plaintext; sent copies keep the {plaintext, ...} JSON.
+    if (effectiveXMailer == native.XMailer.mlsAppMsg &&
         sessionId != null && sessionId.startsWith('group_') &&
         textBody.isNotEmpty) {
       try {
         final bodyJson = jsonDecode(textBody);
-        if (bodyJson is Map && bodyJson.containsKey('ciphertext')) {
-          if (isSent == 1) {
-            // Self-sent message: use plaintext directly, no decryption needed
+        // Received copies are already rewritten to plaintext by the C++ side
+        // (download_pending). Sent copies keep the {plaintext, ...} task JSON.
+        // A "ciphertext" field means the C++ side hasn't processed it yet.
+        if (bodyJson is Map) {
+          if (bodyJson.containsKey('plaintext')) {
             textBody = bodyJson['plaintext'] as String? ?? '';
-          } else {
-            final groupId = sessionId.substring(6);
-            final gSender = (bodyJson['sender'] as String? ?? '').isNotEmpty
-                ? (bodyJson['sender'] as String? ?? '')
-                : (fromAddr ?? '');
-            final gIteration = bodyJson['iteration'] as int? ?? 0;
-            final gEpoch = bodyJson['epoch'] as int? ?? 0;
-            final gCiphertext = bodyJson['ciphertext'] as String? ?? '';
-            final gSignature = bodyJson['signature'] as String? ?? '';
-            if (gSender.isNotEmpty && gCiphertext.isNotEmpty && gSignature.isNotEmpty) {
-              final decJson = native.EmailCore.groupDecrypt(account, groupId, gSender, gIteration, gEpoch, gCiphertext, gSignature);
-              final dec = jsonDecode(decJson);
-              if (dec is Map && dec['status'] == 'success') {
-                textBody = dec['plaintext'] as String? ?? '';
-              } else {
-                textBody = '[Group decrypt failed]';
-              }
-            }
+          } else if (bodyJson.containsKey('ciphertext')) {
+            textBody = '[MLS message pending decryption]';
           }
         }
       } catch (e) {
-        // If body is not the encrypted JSON (already decrypted), keep as-is.
-        // Otherwise mark decryption failure.
-        if (textBody.contains('"ciphertext"') || textBody.contains('"signature"')) {
-          textBody = '[Group decrypt failed]';
-        }
-        native.EmailCore.logWrite('[EML] group msg parse/decrypt error: $e');
+        // If body is not JSON, keep as-is (already decrypted plaintext).
+        native.EmailCore.logWrite('[EML] group msg parse error: $e');
       }
     }
 
-    // Check if this is a handshake message (PREKEY_BUNDLE 1.0.0, SESSION_INIT 1.0.1,
-    // or group SENDER_KEY_DIST 1.1.0)
-    // Use X-Mailer header first (most reliable), then fall back to body JSON detection
+    // Check if this is a handshake/control message.
+    // MLS messages (2.0.x) and Signal prekey/session-init (1.0.0/1.0.1) are
+    // handshake messages — show the handshake emoji, not raw JSON.
     bool isHandshakeMessage = false;
     if (effectiveXMailer == '1.0.0' ||
         effectiveXMailer == '1.0.1' ||
-        effectiveXMailer.startsWith('1.1.0')) {
+        effectiveXMailer == native.XMailer.mlsKeyPackage ||
+        effectiveXMailer == native.XMailer.mlsWelcome ||
+        effectiveXMailer == native.XMailer.mlsCommit) {
       isHandshakeMessage = true;
       textBody = '';
-    } else if (textBody.toLowerCase().contains('sender_key_distribution') ||
-               textBody.contains('[Sender Key distribution received]')) {
+    } else if (textBody.toLowerCase().contains('mls_invite') ||
+               textBody.toLowerCase().contains('mls_key_package') ||
+               textBody.toLowerCase().contains('mls_welcome') ||
+               textBody.toLowerCase().contains('mls_commit') ||
+               textBody.contains('[MLS handshake:')) {
       isHandshakeMessage = true;
       textBody = '';
     } else if (textBody.isNotEmpty &&

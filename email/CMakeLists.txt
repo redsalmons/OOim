@@ -4,6 +4,24 @@ project(EmailCore CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Build the Rust MLS FFI crate (staticlib) before linking.
+# Uses the system proxy via CARGO_HTTP_PROXY if set in the environment.
+set(MLS_FFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mls_ffi")
+set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/libmls_ffi.a")
+if(DEFINED ENV{CARGO_HTTP_PROXY})
+    set(_cargo_proxy "CARGO_HTTP_PROXY=$ENV{CARGO_HTTP_PROXY}")
+else()
+    set(_cargo_proxy "")
+endif()
+add_custom_command(
+    OUTPUT ${MLS_FFI_LIB}
+    COMMAND ${_cargo_proxy} cargo build --release --manifest-path ${MLS_FFI_DIR}/Cargo.toml
+    WORKING_DIRECTORY ${MLS_FFI_DIR}
+    COMMENT "Building Rust MLS FFI static library"
+    VERBATIM
+)
+add_custom_target(mls_ffi_build DEPENDS ${MLS_FFI_LIB})
+
 # Find SQLite3
 find_package(SQLite3 REQUIRED)
 
@@ -76,7 +94,7 @@ add_library(email_core STATIC
     signal/signal_protocol.cpp
     signal/signal_message.cpp
     signal/signal_c_api.cpp
-    signal/sender_key.cpp
+    signal/mls_group.cpp
     signal/group_c_api.cpp
     email_core.h
     email_core_common.h
@@ -90,7 +108,7 @@ add_library(email_core STATIC
     persistence/file_transfer_repo.cpp
     persistence/signal_key_repo.cpp
     persistence/signal_session_repo.cpp
-    persistence/sender_key_repo.cpp
+    persistence/mls_repo.cpp
     persistence/group_session_repo.cpp
 )
 
@@ -108,7 +126,7 @@ add_library(email_core_shared SHARED
     signal/signal_protocol.cpp
     signal/signal_message.cpp
     signal/signal_c_api.cpp
-    signal/sender_key.cpp
+    signal/mls_group.cpp
     signal/group_c_api.cpp
     email_core.h
     email_core_common.h
@@ -122,7 +140,7 @@ add_library(email_core_shared SHARED
     persistence/file_transfer_repo.cpp
     persistence/signal_key_repo.cpp
     persistence/signal_session_repo.cpp
-    persistence/sender_key_repo.cpp
+    persistence/mls_repo.cpp
     persistence/group_session_repo.cpp
 )
 set_target_properties(email_core_shared PROPERTIES
@@ -151,9 +169,18 @@ target_include_directories(email_core_shared PUBLIC
     ${OPENSSL_INCLUDE_DIR}
 )
 
-# Link SQLite3, EmailComm, and vmime
+# Link SQLite3, EmailComm, vmime, and the Rust MLS static library
 target_link_libraries(email_core SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib iconv)
 target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib z iconv)
+
+# Link the Rust MLS static library into the shared lib (Flutter-facing).
+# macOS system libs that the Rust staticlib depends on are pulled in here.
+add_dependencies(email_core_shared mls_ffi_build)
+target_link_libraries(email_core_shared
+    ${MLS_FFI_LIB}
+    "-framework Security" "-framework Foundation" "-framework CoreFoundation"
+    -lpthread -ldl -lm
+)
 
 # Sign the shared library on macOS to prevent code signing crashes
 if(APPLE)

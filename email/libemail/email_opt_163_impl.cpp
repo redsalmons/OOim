@@ -744,8 +744,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // If encrypt_method not specified, infer from X-Mailer
         if (encrypt_method == 0) {
             if (x_session_chart == XMailer::SESSION_INIT ||
-                x_session_chart == XMailer::RATCHET_MSG ||
-                x_session_chart == XMailer::SENDER_KEY_DIST) {
+                x_session_chart == XMailer::RATCHET_MSG) {
                 encrypt_method = 1;
             }
         }
@@ -898,29 +897,10 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         }
 
         // For group messages, ensure all members' Sender Keys are ready before sending
-        if (x_session_chart == XMailer::GROUP_MSG) {
-            try {
-                auto bodyJson = nlohmann::json::parse(body);
-                // in_reply_to is the local message_id of the previous group message; resolve the group via the chain
-                std::string gParent = bodyJson.value("in_reply_to", "");
-                if (!gParent.empty()) {
-                    static EmailRepo s_grpEmailRepo;
-                    int64_t gid = s_grpEmailRepo.findGroupIdByMessageId(email_, gParent);
-                    if (gid <= 0) {
-                        last_error_ = "Group not resolved from reply chain";
-                        LOG_INFO("163 send_email: aborting GROUP_MSG, parent in_reply_to=%s not found\n", gParent.c_str());
-                        return false;
-                    }
-                    std::string gidStr = std::to_string(gid);
-                    if (sender_key_check_ready(email_.c_str(), gidStr.c_str()) != 1) {
-                        last_error_ = "Group sender keys not ready";
-                        LOG_INFO("163 send_email: aborting GROUP_MSG, not ready for group=%s\n", gidStr.c_str());
-                        return false;
-                    }
-                }
-            } catch (const std::exception& e) {
-                LOG_INFO("163 send_email: failed to validate GROUP_MSG readiness: %s\n", e.what());
-            }
+        if (XMailer::isMls(x_session_chart) && x_session_chart != XMailer::MLS_KEY_PACKAGE) {
+            // MLS messages: no pre-send validation here; the task processor handles encryption
+            // and the Rust library validates group state. Just log for visibility.
+            LOG_INFO("163 send_email: MLS message x_mailer=%s\n", x_session_chart.c_str());
         }
 
         // Inject x_message_id and last_message_id into body for encrypted and exchange types
@@ -1004,11 +984,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                     if (sigResp.value("status", "") == "success") {
                         auto msgJson = sigResp["message"];
                         bodyToSend = msgJson.dump();
-                        if (original_x_session_chart == XMailer::SENDER_KEY_DIST) {
-                            x_session_chart = XMailer::SENDER_KEY_DIST;
-                        } else {
-                            x_session_chart = XMailer::RATCHET_MSG;
-                        }
+                        x_session_chart = XMailer::RATCHET_MSG;
                         useSignal = true;
                     } else {
                         LOG_INFO("163 send_email: signal_session_encrypt returned error status\n");
@@ -1060,9 +1036,9 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // If Signal protocol is not used for this message, do not set any X-Mailer.
         // This prevents plain emails (encrypt_method=0) from being misclassified as Signal messages
         // on the receiver side.
-        // Exception: PREKEY_BUNDLE (1.0.0) and GROUP_MSG (1.1.1) need X-Mailer.
+        // Exception: PREKEY_BUNDLE (1.0.0) and MLS messages (2.0.x) need X-Mailer.
         if (!useSignal && original_x_session_chart != XMailer::PREKEY_BUNDLE &&
-            original_x_session_chart != XMailer::GROUP_MSG) {
+            !XMailer::isMls(original_x_session_chart)) {
             x_session_chart.clear();
         }
 
@@ -1183,11 +1159,9 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                     // Save Signal session_id mapping to email session
                     // (moved after email_add_email_to_session below, since the session row must exist first)
 
-                    // Group messages (SENDER_KEY_DIST / GROUP_MSG) only borrow the 1:1 channel for
-                    // transport; they are associated with their group session by the task processor,
-                    // never with the 1:1 email session.
-                    bool isGroupMsg = (original_x_session_chart == XMailer::SENDER_KEY_DIST ||
-                                       original_x_session_chart == XMailer::GROUP_MSG);
+                    // MLS group messages only borrow the SMTP channel for transport; they are
+                    // associated with their group session by the task processor, never with 1:1.
+                    bool isGroupMsg = XMailer::isMls(original_x_session_chart);
                     if (!isGroupMsg) {
                         char session_buffer[8192];
                         int encMethod = needsEncryption ? 1 : (encrypt_method == 1 ? 1 : 0);

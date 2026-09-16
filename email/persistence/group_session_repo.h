@@ -10,6 +10,7 @@ struct GroupSessionRecord {
     std::string groupId;
     std::string groupEmail;
     std::string xReplyId;
+    std::string xSessionId;           // shared session id carried in every message body
     std::string subject;
     std::vector<std::string> members;  // member email list
     std::string owner;                // creator account
@@ -30,6 +31,9 @@ public:
 
     // Load group session by xReplyId and local account
     bool loadByXReplyId(const std::string& xReplyId, const std::string& account, GroupSessionRecord& out);
+
+    // Load group session by xSessionId (the x-session-id carried in message bodies)
+    bool loadBySessionId(const std::string& xSessionId, const std::string& account, GroupSessionRecord& out);
 
     // Set xReplyId for an existing group
     bool setXReplyId(const std::string& groupId, const std::string& xReplyId);

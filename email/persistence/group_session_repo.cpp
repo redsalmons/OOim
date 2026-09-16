@@ -24,6 +24,22 @@ static std::vector<std::string> jsonToMembers(const std::string& s) {
     return result;
 }
 
+// Column order: group_id, group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at
+static void fillRecord(sqlite3_stmt* stmt, GroupSessionRecord& out) {
+    out.groupId = std::to_string(sqlite3_column_int64(stmt, 0));
+    out.groupEmail = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
+    out.xReplyId = sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
+    out.xSessionId = sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
+    out.subject = sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "";
+    out.members = jsonToMembers(sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "");
+    out.owner = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
+    out.account = sqlite3_column_text(stmt, 7) ? (const char*)sqlite3_column_text(stmt, 7) : "";
+    out.epoch = sqlite3_column_int(stmt, 8);
+    out.status = sqlite3_column_int(stmt, 9);
+    out.createdAt = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
+    out.updatedAt = sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
+}
+
 bool GroupSessionRepo::createGroup(GroupSessionRecord& rec) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
@@ -37,8 +53,8 @@ bool GroupSessionRepo::createGroup(GroupSessionRecord& rec) {
         if (rec.groupEmail.empty()) rec.groupEmail = "group_" + rec.groupId + "@oim";
 
         const char* sql = "INSERT OR IGNORE INTO group_session "
-                          "(group_id, group_email, x_reply_id, subject, members, owner, account, epoch, status, created_at, updated_at) "
-                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'));";
+                          "(group_id, group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'));";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
         sqlite3_bind_int64(stmt, 1, gid);
@@ -48,18 +64,23 @@ bool GroupSessionRepo::createGroup(GroupSessionRecord& rec) {
         } else {
             sqlite3_bind_text(stmt, 3, rec.xReplyId.c_str(), -1, SQLITE_TRANSIENT);
         }
-        sqlite3_bind_text(stmt, 4, rec.subject.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, membersToJson(rec.members).c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, rec.owner.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 7, rec.account.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 8, rec.epoch);
-        sqlite3_bind_int(stmt, 9, rec.status);
+        if (rec.xSessionId.empty()) {
+            sqlite3_bind_null(stmt, 4);
+        } else {
+            sqlite3_bind_text(stmt, 4, rec.xSessionId.c_str(), -1, SQLITE_TRANSIENT);
+        }
+        sqlite3_bind_text(stmt, 5, rec.subject.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, membersToJson(rec.members).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, rec.owner.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, rec.account.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 9, rec.epoch);
+        sqlite3_bind_int(stmt, 10, rec.status);
         sqlite3_step(stmt); // ignore conflict; if exists, we just keep it
         sqlite3_finalize(stmt);
     } else {
         const char* sql = "INSERT INTO group_session "
-                          "(group_email, x_reply_id, subject, members, owner, account, epoch, status, created_at, updated_at) "
-                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'));";
+                          "(group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'));";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
         sqlite3_bind_text(stmt, 1, "", -1, SQLITE_TRANSIENT);
@@ -68,12 +89,17 @@ bool GroupSessionRepo::createGroup(GroupSessionRecord& rec) {
         } else {
             sqlite3_bind_text(stmt, 2, rec.xReplyId.c_str(), -1, SQLITE_TRANSIENT);
         }
-        sqlite3_bind_text(stmt, 3, rec.subject.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, membersToJson(rec.members).c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, rec.owner.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, rec.account.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 7, rec.epoch);
-        sqlite3_bind_int(stmt, 8, rec.status);
+        if (rec.xSessionId.empty()) {
+            sqlite3_bind_null(stmt, 3);
+        } else {
+            sqlite3_bind_text(stmt, 3, rec.xSessionId.c_str(), -1, SQLITE_TRANSIENT);
+        }
+        sqlite3_bind_text(stmt, 4, rec.subject.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, membersToJson(rec.members).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, rec.owner.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, rec.account.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 8, rec.epoch);
+        sqlite3_bind_int(stmt, 9, rec.status);
         bool ok = sqlite3_step(stmt) == SQLITE_DONE;
         sqlite3_finalize(stmt);
         if (!ok) return false;
@@ -103,7 +129,7 @@ bool GroupSessionRepo::loadGroup(const std::string& groupId, GroupSessionRecord&
     int64_t gid = 0;
     try { gid = std::stoll(groupId); } catch (...) { return false; }
 
-    const char* sql = "SELECT group_id, group_email, x_reply_id, subject, members, owner, account, epoch, status, created_at, updated_at "
+    const char* sql = "SELECT group_id, group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at "
                       "FROM group_session WHERE group_id=? LIMIT 1;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
@@ -112,17 +138,7 @@ bool GroupSessionRepo::loadGroup(const std::string& groupId, GroupSessionRecord&
 
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        out.groupId = std::to_string(sqlite3_column_int64(stmt, 0));
-        out.groupEmail = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
-        out.xReplyId = sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
-        out.subject = sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-        out.members = jsonToMembers(sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "");
-        out.owner = sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
-        out.account = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
-        out.epoch = sqlite3_column_int(stmt, 7);
-        out.status = sqlite3_column_int(stmt, 8);
-        out.createdAt = sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "";
-        out.updatedAt = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
+        fillRecord(stmt, out);
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -135,7 +151,7 @@ bool GroupSessionRepo::loadByXReplyId(const std::string& xReplyId, const std::st
     sqlite3* db = conn.get();
     if (!db) return false;
 
-    const char* sql = "SELECT group_id, group_email, x_reply_id, subject, members, owner, account, epoch, status, created_at, updated_at "
+    const char* sql = "SELECT group_id, group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at "
                       "FROM group_session WHERE x_reply_id=? AND account=? LIMIT 1;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
@@ -145,17 +161,30 @@ bool GroupSessionRepo::loadByXReplyId(const std::string& xReplyId, const std::st
 
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        out.groupId = std::to_string(sqlite3_column_int64(stmt, 0));
-        out.groupEmail = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
-        out.xReplyId = sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
-        out.subject = sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-        out.members = jsonToMembers(sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "");
-        out.owner = sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
-        out.account = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
-        out.epoch = sqlite3_column_int(stmt, 7);
-        out.status = sqlite3_column_int(stmt, 8);
-        out.createdAt = sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "";
-        out.updatedAt = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
+        fillRecord(stmt, out);
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool GroupSessionRepo::loadBySessionId(const std::string& xSessionId, const std::string& account, GroupSessionRecord& out) {
+    if (xSessionId.empty() || account.empty()) return false;
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "SELECT group_id, group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at "
+                      "FROM group_session WHERE x_session_id=? AND account=? LIMIT 1;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, xSessionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        fillRecord(stmt, out);
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -267,7 +296,7 @@ std::vector<GroupSessionRecord> GroupSessionRepo::listGroups(const std::string& 
     std::vector<GroupSessionRecord> result;
     if (!db) return result;
 
-    const char* sql = "SELECT group_id, group_email, x_reply_id, subject, members, owner, account, epoch, status, created_at, updated_at "
+    const char* sql = "SELECT group_id, group_email, x_reply_id, x_session_id, subject, members, owner, account, epoch, status, created_at, updated_at "
                       "FROM group_session WHERE account=? AND status=0;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
@@ -275,17 +304,7 @@ std::vector<GroupSessionRecord> GroupSessionRepo::listGroups(const std::string& 
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         GroupSessionRecord rec;
-        rec.groupId = std::to_string(sqlite3_column_int64(stmt, 0));
-        rec.groupEmail = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
-        rec.xReplyId = sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
-        rec.subject = sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-        rec.members = jsonToMembers(sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "");
-        rec.owner = sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
-        rec.account = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
-        rec.epoch = sqlite3_column_int(stmt, 7);
-        rec.status = sqlite3_column_int(stmt, 8);
-        rec.createdAt = sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "";
-        rec.updatedAt = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
+        fillRecord(stmt, rec);
         result.push_back(rec);
     }
     sqlite3_finalize(stmt);

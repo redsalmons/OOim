@@ -137,172 +137,6 @@ extern "C" int email_get_last_error(int configIndex, char* outBuf, int outSize) 
     return GetLastError_c(configIndex, outBuf, outSize);
 }
 
-// Helper to process a sender_key_distribution wrapper (from SENDER_KEY_DIST or embedded in SESSION_INIT)
-// Returns the local group_id if resolved/created, empty string on failure.
-static std::string processSenderKeyDistribution(const std::string& accountStr,
-                                         const std::string& eml_from,
-                                         const std::string& eml_to,
-                                         const std::string& eml_subject,
-                                         const std::string& message_id,
-                                         const std::string& in_reply_to,
-                                         const std::string& x_session_chart,
-                                         const std::string& bodyText,
-                                         const std::string& filePath,
-                                         const std::string& uuid) {
-    std::string localGroupId;
-    try {
-        auto distJson = json::parse(bodyText);
-        if (distJson.value("type", "") != "sender_key_distribution") {
-            return localGroupId;
-        }
-
-        // Chain semantics:
-        //   x_message_id = sender's locally generated id of this message
-        //   x_reply_to   = local x_message_id of the previous message in the group; empty => this is the root
-        std::string bodyMsgId = distJson.value("x_message_id", "");
-        if (bodyMsgId.empty()) bodyMsgId = message_id;
-        std::string parentId = distJson.value("x_reply_to", "");
-        std::string gSubject = distJson.value("subject", "");
-        std::string gOwner = distJson.value("owner", "");
-        auto membersArr = distJson.value("members", json::array());
-
-        GroupSessionRepo groupRepo;
-        static EmailRepo s_skEmailRepo;
-
-        if (parentId.empty()) {
-            // Root of a new group: the root message_id identifies the group
-            GroupSessionRecord gRec;
-            if (groupRepo.loadByXReplyId(bodyMsgId, accountStr, gRec)) {
-                localGroupId = gRec.groupId;
-                LOG_INFO("[DB] processSenderKeyDistribution: root message_id=%s already has group=%s\n", bodyMsgId.c_str(), localGroupId.c_str());
-            } else {
-                GroupSessionRecord rec;
-                rec.xReplyId = bodyMsgId;
-                rec.subject = gSubject;
-                for (auto& m : membersArr) {
-                    if (m.is_string()) rec.members.push_back(m.get<std::string>());
-                }
-                rec.owner = gOwner;
-                rec.account = accountStr;
-                if (groupRepo.createGroup(rec)) {
-                    localGroupId = rec.groupId;
-                    LOG_INFO("[DB] processSenderKeyDistribution: created local group=%s from root message_id=%s account=%s\n", localGroupId.c_str(), bodyMsgId.c_str(), accountStr.c_str());
-                } else {
-                    LOG_INFO("[DB] processSenderKeyDistribution: failed to create group for root message_id=%s account=%s\n", bodyMsgId.c_str(), accountStr.c_str());
-                    return "";
-                }
-            }
-        } else {
-            // Reply in the chain: same group as the parent message
-            int64_t gid = s_skEmailRepo.findGroupIdByMessageId(accountStr, parentId);
-            if (gid <= 0) {
-                LOG_INFO("[DB] processSenderKeyDistribution: parent in_reply_to=%s not found for account=%s\n", parentId.c_str(), accountStr.c_str());
-                return "";
-            }
-            localGroupId = std::to_string(gid);
-            LOG_INFO("[DB] processSenderKeyDistribution: resolved via chain in_reply_to=%s -> group=%s\n", parentId.c_str(), localGroupId.c_str());
-        }
-
-        // Store the received Sender Key
-        auto senderKey = distJson.value("sender_key", json::object());
-        if (senderKey.is_object()) {
-            std::string gChainKey = senderKey.value("chain_key", "");
-            std::string gSigningPub = senderKey.value("signing_pub", "");
-            int gEpoch = senderKey.value("epoch", 0);
-            if (!gChainKey.empty() && !gSigningPub.empty()) {
-                int storeRc = sender_key_store(
-                    accountStr.c_str(), localGroupId.c_str(), eml_from.c_str(),
-                    gChainKey.c_str(), gSigningPub.c_str(), gEpoch
-                );
-                LOG_INFO("[DB] processSenderKeyDistribution: sender_key_store rc=%d for group=%s from=%s\n",
-                         storeRc, localGroupId.c_str(), eml_from.c_str());
-            }
-        }
-
-        // Distribute our own Sender Key on first receipt for this account.
-        // If the account already has a Sender Key for this group, do not re-distribute
-        // (prevents infinite ping-pong); otherwise generate one and fan it out.
-        std::vector<char> distOut(65536);
-        int distRc = sender_key_get_distribution(accountStr.c_str(), localGroupId.c_str(), distOut.data(), (int)distOut.size());
-        if (distRc == 0) {
-            LOG_INFO("[DB] processSenderKeyDistribution: own Sender Key already exists for group=%s, skipping echo\n", localGroupId.c_str());
-        } else {
-            std::vector<char> genOut(65536);
-            int genRc = sender_key_generate(accountStr.c_str(), localGroupId.c_str(), genOut.data(), (int)genOut.size());
-            if (genRc != 0) {
-                LOG_INFO("[DB] processSenderKeyDistribution: sender_key_generate failed rc=%d\n", genRc);
-            } else {
-                for (auto& m : membersArr) {
-                    if (!m.is_string()) continue;
-                    std::string other = m.get<std::string>();
-                    if (other == accountStr) continue;
-
-                    char oneToOneSid[512];
-                    oneToOneSid[0] = '\0';
-                    int findRc = group_find_1to1_session(accountStr.c_str(), other.c_str(),
-                                                         oneToOneSid, sizeof(oneToOneSid));
-                    if (findRc != 0 || oneToOneSid[0] == '\0') {
-                        LOG_INFO("[DB] processSenderKeyDistribution: no active 1:1 session for %s, skipping Sender Key echo\n",
-                                 other.c_str());
-                        continue;
-                    }
-
-                    std::string echoDomain = accountStr.substr(accountStr.find('@') + 1);
-                    std::string echoMsgId = "<" + std::to_string(std::time(nullptr)) + "." + std::to_string(std::rand()) + "@" + echoDomain + ">";
-
-                    // Echo chains onto the message we just received
-                    json echoWrapper;
-                    echoWrapper["type"] = "sender_key_distribution";
-                    echoWrapper["x_message_id"] = echoMsgId;
-                    echoWrapper["x_reply_to"] = bodyMsgId;
-                    echoWrapper["subject"] = gSubject;
-                    echoWrapper["members"] = membersArr;
-                    echoWrapper["owner"] = gOwner;
-                    echoWrapper["sender_key"] = json::parse(std::string(genOut.data()));
-                    std::string echoBody = echoWrapper.dump();
-
-                    int taskRc = email_task_insert(
-                        accountStr.c_str(), other.c_str(), gSubject.c_str(), echoBody.c_str(),
-                        bodyMsgId.c_str(), echoMsgId.c_str(), "", oneToOneSid, XMailer::SENDER_KEY_DIST
-                    );
-                    LOG_INFO("[DB] processSenderKeyDistribution: queued echo to %s with 1:1 session=%s task rc=%d\n",
-                             other.c_str(), oneToOneSid, taskRc);
-                }
-            }
-        }
-
-        // Rewrite EML with placeholder
-        std::string placeholder = "[Sender Key distribution received]";
-        std::string newEml;
-        newEml.reserve(placeholder.size() + 256);
-        if (!eml_from.empty()) newEml += "From: " + eml_from + "\r\n";
-        if (!eml_to.empty()) newEml += "To: " + eml_to + "\r\n";
-        if (!eml_subject.empty()) newEml += "Subject: " + eml_subject + "\r\n";
-        if (!bodyMsgId.empty()) newEml += "Message-ID: " + bodyMsgId + "\r\n";
-        if (!parentId.empty()) newEml += "In-Reply-To: " + parentId + "\r\n";
-        newEml += "X-Mailer: " + x_session_chart + "\r\n";
-        newEml += "MIME-Version: 1.0\r\n";
-        newEml += "Content-Type: text/plain; charset=utf-8\r\n";
-        newEml += "Content-Transfer-Encoding: 8bit\r\n";
-        newEml += "\r\n";
-        newEml += placeholder;
-
-        try {
-            std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
-            if (out.is_open()) {
-                out.write(newEml.data(), static_cast<std::streamsize>(newEml.size()));
-                out.close();
-                LOG_INFO("[DB] processSenderKeyDistribution: wrote placeholder for uuid=%s\n", uuid.c_str());
-            }
-        } catch (const std::exception& we) {
-            LOG_INFO("[DB] processSenderKeyDistribution: failed to write placeholder for uuid=%s: %s\n", uuid.c_str(), we.what());
-        }
-    } catch (const std::exception& e) {
-        LOG_INFO("[DB] processSenderKeyDistribution: failed: %s\n", e.what());
-    }
-    return localGroupId;
-}
-
 extern "C" int email_download_pending_bodies(int configIndex, const char* account,
                                               const char* storageDir, char* outJson, int outSize) {
     if (!g_db) {
@@ -478,8 +312,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         } else if (x_session_chart == XMailer::PREKEY_BUNDLE) {
             exchangeEmls.push_back(de);
         } else if (x_session_chart == XMailer::RATCHET_MSG || x_session_chart == XMailer::ATTACH_META ||
-                   x_session_chart == XMailer::ATTACH_CHUNK || x_session_chart == XMailer::SENDER_KEY_DIST ||
-                   x_session_chart == XMailer::GROUP_MSG) {
+                   x_session_chart == XMailer::ATTACH_CHUNK || XMailer::isMls(x_session_chart)) {
             dataEmls.push_back(de);
         } else {
             otherEmls.push_back(de);
@@ -680,8 +513,81 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 continue;
             }
 
-            if (x_session_chart == XMailer::SESSION_INIT || x_session_chart == XMailer::RATCHET_MSG ||
-                x_session_chart == XMailer::SENDER_KEY_DIST) {
+            // MLS protocol messages (2.0.x): invite / key_package / welcome / commit / app message.
+            // Body carries x_message_id / x_reply_to; group is resolved via the chain.
+            // This must run BEFORE the Signal block below, since MLS messages are not Signal messages.
+            if (XMailer::isMls(x_session_chart)) {
+                LOG_INFO("[DB] download_pending: MLS %s, processing\n", x_session_chart.c_str());
+                try {
+                    vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
+                    msg->parse(emlContent);
+                    std::string textBody, htmlBody;
+                    json dummyAttachments = json::array();
+                    bool dummyHasAttachment = false;
+                    extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
+                    std::string bodyText = textBody.empty() ? htmlBody : textBody;
+
+                    char outGroupId[128] = {0};
+                    char outPlaintext[65536] = {0};
+                    int mlsRc = group_handle_incoming(
+                        accountStr.c_str(), eml_from.c_str(), x_session_chart.c_str(), bodyText.c_str(),
+                        message_id.c_str(), in_reply_to.c_str(),
+                        outGroupId, sizeof(outGroupId), outPlaintext, sizeof(outPlaintext));
+                    std::string groupId(outGroupId);
+                    std::string plaintext(outPlaintext);
+
+                    if (mlsRc == 0) {
+                        // Rewrite the local .eml with the plaintext (or a placeholder for control messages)
+                        std::string display = plaintext.empty()
+                            ? std::string("[MLS handshake: ") + x_session_chart + "]"
+                            : plaintext;
+                        std::string newEml;
+                        newEml.reserve(display.size() + 256);
+                        if (!eml_from.empty()) newEml += "From: " + eml_from + "\r\n";
+                        if (!eml_to.empty()) newEml += "To: " + eml_to + "\r\n";
+                        if (!eml_subject.empty()) newEml += "Subject: " + eml_subject + "\r\n";
+                        if (!message_id.empty()) newEml += "Message-ID: " + message_id + "\r\n";
+                        if (!in_reply_to.empty()) newEml += "In-Reply-To: " + in_reply_to + "\r\n";
+                        newEml += "X-Mailer: " + x_session_chart + "\r\n";
+                        if (!groupId.empty()) newEml += "X-Group-Id: " + groupId + "\r\n";
+                        newEml += "MIME-Version: 1.0\r\n";
+                        newEml += "Content-Type: text/plain; charset=utf-8\r\n";
+                        newEml += "Content-Transfer-Encoding: 8bit\r\n";
+                        newEml += "\r\n";
+                        newEml += display;
+                        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+                        if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); }
+
+                        if (!groupId.empty()) {
+                            int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
+                            if (emailId > 0) {
+                                std::string sid = "group_" + groupId;
+                                char sr[4096];
+                                email_add_email_to_session(sid.c_str(), std::to_string(emailId).c_str(),
+                                                           accountStr.c_str(), 1, sr, sizeof(sr));
+                                LOG_INFO("[DB] download_pending: MLS %s added to session=%s\n", x_session_chart.c_str(), sid.c_str());
+                            }
+                        }
+                        s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
+                        s_emailRepo.setIslocal(pe, accountStr, 2);
+                        downloaded++;
+                        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
+                        continue;
+                    } else if (mlsRc == 1) {
+                        // Retry later (e.g. Commit arrived before Welcome)
+                        LOG_INFO("[DB] download_pending: MLS %s deferred (rc=1), will retry\n", x_session_chart.c_str());
+                        s_emailRepo.incrementRetryCount(pe, accountStr);
+                        // Keep islocal as-is so it is picked up again
+                        continue;
+                    } else {
+                        LOG_INFO("[DB] download_pending: MLS %s failed rc=%d\n", x_session_chart.c_str(), mlsRc);
+                    }
+                } catch (const std::exception& e) {
+                    LOG_INFO("[DB] download_pending: MLS processing failed: %s\n", e.what());
+                }
+            }
+
+            if (x_session_chart == XMailer::SESSION_INIT || x_session_chart == XMailer::RATCHET_MSG) {
             LOG_INFO("[DB] download_pending: X-Mailer=%s (Signal message), decrypting via signal_session_decrypt\n", x_session_chart.c_str());
             std::string signalInReplyTo;
             std::string signalMessageId;
@@ -776,39 +682,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 }
             } catch (const std::exception& e) {
                 LOG_INFO("[DB] download_pending: failed to decrypt Signal message: %s\n", e.what());
-            }
-
-            // SENDER_KEY_DIST (1.1.0): 1:1 DR-encrypted Sender Key distribution
-            if (x_session_chart == XMailer::SENDER_KEY_DIST) {
-                LOG_INFO("[DB] download_pending: SENDER_KEY_DIST, processing sender key wrapper\n");
-                try {
-                    vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
-                    msg->parse(emlContent);
-                    std::string textBody, htmlBody;
-                    json dummyAttachments = json::array();
-                    bool dummyHasAttachment = false;
-                    extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
-                    std::string bodyText = textBody.empty() ? htmlBody : textBody;
-
-                    // Prefer the sender's local ids carried in the Signal envelope over server-rewritten headers
-                    const std::string& skMsgId = signalMessageId.empty() ? message_id : signalMessageId;
-                    const std::string& skInReplyTo = signalInReplyTo.empty() ? in_reply_to : signalInReplyTo;
-                    std::string skGroupId = processSenderKeyDistribution(accountStr, eml_from, eml_to, eml_subject,
-                                                                         skMsgId, skInReplyTo, x_session_chart,
-                                                                         bodyText, filePath, pe);
-                    if (!skGroupId.empty()) {
-                        int64_t skEmailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
-                        if (skEmailId > 0) {
-                            std::string skSessionId = "group_" + skGroupId;
-                            char skSr[4096];
-                            email_add_email_to_session(skSessionId.c_str(), std::to_string(skEmailId).c_str(),
-                                                       accountStr.c_str(), 1, skSr, sizeof(skSr));
-                            LOG_INFO("[DB] download_pending: SENDER_KEY_DIST added to session=%s\n", skSessionId.c_str());
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    LOG_INFO("[DB] download_pending: SENDER_KEY_DIST processing failed: %s\n", e.what());
-                }
             }
 
             // SESSION_INIT: create or reuse session on receiver side
@@ -990,111 +863,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
             continue;
         }
-
-            // GROUP_MSG (1.1.1): group message encrypted with Sender Key
-            if (x_session_chart == XMailer::GROUP_MSG) {
-                LOG_INFO("[DB] download_pending: GROUP_MSG, decrypting via group_decrypt\n");
-                std::string groupMsgId = message_id;
-                std::string groupParentId = in_reply_to;
-                try {
-                    vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
-                    msg->parse(emlContent);
-                    std::string textBody, htmlBody;
-                    json dummyAttachments = json::array();
-                    bool dummyHasAttachment = false;
-                    extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
-                    std::string bodyText = textBody.empty() ? htmlBody : textBody;
-
-                    auto bodyJson = json::parse(bodyText);
-                    // Chain: body x_message_id = sender's local id; x_reply_to = previous group message's local id
-                    std::string gMsgId = bodyJson.value("x_message_id", "");
-                    if (gMsgId.empty()) gMsgId = message_id;
-                    std::string gParentId = bodyJson.value("x_reply_to", "");
-                    std::string gSender = bodyJson.value("sender", "");
-                    int gIteration = bodyJson.value("iteration", 0);
-                    int gEpoch = bodyJson.value("epoch", 0);
-                    std::string gCiphertext = bodyJson.value("ciphertext", "");
-                    std::string gSignature = bodyJson.value("signature", "");
-                    groupMsgId = gMsgId;
-                    groupParentId = gParentId;
-
-                    std::string localGroupId;
-                    int64_t gid = s_emailRepo.findGroupIdByMessageId(accountStr, gParentId);
-                    if (gid > 0) {
-                        localGroupId = std::to_string(gid);
-                        LOG_INFO("[DB] download_pending: GROUP_MSG resolved via chain in_reply_to=%s account=%s -> group=%s\n", gParentId.c_str(), accountStr.c_str(), localGroupId.c_str());
-                    } else {
-                        LOG_INFO("[DB] download_pending: GROUP_MSG parent in_reply_to=%s not found for account=%s\n", gParentId.c_str(), accountStr.c_str());
-                    }
-
-                    if (!localGroupId.empty() && !gSender.empty() && !gCiphertext.empty() && !gSignature.empty()) {
-                        std::vector<char> gOutBuf(65536);
-                        int gRc = group_decrypt(
-                            accountStr.c_str(), localGroupId.c_str(),
-                            gSender.c_str(), gIteration, gEpoch,
-                            gCiphertext.c_str(), gSignature.c_str(),
-                            gOutBuf.data(), (int)gOutBuf.size()
-                        );
-
-                        if (gRc == 0) {
-                            auto gResp = json::parse(std::string(gOutBuf.data()));
-                            std::string gPlaintext = gResp.value("plaintext", "");
-                            LOG_INFO("[DB] download_pending: group_decrypt success, group=%s, sender=%s, iter=%d, plaintext_len=%zu\n",
-                                     localGroupId.c_str(), gSender.c_str(), gIteration, gPlaintext.size());
-
-                            // Rewrite EML with decrypted plaintext
-                            emlContent.clear();
-                            emlContent.reserve(gPlaintext.size() + 256);
-                            if (!eml_from.empty()) emlContent += "From: " + eml_from + "\r\n";
-                            if (!eml_to.empty()) emlContent += "To: " + eml_to + "\r\n";
-                            if (!eml_subject.empty()) emlContent += "Subject: " + eml_subject + "\r\n";
-                            if (!gMsgId.empty()) emlContent += "Message-ID: " + gMsgId + "\r\n";
-                            if (!gParentId.empty()) emlContent += "In-Reply-To: " + gParentId + "\r\n";
-                            emlContent += "X-Mailer: " + x_session_chart + "\r\n";
-                            emlContent += "X-Group-Id: " + localGroupId + "\r\n";
-                            emlContent += "X-Group-Sender: " + gSender + "\r\n";
-                            emlContent += "MIME-Version: 1.0\r\n";
-                            emlContent += "Content-Type: text/plain; charset=utf-8\r\n";
-                            emlContent += "Content-Transfer-Encoding: 8bit\r\n";
-                            emlContent += "\r\n";
-                            emlContent += gPlaintext;
-
-                            try {
-                                std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
-                                if (out.is_open()) {
-                                    out.write(emlContent.data(), static_cast<std::streamsize>(emlContent.size()));
-                                    out.close();
-                                    LOG_INFO("[DB] download_pending: wrote decrypted GROUP_MSG EML for uuid=%s\n", pe.c_str());
-                                }
-                            } catch (...) {}
-
-                            // Associate with group session
-                            std::string groupSessionId = "group_" + localGroupId;
-                            int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
-                            if (emailId > 0) {
-                                char sr[4096];
-                                email_add_email_to_session(
-                                    groupSessionId.c_str(), std::to_string(emailId).c_str(),
-                                    accountStr.c_str(), 1, sr, sizeof(sr));
-                                LOG_INFO("[DB] download_pending: GROUP_MSG added to session=%s\n", groupSessionId.c_str());
-                            }
-                        } else {
-                            LOG_INFO("[DB] download_pending: group_decrypt failed, rc=%d\n", gRc);
-                        }
-                    } else {
-                        LOG_INFO("[DB] download_pending: GROUP_MSG missing fields, skipped\n");
-                    }
-                } catch (const std::exception& e) {
-                    LOG_INFO("[DB] download_pending: GROUP_MSG parse/decrypt failed: %s\n", e.what());
-                }
-
-                s_emailRepo.updateAfterDownload(pe, accountStr, groupMsgId, groupParentId, pe);
-                s_emailRepo.setIslocal(pe, accountStr, 2);
-                LOG_INFO("[DB] download_pending: set islocal=2 for GROUP_MSG uuid=%s\n", pe.c_str());
-                downloaded++;
-                results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
-                continue;
-            }
 
             // ATTACH_META (1.0.4): File metadata (visible in UI) — decrypt via Signal
             if (x_session_chart == XMailer::ATTACH_META) {
@@ -1729,16 +1497,33 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
         // Determine if this task needs Signal encryption
         int encryptMethod = 0;
         if (t.xSessionChart == XMailer::SESSION_INIT ||
-            t.xSessionChart == XMailer::RATCHET_MSG ||
-            t.xSessionChart == XMailer::SENDER_KEY_DIST) {
+            t.xSessionChart == XMailer::RATCHET_MSG) {
             encryptMethod = 1;
+        }
+
+        // MLS application messages: encrypt the plaintext body right before sending.
+        // The task body holds {x_message_id, x_reply_to, sender, plaintext}; we replace
+        // it with the wire body {x_message_id, x_reply_to, sender, ciphertext} and keep
+        // the plaintext locally via group_after_sent.
+        std::string localBody = t.body;
+        std::string wireBody = t.body;
+        if (XMailer::isMls(t.xSessionChart)) {
+            char outBody[65536] = {0};
+            int prc = group_prepare_outgoing(account, t.xSessionChart.c_str(), t.body.c_str(),
+                                             t.inReplyTo.c_str(), outBody, sizeof(outBody));
+            if (prc != 0) {
+                s_taskRepo.markFailed(t.id);
+                LOG_INFO("[Task] MLS prepare_outgoing failed id=%lld rc=%d\n", (long long)t.id, prc);
+                continue;
+            }
+            wireBody = outBody;
         }
 
         // Organize email content JSON
         json emailContent = {
             {"recipient", t.recipient},
             {"subject", t.subject},
-            {"body", t.body},
+            {"body", wireBody},
             {"in_reply_to", t.inReplyTo},
             {"message_id", t.messageId},
             {"x_message_id", t.xMessageId},
@@ -1758,37 +1543,23 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
             sentTasks.push_back({{"id", t.id}, {"message_id", t.messageId}});
             LOG_INFO("[Task] sent successfully and deleted id=%lld\n", (long long)t.id);
 
-            if (t.xSessionChart == XMailer::SENDER_KEY_DIST ||
-                t.xSessionChart == XMailer::GROUP_MSG) {
-                int64_t sentEmailId = s_emailRepo.findIdByMessageId(t.messageId, account);
-                if (sentEmailId > 0) {
-                    // Resolve the group of the sent message:
-                    //  - reply in the chain: same group as the parent (in_reply_to)
-                    //  - root SENDER_KEY_DIST (in_reply_to empty): the group we created, carried in sender_key.group_id
-                    std::string groupIdStr;
-                    if (!t.inReplyTo.empty()) {
-                        int64_t gid = s_emailRepo.findGroupIdByMessageId(account, t.inReplyTo);
-                        if (gid > 0) groupIdStr = std::to_string(gid);
-                    } else if (t.xSessionChart == XMailer::SENDER_KEY_DIST) {
-                        try {
-                            auto bodyJson = json::parse(t.body);
-                            groupIdStr = bodyJson.value("sender_key", json::object()).value("group_id", "");
-                        } catch (...) {}
-                    }
-
-                    if (!groupIdStr.empty()) {
-                        std::string groupSessionId = "group_" + groupIdStr;
-                        char addSr[4096];
-                        email_add_email_to_session(
-                            groupSessionId.c_str(), std::to_string(sentEmailId).c_str(),
-                            account, 1, addSr, sizeof(addSr));
-                        LOG_INFO("[Task] sent %s associated with group session=%s (in_reply_to=%s)\n",
-                                 t.xSessionChart.c_str(), groupSessionId.c_str(), t.inReplyTo.c_str());
-                    } else {
-                        LOG_INFO("[Task] sent %s but no group resolved (in_reply_to=%s)\n",
-                                 t.xSessionChart.c_str(), t.inReplyTo.c_str());
+            if (XMailer::isMls(t.xSessionChart)) {
+                // Resolve group + (for app messages) store the plaintext in the local .eml
+                std::string dataDir;
+                auto emailObj = oemailim::EmailHandler::g_EmailConfigIndices[configIndex];
+                if (emailObj) {
+                    auto delegate = emailObj->get_delegate();
+                    if (delegate) {
+                        auto d163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
+                        if (d163) dataDir = d163->get_data_dir();
+                        auto dOutlook = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate);
+                        if (dOutlook) dataDir = dOutlook->get_data_dir();
+                        auto dGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate);
+                        if (dGmail) dataDir = dGmail->get_data_dir();
                     }
                 }
+                group_after_sent(account, t.xSessionChart.c_str(), t.messageId.c_str(), t.inReplyTo.c_str(),
+                                 localBody.c_str(), dataDir.c_str());
             }
         } else {
             s_taskRepo.markFailed(t.id);

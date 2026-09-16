@@ -801,6 +801,31 @@ std::string EmailOptOutlookImpl::url_encode(const std::string& value) {
     return encoded.str();
 }
 
+std::string EmailOptOutlookImpl::json_escape_string(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (char c : value) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
 std::string EmailOptOutlookImpl::base64_url_encode_bytes(const std::vector<uint8_t>& input) {
     static const std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     std::string result;
@@ -1128,72 +1153,44 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     std::string email_b64 = base64_encode_bytes(std::vector<uint8_t>(email_msg.begin(), email_msg.end()));
     email_b64 = wrap_base64_lines(email_b64);
     
-    // Build Graph API request body
-    std::string json_body = R"({
-        "message": {
-            "subject": ")" + subject + R"(",
-            "body": {
-                "contentType": "HTML",
-                "content": ")" + body + R"("
-            },
-            "toRecipients": [)";
-    
-    // Handle multiple recipients
-    size_t start = 0, end;
-    bool first = true;
-    while ((end = recipient.find(',', start)) != std::string::npos) {
-        std::string addr = recipient.substr(start, end - start);
-        size_t b = addr.find_first_not_of(" \t");
-        size_t e2 = addr.find_last_not_of(" \t");
-        if (b != std::string::npos) {
-            if (!first) json_body += ",";
-            json_body += R"({"emailAddress":{"address":")" + addr.substr(b, e2 - b + 1) + R"("}})";
-            first = false;
-        }
-        start = end + 1;
-    }
+    // Build Graph API request body using nlohmann::json (avoids raw-string-literal pitfalls)
+    nlohmann::json jRecipients = nlohmann::json::array();
     {
+        size_t start = 0, end;
+        while ((end = recipient.find(',', start)) != std::string::npos) {
+            std::string addr = recipient.substr(start, end - start);
+            size_t b = addr.find_first_not_of(" \t");
+            size_t e2 = addr.find_last_not_of(" \t");
+            if (b != std::string::npos) {
+                jRecipients.push_back({{"emailAddress", {{"address", addr.substr(b, e2 - b + 1)}}}});
+            }
+            start = end + 1;
+        }
         std::string addr = recipient.substr(start);
         size_t b = addr.find_first_not_of(" \t");
         size_t e2 = addr.find_last_not_of(" \t");
         if (b != std::string::npos) {
-            if (!first) json_body += ",";
-            json_body += R"({"emailAddress":{"address":")" + addr.substr(b, e2 - b + 1) + R"("}})";
+            jRecipients.push_back({{"emailAddress", {{"address", addr.substr(b, e2 - b + 1)}}}});
         }
     }
-    
-    json_body += R"(],
-            "internetMessageHeaders": [
-                {
-                    "name": "X-Mailer",
-                    "value": ")" + x_session_chart + R"("
-                }"; 
-    
-    if (!irt.empty()) {
-        json_body += R"(,
-                {
-                    "name": "In-Reply-To",
-                    "value": ")" + irt + R"("
-                },
-                {
-                    "name": "References",
-                    "value": ")" + irt + R"("
-                }";
-    }
-    
+
+    nlohmann::json jHeaders = nlohmann::json::array();
     if (!x_session_chart.empty()) {
-        json_body += R"(,
-                {
-                    "name": "X-Mailer",
-                    "value": ")" + x_session_chart + R"("
-                }";
+        jHeaders.push_back({{"name", "X-Mailer"}, {"value", x_session_chart}});
     }
-    
-    json_body += R"(
-            ]
-        }
-    })";
-    
+    // Note: In-Reply-To and References are NOT set here. Graph API's
+    // internetMessageHeaders only accepts custom headers starting with 'x-'/'X-'.
+    // Per project rules, message association is via body's x-reply-to, not headers.
+
+    nlohmann::json jBody;
+    jBody["message"] = {
+        {"subject", subject},
+        {"body", {{"contentType", "HTML"}, {"content", body}}},
+        {"toRecipients", jRecipients},
+        {"internetMessageHeaders", jHeaders}
+    };
+
+    std::string json_body = jBody.dump();
     LOG_INFO("Outlook send_email_via_graph_api: JSON body: %s\n", json_body.c_str());
     
     // Single sendMail call with injected Message-ID via extended property
@@ -1226,7 +1223,23 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         LOG_INFO("Outlook send_email_via_graph_api: response: %s\n", response.c_str());
         return false;
     }
-    
+
+    // Graph API returns 202 Accepted with empty body on success.
+    // On error it returns a JSON body with an "error" field — check for it.
+    if (!response.empty()) {
+        try {
+            auto respJson = nlohmann::json::parse(response);
+            if (respJson.contains("error")) {
+                last_error_ = "send_email_via_graph_api: Graph API error: " + response;
+                LOG_INFO("Outlook send_email_via_graph_api: %s\n", last_error_.c_str());
+                return false;
+            }
+        } catch (...) {
+            // Not JSON — could still be an error page; log it
+            LOG_INFO("Outlook send_email_via_graph_api: unexpected response: %s\n", response.c_str());
+        }
+    }
+
     LOG_INFO("Outlook send_email_via_graph_api: email sent successfully via Graph API\n");
     
     // Use local msg_id directly — server was forced to use it via extended property

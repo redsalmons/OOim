@@ -1,0 +1,1 @@
+{"rustc":776363091828236830,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[7041489013793691962,"build_script_build",false,15551795858656874330]],"local":[{"RerunIfChanged":{"output":"release/build/hax-lib-15df6e31ee4a53fb/output","paths":["build.rs"]}}],"rustflags":[],"config":0,"compile_kind":0}

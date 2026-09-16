@@ -162,6 +162,7 @@ private:
     std::string wrap_base64_lines(const std::string& b64, size_t line_len = 76);
     std::string base64_url_decode(const std::string& input);
     std::string url_encode(const std::string& value);
+    static std::string json_escape_string(const std::string& value);
     std::string get_authorization_url(const std::string& redirect_uri,
                                       const std::string& state,
                                       const std::string& code_challenge) const;

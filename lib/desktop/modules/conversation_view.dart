@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../native/email_core.dart' as native;
 import 'email_utils.dart';
+import '../dialogs/create_group_dialog.dart';
 import 'email_module_base.dart';
 import 'eml_parser.dart';
 import '../../i18n/app_strings.dart';
@@ -632,8 +633,158 @@ mixin ConversationViewMixin on State<EmailModule> {
                 ],
               ),
             ),
+            // Add member button: creates a group if total > 2
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: SizedBox(
+                width: double.infinity,
+                child: TextButton.icon(
+                  onPressed: () => _addMemberToConversation(thread, members.values.toList(), conversationAccount),
+                  icon: Icon(Icons.person_add, size: 18, color: Colors.green[700]),
+                  label: Text('添加成员', style: TextStyle(fontSize: 13, color: Colors.green[700])),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _addMemberToConversation(List<native.EmailMessage> thread, List<String> existingMembers, String conversationAccount) {
+    final config = native.EmailCore.loadConfig(configPath);
+    final accounts = config?.accounts
+            .where((a) => a.email.isNotEmpty)
+            .map((a) => a.email)
+            .toList() ??
+        <String>[];
+
+    TextEditingController newMemberController = TextEditingController();
+    String newMember = '';
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Text('添加成员'),
+            content: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('当前成员: ${existingMembers.length} 人', style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+                  const SizedBox(height: 12),
+                  Text('添加后将创建新的群组会话', style: TextStyle(fontSize: 12, color: Colors.orange[700])),
+                  const SizedBox(height: 12),
+                  Autocomplete<String>(
+                    fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+                      newMemberController = controller;
+                      return TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        decoration: const InputDecoration(
+                          hintText: '输入新成员邮箱',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onSubmitted: (_) {
+                          onFieldSubmitted();
+                        },
+                      );
+                    },
+                    optionsBuilder: (TextEditingValue textEditingValue) {
+                      if (textEditingValue.text.isEmpty) {
+                        return accounts.where((a) => !existingMembers.contains(a));
+                      }
+                      final input = textEditingValue.text.toLowerCase();
+                      return accounts.where((a) => a.toLowerCase().contains(input) && !existingMembers.contains(a));
+                    },
+                    onSelected: (String selection) {
+                      setDialogState(() {
+                        newMember = selection;
+                      });
+                    },
+                    optionsViewBuilder: (context, onSelected, options) {
+                      return Align(
+                        alignment: Alignment.topLeft,
+                        child: Material(
+                          elevation: 4,
+                          borderRadius: BorderRadius.circular(6),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxHeight: 200),
+                            child: ListView.builder(
+                              shrinkWrap: true,
+                              itemCount: options.length,
+                              itemBuilder: (context, index) {
+                                final option = options.elementAt(index);
+                                return ListTile(
+                                  dense: true,
+                                  title: Text(option, style: const TextStyle(fontSize: 13)),
+                                  onTap: () => onSelected(option),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(AppStrings.cancel),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF07C160)),
+                onPressed: () {
+                  final member = newMemberController.text.trim().isNotEmpty
+                      ? newMemberController.text.trim()
+                      : newMember;
+                  if (member.isEmpty) return;
+
+                  // All members for the new group: existing + new
+                  final allMembers = <String>{...existingMembers, member}
+                      .where((m) => m.toLowerCase() != conversationAccount.toLowerCase())
+                      .toList();
+
+                  // Get title from thread
+                  String title = '群组';
+                  if (thread.isNotEmpty) {
+                    title = thread.first.subject.replaceFirst('Re:', '').trim();
+                    if (title.isEmpty) title = '群组';
+                  }
+
+                  Navigator.of(dialogContext).pop();
+                  setState(() {
+                    showConversationPanel = false;
+                  });
+
+                  showDialog(
+                    context: context,
+                    builder: (context) => CreateGroupDialog(
+                      accounts: accounts,
+                      configPath: configPath,
+                      onCreated: onRefresh,
+                      initialTitle: title,
+                      initialAccount: conversationAccount,
+                      initialMembers: allMembers,
+                    ),
+                  );
+                },
+                child: const Text('创建群组', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

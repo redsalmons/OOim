@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
 import '../../i18n/app_strings.dart';
+import 'create_group_dialog.dart';
 
 class CreateSessionDialog extends StatefulWidget {
   final List<String> accounts;
@@ -76,6 +77,25 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(AppStrings.pleaseAddMember), duration: const Duration(seconds: 2)),
       );
+      return;
+    }
+
+    // If more than 1 member (3+ people total), create a group session instead
+    if (_members.length > 1) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        showDialog(
+          context: context,
+          builder: (context) => CreateGroupDialog(
+            accounts: widget.accounts,
+            configPath: widget.configPath,
+            onCreated: widget.onCreated,
+            initialTitle: title,
+            initialAccount: _selectedAccount,
+            initialMembers: List.from(_members),
+          ),
+        );
+      }
       return;
     }
 

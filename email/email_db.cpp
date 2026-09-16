@@ -562,7 +562,7 @@ int email_db_init(const char* path) {
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
     LOG_INFO("Database migrations (session_uuid columns) completed\n");
 
-    // Sender Key (group messaging) tables
+    // Group messaging tables
     // Migrate: if group_id is not INTEGER, drop and recreate group tables
     bool needRecreate = false;
     bool hasXReplyId = false;
@@ -618,47 +618,33 @@ int email_db_init(const char* path) {
     sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_group_session_account ON group_session(account);", NULL, NULL, &err_msg);
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
 
-    const char* sql_sender_key = "CREATE TABLE IF NOT EXISTS sender_key ("
-                                  "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                  "group_id TEXT NOT NULL,"
-                                  "account TEXT NOT NULL,"
-                                  "sender_email TEXT NOT NULL,"
-                                  "chain_key TEXT,"
-                                  "signing_key_pub TEXT,"
-                                  "signing_key_priv TEXT,"
-                                  "iteration INTEGER DEFAULT 0,"
-                                  "epoch INTEGER DEFAULT 0,"
-                                  "status INTEGER DEFAULT 0,"
-                                  "updated_at TEXT DEFAULT (datetime('now','localtime')),"
-                                  "UNIQUE(group_id, account, sender_email, epoch)"
-                                  ");";
-    rc = sqlite3_exec(g_db, sql_sender_key, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (sender_key): %s\n", err_msg); sqlite3_free(err_msg); }
-    else {
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_sender_key_group ON sender_key(group_id, account);", NULL, NULL, &err_msg);
-        if (err_msg) sqlite3_free(err_msg);
-    }
+    // MLS (RFC 9420) group protocol: local group_id -> MLS GroupId, and per-account OpenMLS state blob
+    sqlite3_exec(g_db, "ALTER TABLE group_session ADD COLUMN mls_group_id TEXT;", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_group_session_mls ON group_session(account, mls_group_id);", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
 
-    const char* sql_skipped_sender_keys = "CREATE TABLE IF NOT EXISTS skipped_sender_keys ("
-                                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                           "group_id TEXT NOT NULL,"
-                                           "account TEXT NOT NULL,"
-                                           "sender_email TEXT NOT NULL,"
-                                           "iteration INTEGER NOT NULL,"
-                                           "epoch INTEGER NOT NULL,"
-                                           "cipher_key TEXT,"
-                                           "iv TEXT,"
-                                           "signing_key TEXT,"
-                                           "UNIQUE(group_id, account, sender_email, iteration, epoch)"
-                                           ");";
-    rc = sqlite3_exec(g_db, sql_skipped_sender_keys, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (skipped_sender_keys): %s\n", err_msg); sqlite3_free(err_msg); }
-    else {
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_skipped_sender_keys ON skipped_sender_keys(group_id, account, sender_email);", NULL, NULL, &err_msg);
-        if (err_msg) sqlite3_free(err_msg);
-    }
+    // x_session_id: shared session identifier carried in every message body (value = root invite's x-message-id)
+    sqlite3_exec(g_db, "ALTER TABLE group_session ADD COLUMN x_session_id TEXT;", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    sqlite3_exec(g_db, "UPDATE group_session SET x_session_id = x_reply_id WHERE x_session_id IS NULL;", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_group_session_x_session_id ON group_session(account, x_session_id);", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
 
-    LOG_INFO("Database tables (group_session, sender_key, skipped_sender_keys) created\n");
+    const char* sql_mls_state = "CREATE TABLE IF NOT EXISTS mls_state ("
+                                "account TEXT PRIMARY KEY,"
+                                "state BLOB,"
+                                "updated_at TEXT DEFAULT (datetime('now','localtime'))"
+                                ");";
+    rc = sqlite3_exec(g_db, sql_mls_state, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) { LOG_INFO("SQL error (mls_state): %s\n", err_msg); sqlite3_free(err_msg); err_msg = NULL; }
+
+    // Legacy Sender Key tables are no longer used
+    sqlite3_exec(g_db, "DROP TABLE IF EXISTS sender_key;", NULL, NULL, &err_msg); if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    sqlite3_exec(g_db, "DROP TABLE IF EXISTS skipped_sender_keys;", NULL, NULL, &err_msg); if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
+    LOG_INFO("Database tables (group_session, mls_state) created\n");
 
     return 0;
 }
