@@ -172,6 +172,43 @@ EmlParsedContent parseEmlFile(String filePath, {String? account, String? session
       }
     }
 
+    // File transfer metadata (Signal 1.0.4 / MLS 2.0.4): both the sender's local
+    // copy and the receiver's rewritten .eml hold the plaintext
+    // {"msg_type":"file", ...} JSON. Render as a file card.
+    if ((effectiveXMailer == native.XMailer.attachMeta ||
+         effectiveXMailer == native.XMailer.mlsFileMeta) && textBody.isNotEmpty) {
+      try {
+        final meta = jsonDecode(textBody);
+        if (meta is Map && meta['msg_type'] == 'file') {
+          final fId = meta['file_id'] as String? ?? '';
+          int receivedChunks = 0;
+          int transferStatus = 0;
+          if (fId.isNotEmpty) {
+            try {
+              final st = jsonDecode(native.EmailCore.fileTransferQuery(fId));
+              if (st['status'] == 'success') {
+                receivedChunks = st['received_chunks'] as int? ?? 0;
+                transferStatus = st['transfer_status'] as int? ?? 0;
+              }
+            } catch (_) {}
+          }
+          final result = EmlParsedContent(
+            textBody: meta['text'] as String? ?? '',
+            isFileMessage: true,
+            fileName: meta['file_name'] as String? ?? '',
+            fileSize: (meta['file_size'] as num?)?.toInt() ?? 0,
+            fileId: fId,
+            batchId: meta['batch_id'] as String? ?? '',
+            totalChunks: meta['total_chunks'] as int? ?? 0,
+            receivedChunks: receivedChunks,
+            transferStatus: transferStatus,
+          );
+          // Not cached: transfer progress changes over time.
+          return result;
+        }
+      } catch (_) {}
+    }
+
     // Group application message (2.0.3): C++ side rewrites received .eml bodies
     // with the decrypted plaintext; sent copies keep the {plaintext, ...} JSON.
     if (effectiveXMailer == native.XMailer.mlsAppMsg &&
@@ -196,8 +233,9 @@ EmlParsedContent parseEmlFile(String filePath, {String? account, String? session
     }
 
     // Check if this is a handshake/control message.
-    // MLS messages (2.0.x) and Signal prekey/session-init (1.0.0/1.0.1) are
-    // handshake messages — show the handshake emoji, not raw JSON.
+    // PREKEY_BUNDLE (1.0.0), SESSION_INIT (1.0.1) and MLS control messages
+    // (2.0.0/2.0.1/2.0.2) are handshake. SESSION_INIT carries only a fixed
+    // placeholder body (X3DH needs a payload), not user content.
     bool isHandshakeMessage = false;
     if (effectiveXMailer == '1.0.0' ||
         effectiveXMailer == '1.0.1' ||

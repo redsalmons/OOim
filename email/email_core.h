@@ -285,8 +285,15 @@ int email_task_mark_failed(int taskId);
 int email_task_delete(int taskId);
 int email_task_process_pending(int configIndex, const char* account, char* outJson, int outSize);
 
+// Query outbox task status by account + message_id (for GUI "sending..." state).
+// outJson: {status, task_status: "pending"|"failed"|"none", retry_count, last_error}
+int email_task_status(const char* account, const char* messageId, char* outJson, int outSize);
+
 // Migration: Update islocal for existing emails
 int email_migrate_islocal();
+
+// Migration: Create unified sessions for legacy encrypted sessions (encrypt_method=1)
+int email_migrate_encrypted_sessions(char* outJson, int outSize);
 
 // --- File Transfer Protocol ---
 
@@ -313,11 +320,12 @@ int email_file_split_and_send(const char* filePath, const char* fileName,
 
 // Process a received "file" metadata message (create file_transfer record on receiver).
 int email_file_transfer_receive_file(const char* fileId, const char* sessionId,
-                                      const char* account, const char* sender,
-                                      const char* fileName, long long fileSize,
-                                      const char* fileMd5, int totalChunks, int chunkSize,
-                                      const char* messageId,
-                                      char* outJson, int outSize);
+                                     const char* account, const char* sender,
+                                     const char* fileName, int64_t fileSize,
+                                     const char* fileMd5, int totalChunks, int chunkSize,
+                                     const char* messageId,
+                                     const char* compression, const char* compressedMd5,
+                                     char* outJson, int outSize);
 
 // Process a received "truck" chunk message (store chunk, auto-reassemble if complete).
 int email_file_transfer_receive_truck(const char* fileId, int chunkIndex,
@@ -420,6 +428,14 @@ int signal_store_peer_prekey(const char* account, const char* peerEmail,
 int group_create(const char* account, const char* subject,
                  const char* membersJson, char* outJson, int outSize);
 
+// Extended variant: xSessionId lets the group inherit an existing conversation's
+// x_session_id (e.g. a 1:1 session's root x-message-id during a Signal->MLS upgrade),
+// and inReplyTo becomes the invite's x_reply_to (last message id of that conversation).
+// Pass NULL/"" for both to get the same behavior as group_create.
+int group_create_ex(const char* account, const char* subject, const char* membersJson,
+                    const char* xSessionId, const char* inReplyTo,
+                    char* outJson, int outSize);
+
 // Get group info (members, epoch, ready). Returns 0 on success, negative on error.
 int group_get_info(const char* account, const char* groupId,
                    char* outJson, int outSize);
@@ -435,6 +451,17 @@ int group_list(const char* account, char* outJson, int outSize);
 int group_send_message(const char* account, const char* groupId,
                        const char* plaintext, const char* inReplyTo,
                        char* outJson, int outSize);
+
+// Queue a file transfer to an MLS group: compress -> chunk -> one 2.0.4 meta task
+// plus N 2.0.5 chunk tasks (MLS-encrypted per task right before sending).
+// unifiedSessionId is the us_xxx id; the group's mls_group_id is resolved from it.
+// inReplyTo: x_message_id of the conversation's last message. text: caption shown
+// with the file card. outJson: {status, file_id, file_name, total_chunks, message_id}.
+int group_send_file(const char* account, const char* unifiedSessionId,
+                    const char* filePath, const char* fileName,
+                    const char* inReplyTo, const char* subject,
+                    const char* text, const char* batchId,
+                    char* outJson, int outSize);
 
 // Receive-side handler for any 2.0.x mail (called by download_pending).
 // bodyText = JSON body; message_id/in_reply_to = local ids from the body (header fallback).
@@ -458,6 +485,47 @@ int group_prepare_outgoing(const char* account, const char* xMailer,
 int group_after_sent(const char* account, const char* xMailer,
                      const char* messageId, const char* inReplyTo,
                      const char* localBody, const char* dataDir);
+
+// ============================================================================
+// Unified Session Manager (facade over Signal 1:1 + MLS 1:n)
+// ============================================================================
+
+// Create a new encrypted session (auto-selects Signal for 2 members, MLS for 3+).
+// membersJson: JSON array of email addresses (must include the local account).
+// outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
+int us_create_session(const char* account, const char* subject,
+                      const char* membersJson, char* outJson, int outSize);
+
+// Send a message in an existing session (auto-routes to Signal or MLS).
+// outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
+int us_send_message(const char* account, const char* sessionId,
+                    const char* plaintext, const char* inReplyTo,
+                    char* outJson, int outSize);
+
+// Handle an incoming encrypted message (auto-detects protocol from xMailer).
+// outJson: {status, session_id, plaintext, sender, x_mailer}
+int us_handle_incoming(const char* account, const char* from,
+                       const char* xMailer, const char* body,
+                       const char* messageId, const char* inReplyTo,
+                       char* outJson, int outSize);
+
+// Add members to a session (triggers irreversible upgrade to MLS if Signal + >2 total).
+// inReplyTo: x_reply_to for the upgrade invite (last message id of the conversation).
+// outJson: {status, session_id, upgraded, mode, task_id}
+int us_add_members(const char* account, const char* sessionId,
+                   const char* membersJson, const char* inReplyTo,
+                   char* outJson, int outSize);
+
+// List all active sessions for an account.
+// outJson: {status, sessions: [{session_id, mode, members, ...}]}
+int us_list_sessions(const char* account, char* outJson, int outSize);
+
+// Get a specific session by its unified session_id.
+// outJson: {status, session: {session_id, mode, members, ...}}
+int us_get_session(const char* sessionId, char* outJson, int outSize);
+
+// Check if a session is ready for sending. Returns 1 if ready, 0 if not, negative on error.
+int us_is_ready(const char* account, const char* sessionId);
 
 #ifdef __cplusplus
 }

@@ -155,11 +155,21 @@ fn write_out(data: &[u8], out: *mut u8, out_len: c_int) -> c_int {
     data.len() as c_int
 }
 
+static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Copy the last FFI error string into `out`. Returns its length, 0 if none.
+#[no_mangle]
+pub extern "C" fn mls_last_error(out: *mut u8, out_len: c_int) -> c_int {
+    let msg = LAST_ERROR.lock().unwrap().take().unwrap_or_default();
+    write_out(msg.as_bytes(), out, out_len)
+}
+
 fn report(ctx: &str, r: Result<c_int, (c_int, String)>) -> c_int {
     match r {
         Ok(v) => v,
         Err((code, msg)) => {
             eprintln!("[mls_ffi] {ctx}: {msg}");
+            *LAST_ERROR.lock().unwrap() = Some(format!("{ctx}: {msg}"));
             code
         }
     }

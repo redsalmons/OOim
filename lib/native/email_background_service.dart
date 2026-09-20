@@ -381,8 +381,9 @@ void childEntryPoint(SendPort supervisorPort) {
       log('Entering IDLE mode for real-time push...');
 
       while (!shouldStop) {
-        // Block and wait for new email notification (timeout 300s inside C++)
-        final idleResult = native.EmailCore.idleWait(configIndex!, folder!, 60);
+        // Block and wait for new email notification. Short timeout so the
+        // fallback refresh bounds latency at ~10s when the server does not push.
+        final idleResult = native.EmailCore.idleWait(configIndex!, folder!, 10);
 
         if (shouldStop) break;
 
@@ -501,6 +502,8 @@ void childEntryPoint(SendPort supervisorPort) {
                 });
               }
             }
+          } else if (decoded['status'] == 'throttled') {
+            // Per-account pacing is active; nothing to send this round.
           } else {
             log('SendTask error: ${decoded['error']}');
           }

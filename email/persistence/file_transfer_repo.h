@@ -19,6 +19,8 @@ struct FileTransferRecord {
     int status = 0;  // 0=pending, 1=complete, 2=failed
     std::string messageId;
     std::string originalPath;
+    std::string compression;    // "zlib" / "none"
+    std::string compressedMd5;  // MD5 of the chunked stream
     std::string createdAt;
     std::string updatedAt;
 };

@@ -23,9 +23,12 @@ constexpr const char* MLS_KEY_PACKAGE = "2.0.0";  // body.type = mls_invite (roo
 constexpr const char* MLS_WELCOME     = "2.0.1";  // owner -> member: Welcome + RatchetTree
 constexpr const char* MLS_COMMIT      = "2.0.2";  // owner -> existing members: Commit (tree change)
 constexpr const char* MLS_APP_MSG     = "2.0.3";  // group application message (MLS ciphertext)
+constexpr const char* MLS_FILE_META   = "2.0.4";  // group file metadata (visible in UI)
+constexpr const char* MLS_FILE_CHUNK  = "2.0.5";  // group file chunk data (hidden from UI)
 
 inline bool isMls(const std::string& v) {
-    return v == MLS_KEY_PACKAGE || v == MLS_WELCOME || v == MLS_COMMIT || v == MLS_APP_MSG;
+    return v == MLS_KEY_PACKAGE || v == MLS_WELCOME || v == MLS_COMMIT || v == MLS_APP_MSG ||
+           v == MLS_FILE_META || v == MLS_FILE_CHUNK;
 }
 
 // Aliases mapping old names to new 1.0.x values (no 0.1.x backward compat)

@@ -1055,6 +1055,7 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
         x_session_chart_str = j.value("x_session_chart", "");
         encrypt_method_val = j.value("encrypt_method", 0);
         members_str = j.value("members", "");
+        pending_local_body_ = j.value("local_body", "");
     } catch (const std::exception& e) {
         last_error_ = std::string("send_email: invalid JSON content: ") + e.what();
         LOG_INFO("Outlook send_email: %s\n", last_error_.c_str());
@@ -1255,6 +1256,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     
     char json_buffer[8192] = {0};
     LOG_INFO("Outlook send_email_via_graph_api: calling email_insert_sent_email, data_dir='%s', msg_id='%s'\n", data_dir_.c_str(), msg_id.c_str());
+    const std::string& bodyForLocal = pending_local_body_.empty() ? body : pending_local_body_;
     int insert_result = email_insert_sent_email(
         email_.c_str(),
         email_.c_str(),
@@ -1264,7 +1266,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         date_str,
         msg_id.c_str(),
         irt.c_str(),
-        body.c_str(),
+        bodyForLocal.c_str(),
         data_dir_.c_str(),
         json_buffer,
         sizeof(json_buffer),
@@ -1313,10 +1315,11 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
 
                 LOG_INFO("Outlook send_email_via_graph_api: using session_id=%s\n", sid.c_str());
                 
-                // Add email to session
+                // Add email to session. MLS (2.0.x) messages only borrow the transport;
+                // the task processor associates them with their group session, never 1:1.
                 char session_buffer[8192];
                 int encMethod = (x_session_chart == XMailer::RATCHET_MSG || x_session_chart == XMailer::ATTACH_META || x_session_chart == XMailer::ATTACH_CHUNK) ? 1 : 0;
-                int session_result = email_add_email_to_session(
+                int session_result = XMailer::isMls(x_session_chart) ? 0 : email_add_email_to_session(
                     sid.c_str(),
                     email_id.c_str(),
                     email_.c_str(),
@@ -1473,6 +1476,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         strftime(date_str, sizeof(date_str), "%a, %d %b %Y %H:%M:%S %z", tm_info);
         
         char json_buffer[8192];
+        const std::string& bodyForLocal = pending_local_body_.empty() ? body : pending_local_body_;
         int insert_result = email_insert_sent_email(
             email_.c_str(),
             email_.c_str(),
@@ -1482,7 +1486,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
             date_str,
             msg_id.c_str(),
             in_reply_to.c_str(),
-            body.c_str(),
+            bodyForLocal.c_str(),
             data_dir_.c_str(),
             json_buffer,
             sizeof(json_buffer),
@@ -1529,10 +1533,11 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
 
                     LOG_INFO("Outlook send_email_via_vmime_smtp: using session_id=%s\n", sid.c_str());
                     
-                    // Add email to session
+                    // Add email to session. MLS (2.0.x) messages only borrow the transport;
+                    // the task processor associates them with their group session, never 1:1.
                     char session_buffer[8192];
                     int encMethod = (x_session_chart == XMailer::RATCHET_MSG || x_session_chart == XMailer::ATTACH_META || x_session_chart == XMailer::ATTACH_CHUNK) ? 1 : 0;
-                    int session_result = email_add_email_to_session(
+                    int session_result = XMailer::isMls(x_session_chart) ? 0 : email_add_email_to_session(
                         sid.c_str(),
                         email_id.c_str(),
                         email_.c_str(),

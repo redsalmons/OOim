@@ -104,3 +104,56 @@ fn three_party_roundtrip() {
         assert_eq!(mls_get_epoch(cc.as_ptr(), gid_c.as_ptr()), 2);
     }
 }
+
+/// Sequential app messages from ONE sender must decrypt in order — file chunks
+/// are 5+ consecutive encrypts; a reused generation shows up as SecretReuseError.
+#[test]
+fn sequential_sends_from_one_member() {
+    let (a, b, cc) = (c("s1@x"), c("s2@x"), c("s3@x"));
+    unsafe {
+        for who in [&a, &b, &cc] { ok(mls_init(who.as_ptr()), "init"); }
+
+        let mut kp_b = buf(4096); let n = ok(mls_generate_key_package(b.as_ptr(), kp_b.as_mut_ptr(), 4096), "kp b"); kp_b.truncate(n);
+        let mut kp_c = buf(4096); let n = ok(mls_generate_key_package(cc.as_ptr(), kp_c.as_mut_ptr(), 4096), "kp c"); kp_c.truncate(n);
+
+        let mut gid = buf(128); let n = ok(mls_create_group(a.as_ptr(), gid.as_mut_ptr(), 128), "create"); gid.truncate(n);
+        let gid_c = c(&String::from_utf8(gid.clone()).unwrap());
+
+        use base64::Engine;
+        let e = base64::engine::general_purpose::STANDARD;
+        let kps_json = c(&serde_json::to_string(&[e.encode(&kp_b), e.encode(&kp_c)]).unwrap());
+        let mut welcome = buf(65536); let mut wl = 0;
+        let mut commit = buf(65536); let mut cl = 0;
+        ok(mls_add_members(a.as_ptr(), gid_c.as_ptr(), kps_json.as_ptr(),
+            welcome.as_mut_ptr(), 65536, &mut wl, commit.as_mut_ptr(), 65536, &mut cl), "add_members");
+        welcome.truncate(wl as usize);
+
+        let mut tree = buf(65536); let n = ok(mls_export_ratchet_tree(a.as_ptr(), gid_c.as_ptr(), tree.as_mut_ptr(), 65536), "tree"); tree.truncate(n);
+        for who in [&b, &cc] {
+            let mut g = buf(128);
+            ok(mls_join_group(who.as_ptr(), welcome.as_ptr(), welcome.len() as c_int, tree.as_ptr(), tree.len() as c_int, g.as_mut_ptr(), 128), "join");
+        }
+
+        // 6 consecutive app messages from A — meta + 5 chunks, as in a file send.
+        // Simulate the app: persist state after every encrypt (save_state), and a
+        // restart-style load_state before each encrypt as well.
+        for i in 0..6u8 {
+            let msg = format!("chunk-{i}");
+            let mut blob = buf(4 << 20);
+            let n = ok(mls_save_state(a.as_ptr(), blob.as_mut_ptr(), (4 << 20) as c_int), "save");
+            ok(mls_load_state(a.as_ptr(), blob.as_ptr(), n as c_int), "load");
+
+            let mut ct = buf(65536);
+            let n = ok(mls_encrypt(a.as_ptr(), gid_c.as_ptr(), msg.as_ptr(), msg.len() as c_int,
+                ct.as_mut_ptr(), ct.len() as c_int), "enc");
+            ct.truncate(n);
+            for who in [&b, &cc] {
+                let mut pt = buf(4096);
+                let r = mls_decrypt(who.as_ptr(), gid_c.as_ptr(), ct.as_ptr(), ct.len() as c_int,
+                    pt.as_mut_ptr(), pt.len() as c_int);
+                assert!(r >= 0, "decrypt msg {i} failed rc={r}");
+                assert_eq!(&pt[..r as usize], msg.as_bytes());
+            }
+        }
+    }
+}

@@ -11,22 +11,12 @@ mixin EmailDetailViewMixin on State<EmailModule> {
   List<native.EmailMessage> get emails;
   int get selectedEmail;
   set selectedEmail(int v);
-  bool get isConversationView;
-  set isConversationView(bool v);
-  String? get selectedConversationMessageId;
-  set selectedConversationMessageId(String? v);
   TextEditingController get replyController;
   String get emailDataPath;
 
   void saveEmails() {}
 
   Widget buildEmailDetail() {
-    native.EmailCore.logWrite('[EmailDetail] buildEmailDetail: isConversationView=$isConversationView, selectedConversationMessageId=$selectedConversationMessageId');
-    if (isConversationView && selectedConversationMessageId != null) {
-      // Will be handled by ConversationViewMixin
-      native.EmailCore.logWrite('[EmailDetail] Using conversation view, skipping detail view');
-      return const SizedBox.shrink();
-    }
     if (emails.isEmpty) {
       return Expanded(
         child: Container(
@@ -112,7 +102,6 @@ mixin EmailDetailViewMixin on State<EmailModule> {
   }
 
   Widget buildEmailActions() {
-    final email = emails[selectedEmail];
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
@@ -124,14 +113,6 @@ mixin EmailDetailViewMixin on State<EmailModule> {
           _buildActionButton(Icons.reply, AppStrings.reply),
           _buildActionButton(Icons.reply_all, AppStrings.replyAll),
           _buildActionButton(Icons.forward, AppStrings.forward),
-          _buildActionButton(Icons.forum, AppStrings.conversation, onTap: () {
-            if (email.sessionId.isNotEmpty || email.messageId.isNotEmpty) {
-              setState(() {
-                selectedConversationMessageId = email.sessionId.isNotEmpty ? email.sessionId : email.messageId;
-                isConversationView = true;
-              });
-            }
-          }),
         ],
       ),
     );

@@ -487,6 +487,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         std::string x_session_chart = json_content.value("x_session_chart", "");
         int encrypt_method = json_content.value("encrypt_method", 0);
         std::string members = json_content.value("members", "");
+        std::string local_body = json_content.value("local_body", "");
 
         LOG_INFO("Gmail send_email - parsed: recipient='%s', subject='%s', in_reply_to='%s'\n",
                  recipient.c_str(), subject.c_str(), in_reply_to.c_str());
@@ -607,10 +608,11 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         strftime(date_str, sizeof(date_str), "%a, %d %b %Y %H:%M:%S %z", tm_info);
 
         char json_buffer[8192];
+        const std::string& bodyForLocal = local_body.empty() ? bodyToSend : local_body;
         int insert_result = email_insert_sent_email(
             email_.c_str(), email_.c_str(), email_.c_str(),
             recipient.c_str(), subject.c_str(), date_str,
-            msg_id.c_str(), in_reply_to.c_str(), bodyToSend.c_str(),
+            msg_id.c_str(), in_reply_to.c_str(), bodyForLocal.c_str(),
             data_dir_.c_str(), json_buffer, sizeof(json_buffer),
             x_session_chart.c_str()
         );

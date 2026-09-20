@@ -231,6 +231,50 @@ bool SignalSessionRepo::markReceivedBySessionId(const std::string& account, cons
     return ok;
 }
 
+bool SignalSessionRepo::markKexDone(const std::string& account, const std::string& sessionId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || sessionId.empty()) return false;
+
+    const char* sql = "UPDATE signal_session SET kex_done = 1, updated_at = datetime('now','localtime') "
+                      "WHERE account = ? AND session_id = ? AND status = 0;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool stepped = sqlite3_step(stmt) == SQLITE_DONE;
+    // Report the hit count: a mark that lands on no row means the caller passed the
+    // peer's id instead of ours, which is exactly how this flag used to get lost.
+    int changes = sqlite3_changes(db);
+    sqlite3_finalize(stmt);
+
+    if (stepped && changes == 0) {
+        LOG_INFO("[Signal] markKexDone: no active session row for account=%s session=%s\n",
+                 account.c_str(), sessionId.c_str());
+    }
+    return stepped && changes > 0;
+}
+
+bool SignalSessionRepo::isKexDone(const std::string& account, const std::string& sessionId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || sessionId.empty()) return false;
+
+    const char* sql = "SELECT 1 FROM signal_session "
+                      "WHERE account = ? AND session_id = ? AND status = 0 AND kex_done = 1 LIMIT 1;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool done = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return done;
+}
+
 bool SignalSessionRepo::closeSession(const std::string& account, const std::string& peerEmail,
                                      const std::string& sessionId) {
     auto& conn = DbConnection::instance();

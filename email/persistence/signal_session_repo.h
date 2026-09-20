@@ -63,6 +63,14 @@ public:
     // Used when PREKEY_BUNDLE is received (peer acknowledged the session)
     bool markReceivedBySessionId(const std::string& account, const std::string& sessionId);
 
+    // Record that the key exchange with this session's peer is complete: this side holds
+    // the peer's keys and the peer provably holds ours. Set once, never cleared by the
+    // double-ratchet save path.
+    bool markKexDone(const std::string& account, const std::string& sessionId);
+
+    // Whether the key exchange for (account, sessionId) has completed.
+    bool isKexDone(const std::string& account, const std::string& sessionId);
+
     // Close a session (set status=1)
     bool closeSession(const std::string& account, const std::string& peerEmail,
                       const std::string& sessionId);

@@ -146,11 +146,20 @@ bool encrypt(const std::string& account, const std::string& groupId, const std::
     if (!ensureLocked(account)) return false;
     std::string gid = mlsGid(groupId);
     if (gid.empty()) return false;
-    std::vector<uint8_t> ct;
-    int rc = callOut([&](uint8_t* o, int n) {
-        return mls_encrypt(account.c_str(), gid.c_str(), (const uint8_t*)plaintext.data(), (int)plaintext.size(), o, n);
-    }, ct);
-    if (rc < 0) { LOG_INFO("[MLS] encrypt failed rc=%d group=%s\n", rc, groupId.c_str()); return false; }
+    // Single call: mls_encrypt consumes a ratchet generation even when the output
+    // buffer is too small, so callOut's retry must NOT be used here. MLS framing
+    // adds only a few KB, so plaintext+64K is a safe upper bound.
+    std::vector<uint8_t> ct(plaintext.size() + 64 * 1024);
+    int rc = mls_encrypt(account.c_str(), gid.c_str(),
+                         (const uint8_t*)plaintext.data(), (int)plaintext.size(),
+                         ct.data(), (int)ct.size());
+    if (rc < 0) {
+        std::vector<uint8_t> eb(4096);
+        int el = mls_last_error(eb.data(), (int)eb.size());
+        LOG_INFO("[MLS] encrypt failed rc=%d group=%s err=%.*s\n", rc, groupId.c_str(), el, eb.data());
+        return false;
+    }
+    ct.resize((size_t)rc);
     persist(account);
     outCipherB64 = b64(ct);
     return true;
@@ -162,11 +171,19 @@ bool decrypt(const std::string& account, const std::string& groupId, const std::
     std::string gid = mlsGid(groupId);
     if (gid.empty()) return false;
     auto ct = base64_decode(cipherB64);
-    std::vector<uint8_t> pt;
-    int rc = callOut([&](uint8_t* o, int n) {
-        return mls_decrypt(account.c_str(), gid.c_str(), ct.data(), (int)ct.size(), o, n);
-    }, pt);
-    if (rc < 0) { LOG_INFO("[MLS] decrypt failed rc=%d group=%s\n", rc, groupId.c_str()); return false; }
+    // Single call for the same reason: mls_decrypt consumes the message key on the
+    // first attempt — a buffer-too-small retry hits SecretReuseError. Plaintext is
+    // always smaller than the AEAD ciphertext, so ct_len+64K always fits.
+    std::vector<uint8_t> pt(ct.size() + 64 * 1024);
+    int rc = mls_decrypt(account.c_str(), gid.c_str(), ct.data(), (int)ct.size(),
+                         pt.data(), (int)pt.size());
+    if (rc < 0) {
+        std::vector<uint8_t> eb(4096);
+        int el = mls_last_error(eb.data(), (int)eb.size());
+        LOG_INFO("[MLS] decrypt failed rc=%d group=%s err=%.*s\n", rc, groupId.c_str(), el, eb.data());
+        return false;
+    }
+    pt.resize((size_t)rc);
     persist(account);
     outPlaintext.assign(pt.begin(), pt.end());
     return true;

@@ -3,10 +3,9 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
-import 'package:desktop_drop/desktop_drop.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../native/email_core.dart' as native;
+import '../../native/unified_session.dart';
 import '../../native/email_background_service.dart';
 import 'email_utils.dart';
 import 'email_module_base.dart';
@@ -23,11 +22,7 @@ class EmailModuleState extends State<EmailModule>
   static const String _myAddress = 'me@oim.local';
 
   int _selectedEmail = 0;
-  String? _selectedConversationMessageId;
-  bool _isConversationView = false;
-  bool _showConversationPanel = false;
   bool _showEmojiPicker = false;
-  bool _isDragging = false;
   final TextEditingController _searchController = TextEditingController();
   late final RichTextReplyController _replyController;
   final List<DroppedFile> _droppedFiles = [];
@@ -37,16 +32,14 @@ class EmailModuleState extends State<EmailModule>
   List<native.EmailMessage> _emails = [];
   String _searchQuery = '';
 
-  List<native.EmailMessage> _conversationEmails = [];
-  List<native.EmailMessage> _inboxEmails = [];
-  List<native.EmailMessage> _sentEmails = [];
-
-  // Group messaging state
-  List<Map<String, dynamic>> _groupList = [];
-  String? _selectedGroupId;
-  bool _isGroupView = false;
-  bool _showGroupMembers = false;
-  List<native.EmailMessage> _groupMessages = [];
+  // Unified session state (replaces separate group + conversation lists)
+  List<UnifiedSessionInfo> _unifiedSessions = [];
+  String? _selectedUnifiedSessionId;
+  bool _showUnifiedMembers = false;
+  List<native.EmailMessage> _unifiedMessages = [];
+  // Outbox "sending..." bubbles: optimistic entries shown right after enqueue,
+  // removed once the real message lands in localemail or the task failed.
+  List<native.EmailMessage> _pendingUnifiedMessages = [];
 
   final Set<String> _collapsedSections = {};
   final Set<String> _collapsedGroups = {};
@@ -64,8 +57,6 @@ class EmailModuleState extends State<EmailModule>
   // --- Mixin property implementations ---
   @override
   List<native.EmailMessage> get emails => _emails;
-  @override
-  List<native.EmailMessage> get conversationEmails => _conversationEmails;
   @override
   Set<String> get collapsedSections => _collapsedSections;
   @override
@@ -91,77 +82,125 @@ class EmailModuleState extends State<EmailModule>
   @override
   Map<String, int> get configIndexMap => _configIndexMap;
   @override
-  VoidCallback? get onRefresh => _loadEmailsFromDb;
-  @override
   int get selectedEmail => _selectedEmail;
   @override
   set selectedEmail(int v) => _selectedEmail = v;
   @override
-  String? get selectedConversationMessageId => _selectedConversationMessageId;
-  @override
-  set selectedConversationMessageId(String? v) => _selectedConversationMessageId = v;
-  @override
-  bool get isConversationView => _isConversationView;
-  @override
-  set isConversationView(bool v) => _isConversationView = v;
-  @override
   Set<int> get unreadIndices => _unreadIndices;
-  @override
-  bool get showConversationPanel => _showConversationPanel;
-  @override
-  set showConversationPanel(bool v) => _showConversationPanel = v;
   @override
   bool get showEmojiPicker => _showEmojiPicker;
   @override
   set showEmojiPicker(bool v) => _showEmojiPicker = v;
 
-  // Group state implementations
-  @override
-  List<Map<String, dynamic>> get groupList => _groupList;
-  @override
-  String? get selectedGroupId => _selectedGroupId;
-  @override
-  set selectedGroupId(String? v) => _selectedGroupId = v;
-  @override
-  bool get isGroupView => _isGroupView;
-  @override
-  set isGroupView(bool v) => _isGroupView = v;
-  @override
-  List<native.EmailMessage> get groupMessages => _groupMessages;
-  @override
-  void loadGroupList() {
-    final allGroups = <Map<String, dynamic>>[];
+  // Unified session implementations
+  List<UnifiedSessionInfo> get unifiedSessions => _unifiedSessions;
+  String? get selectedUnifiedSessionId => _selectedUnifiedSessionId;
+  set selectedUnifiedSessionId(String? v) => _selectedUnifiedSessionId = v;
+  bool get showUnifiedMembers => _showUnifiedMembers;
+  set showUnifiedMembers(bool v) => _showUnifiedMembers = v;
+  List<native.EmailMessage> get unifiedMessages => _unifiedMessages;
+  List<native.EmailMessage> get pendingUnifiedMessages => _pendingUnifiedMessages;
+
+  void addPendingUnifiedMessage(native.EmailMessage msg) {
+    setState(() => _pendingUnifiedMessages.add(msg));
+  }
+
+  void loadUnifiedSessions() {
+    final all = <UnifiedSessionInfo>[];
     final seen = <String>{};
     for (final account in _configAccounts()) {
       try {
-        final result = native.EmailCore.groupList(account);
-        final json = jsonDecode(result);
-        if (json['status'] == 'success') {
-          for (final g in json['groups']) {
-            final gid = g['group_id']?.toString() ?? '';
-            if (gid.isNotEmpty && seen.add(gid)) {
-              allGroups.add(g as Map<String, dynamic>);
-            }
+        final sessions = UnifiedSessionManager.listSessionsAsObjects(account);
+        for (final s in sessions) {
+          if (s.sessionId.isNotEmpty && seen.add(s.sessionId)) {
+            all.add(s);
           }
         }
       } catch (e) {
-        native.EmailCore.logWrite('[Group] loadGroupList error: $e');
+        native.EmailCore.logWrite('[Unified] loadUnifiedSessions error: $e');
       }
     }
-    setState(() => _groupList = allGroups);
+    setState(() => _unifiedSessions = all);
   }
-  @override
-  void loadGroupMessages(String groupId) {
+
+  void loadUnifiedSessionMessages(String unifiedSessionId) {
+    final session = _unifiedSessions.where((s) => s.sessionId == unifiedSessionId).toList();
+    if (session.isEmpty) {
+      refreshSessionReady();
+      setState(() => _unifiedMessages = []);
+      return;
+    }
+    final us = session.first;
     final messages = <native.EmailMessage>[];
-    for (final account in _configAccounts()) {
+
+    // Only load messages for the session's own account (account isolation)
+    final accountsToQuery = us.account.isNotEmpty ? [us.account] : _configAccounts();
+    for (final account in accountsToQuery) {
       try {
         final result = native.EmailCore.queryLocalemail(account);
         final json = jsonDecode(result);
         if (json['status'] == 'success') {
           final emails = json['emails'] as List;
+
+          // Discover the legacy session_id from the root email (Signal sessions and
+          // Signal->MLS upgraded sessions both keep history under the legacy sid).
+          String? legacySessionId;
+          if (us.rootMessageId.isNotEmpty) {
+            for (final e in emails) {
+              final mid = e['message_id']?.toString() ?? '';
+              if (mid == us.rootMessageId) {
+                legacySessionId = e['session_id']?.toString() ?? '';
+                break;
+              }
+            }
+          }
+
+          // Fallback: if rootMessageId didn't find the root email, discover
+          // legacySessionId by finding any SESSION_INIT email from the peer.
+          if (legacySessionId == null && us.mode == 'signal') {
+            final peer = us.members.where((m) => m != us.account).firstOrNull ?? '';
+            if (peer.isNotEmpty) {
+              for (final e in emails) {
+                final xMailer = e['x_mailer']?.toString() ?? '';
+                final fromAddr = e['from']?.toString() ?? e['from_addr']?.toString() ?? e['sender']?.toString() ?? '';
+                if (xMailer == '1.0.1' && fromAddr.toLowerCase().contains(peer.toLowerCase())) {
+                  legacySessionId = e['session_id']?.toString() ?? '';
+                  break;
+                }
+              }
+            }
+          }
+
           for (final e in emails) {
+            // File chunks (1.0.5 / 2.0.5) are transport pieces, not displayable messages.
+            final xMailer = e['x_mailer']?.toString() ?? '';
+            if (xMailer == native.XMailer.attachChunk || xMailer == native.XMailer.mlsFileChunk) continue;
             final sessionId = e['session_id']?.toString() ?? '';
-            if (sessionId == 'group_$groupId') {
+            final messageId = e['message_id']?.toString() ?? '';
+            final inReplyTo = e['in_reply_to']?.toString() ?? '';
+            bool match = false;
+            // 1. Match root email by message_id
+            if (us.rootMessageId.isNotEmpty && messageId == us.rootMessageId) {
+              match = true;
+            }
+            // 2. Match by legacy session_id (discovered from root email)
+            if (!match && legacySessionId != null && legacySessionId.isNotEmpty && sessionId == legacySessionId) {
+              match = true;
+            }
+            // 3. Match by in_reply_to chain to root
+            if (!match && us.rootMessageId.isNotEmpty && inReplyTo == us.rootMessageId) {
+              match = true;
+            }
+            // 4. Match by signalSessionId (only if non-empty)
+            if (!match && us.signalSessionId.isNotEmpty) {
+              final groupId = e['group_id']?.toString() ?? '';
+              match = groupId == us.signalSessionId;
+            }
+            // 5. MLS: match by group_xxx session pattern (only if mlsGroupId is non-empty)
+            if (!match && us.mlsGroupId.isNotEmpty) {
+              match = sessionId == 'group_${us.mlsGroupId}';
+            }
+            if (match) {
               final flags = (e['flags'] is String && (e['flags'] as String).isNotEmpty) ? jsonDecode(e['flags']) : (e['flags'] is List ? e['flags'] : []);
               final isAnswered = flags is List && flags.any((f) => f == '\\Answered');
               messages.add(native.EmailMessage(
@@ -182,7 +221,7 @@ class EmailModuleState extends State<EmailModule>
                 toAddr: e['to_addr']?.toString() ?? '',
                 file: e['file']?.toString() ?? '',
                 account: e['account']?.toString() ?? '',
-                groupId: groupId,
+                groupId: e['group_id']?.toString() ?? '',
                 xMailer: e['x_mailer']?.toString() ?? '',
                 isSent: e['is_sent'] is int ? e['is_sent'] : (int.tryParse(e['is_sent']?.toString() ?? '0') ?? 0),
               ));
@@ -190,11 +229,33 @@ class EmailModuleState extends State<EmailModule>
           }
         }
       } catch (e) {
-        native.EmailCore.logWrite('[Group] loadGroupMessages error: $e');
+        native.EmailCore.logWrite('[Unified] loadUnifiedSessionMessages error: $e');
       }
     }
-    // Order by the in_reply_to chain (rowid only as tie-breaker)
-    setState(() => _groupMessages = sortByReplyChain(messages));
+    refreshSessionReady();
+
+    // Resolve outbox "sending..." bubbles for this session: drop one once its
+    // real message has landed in localemail, or once the task failed permanently.
+    final pendingDone = <native.EmailMessage>[];
+    for (final p in _pendingUnifiedMessages) {
+      if (p.sessionId != unifiedSessionId) continue;
+      final landed = messages.any((m) => m.messageId.isNotEmpty && m.messageId == p.messageId);
+      if (landed) {
+        pendingDone.add(p);
+        continue;
+      }
+      try {
+        final st = jsonDecode(native.EmailCore.taskStatus(us.account, p.messageId));
+        if (st['task_status'] == 'failed') pendingDone.add(p);
+      } catch (e) {
+        native.EmailCore.logWrite('[Unified] taskStatus check error: $e');
+      }
+    }
+    if (pendingDone.isNotEmpty) {
+      setState(() => _pendingUnifiedMessages.removeWhere((p) => pendingDone.contains(p)));
+    }
+
+    setState(() => _unifiedMessages = sortByReplyChain(messages));
   }
 
   List<String> _configAccounts() {
@@ -224,29 +285,10 @@ class EmailModuleState extends State<EmailModule>
       final sentNotifications = native.EmailCore.getEmailSentNotifications();
       for (final notification in sentNotifications) {
         _logToFile('Email sent notification: ${notification}');
-        final sessionId = notification['session_id'] as String?;
-        // If we're in conversation view and the notification matches the current session, reload that session
-        if (_isConversationView && sessionId != null && sessionId == _selectedConversationMessageId) {
-          _logToFile('Reloading conversation: $sessionId');
-          // Reload emails from database
-          _loadEmailsFromDb();
-        } else {
-          // Otherwise reload all emails
-          _loadEmailsFromDb();
-        }
+        _loadEmailsFromDb();
       }
     });
 
-    // Periodically refresh conversation view for file transfer progress updates
-    Timer.periodic(const Duration(seconds: 2), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      if (_isConversationView) {
-        setState(() {});
-      }
-    });
   }
 
   Future<void> _initPaths() async {
@@ -306,9 +348,6 @@ class EmailModuleState extends State<EmailModule>
 
     // Clear memory data to force reload from database with file field
     _emails.clear();
-    _conversationEmails.clear();
-    _inboxEmails.clear();
-    _sentEmails.clear();
     _logToFile('Cleared memory data');
 
     _logToFile('About to call _loadEmailsFromDb...');
@@ -332,16 +371,16 @@ class EmailModuleState extends State<EmailModule>
             _logToFile('Background: new emails for ${msg.account}, count=${msg.data?['count']}');
             clearEmlCache();
             await _loadEmailsFromDb();
-            if (_selectedGroupId != null) {
-              loadGroupMessages(_selectedGroupId!);
+            if (_selectedUnifiedSessionId != null) {
+              loadUnifiedSessionMessages(_selectedUnifiedSessionId!);
             }
             break;
           case 'email_sent':
             _logToFile('Background: email sent for ${msg.account}, message_id=${msg.data?['message_id']}');
             clearEmlCache();
             await _loadEmailsFromDb();
-            if (_selectedGroupId != null) {
-              loadGroupMessages(_selectedGroupId!);
+            if (_selectedUnifiedSessionId != null) {
+              loadUnifiedSessionMessages(_selectedUnifiedSessionId!);
             }
             break;
           case 'log':
@@ -372,8 +411,8 @@ class EmailModuleState extends State<EmailModule>
             }
             clearEmlCache();
             await _loadEmailsFromDb();
-            if (_selectedGroupId != null) {
-              loadGroupMessages(_selectedGroupId!);
+            if (_selectedUnifiedSessionId != null) {
+              loadUnifiedSessionMessages(_selectedUnifiedSessionId!);
             }
             break;
           default:
@@ -415,34 +454,28 @@ class EmailModuleState extends State<EmailModule>
     }
 
     final allParsedEmails = <native.EmailMessage>[];
-    final allConversationRoots = <native.EmailMessage>[];
 
     for (final account in config.accounts) {
       _logToFile('Processing account: ${account.email}');
       if (account.email.isNotEmpty && account.authCode.isNotEmpty) {
         final result = await _connectAndFetchEmails(account.email, account.authCode);
         if (result != null) {
-          allParsedEmails.addAll(result.$1);
-          allConversationRoots.addAll(result.$2);
+          allParsedEmails.addAll(result);
         }
       } else {
         _logToFile('Account missing required fields');
       }
     }
 
-    final nonSentEmails = allParsedEmails.where((e) => e.folder != 'Sent' && e.folder != 'SENT').toList();
-    final sentEmails = allParsedEmails.where((e) => e.folder == 'Sent' || e.folder == 'SENT').toList();
-
     setState(() {
       _emails = allParsedEmails;
-      _conversationEmails = allConversationRoots;
-      _inboxEmails = nonSentEmails;
-      _sentEmails = sentEmails;
       if (_selectedEmail >= _emails.length) {
         _selectedEmail = _emails.isEmpty ? 0 : _emails.length - 1;
       }
     });
-    _logToFile('UI updated with ${_emails.length} emails (${_conversationEmails.length} conversations)');
+    _logToFile('UI updated with ${_emails.length} emails');
+
+    loadUnifiedSessions();
 
     _logToFile('=== _fetchEmailsFromAccounts END ===');
   }
@@ -451,7 +484,7 @@ class EmailModuleState extends State<EmailModule>
     native.EmailCore.logWrite('[Dart] $msg');
   }
 
-  Future<(List<native.EmailMessage>, List<native.EmailMessage>)?> _connectAndFetchEmails(String email, String authCode) async {
+  Future<List<native.EmailMessage>?> _connectAndFetchEmails(String email, String authCode) async {
     try {
       _logToFile('=== _connectAndFetchEmails START for $email ===');
 
@@ -553,43 +586,8 @@ class EmailModuleState extends State<EmailModule>
             );
           }).toList();
           
-          // Query conversation roots from database
-          final threadRootsResult = native.EmailCore.queryThreadRoots(email);
-          final threadRootsDecoded = jsonDecode(threadRootsResult);
-          final conversationRoots = <native.EmailMessage>[];
-          if (threadRootsDecoded['status'] == 'success') {
-            final threadRoots = threadRootsDecoded['emails'] as List;
-            conversationRoots.addAll(threadRoots.map((e) {
-              final flags = (e['flags'] is String && (e['flags'] as String).isNotEmpty) ? jsonDecode(e['flags']) : (e['flags'] is List ? e['flags'] : []);
-              final isAnswered = flags is List && flags.any((f) => f == '\\Answered');
-              return native.EmailMessage(
-                sender: e['from'] ?? e['from_addr'] ?? e['sender'] ?? '',
-                recipient: email,
-                subject: e['subject'] ?? '',
-                body: e['bodystructure'] ?? '',
-                timestamp: e['date'] ?? '',
-                uuid: e['uuid']?.toString() ?? '',
-                flags: flags is List ? flags.cast<String>() : [],
-                isAnswered: isAnswered,
-                inReplyTo: e['in_reply_to']?.toString() ?? '',
-                messageId: e['message_id']?.toString() ?? '',
-                folder: e['folder']?.toString() ?? 'INBOX',
-                isLocal: e['islocal'] is int ? e['islocal'] : (int.tryParse(e['islocal']?.toString() ?? '0') ?? 0),
-                sessionId: e['session_id']?.toString() ?? '',
-                rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
-                toAddr: e['to_addr']?.toString() ?? '',
-                file: e['file']?.toString() ?? '',
-                account: e['account']?.toString() ?? '',
-                groupId: e['group_id']?.toString() ?? '',
-                xMailer: e['x_mailer']?.toString() ?? '',
-                isSent: e['is_sent'] is int ? e['is_sent'] : (int.tryParse(e['is_sent']?.toString() ?? '0') ?? 0),
-                visible: e['visible'] is int ? e['visible'] : (int.tryParse(e['visible']?.toString() ?? '1') ?? 1),
-              );
-            }).toList());
-          }
-
-          _logToFile('Parsed ${parsedEmails.length} emails, ${conversationRoots.length} conversation roots for $email');
-          return (parsedEmails, conversationRoots);
+          _logToFile('Parsed ${parsedEmails.length} emails for $email');
+          return parsedEmails;
         }
       } catch (e) {
         _logToFile('Failed to parse localemail query result: $e');
@@ -669,63 +667,16 @@ class EmailModuleState extends State<EmailModule>
       }
     }
 
-    final nonSentEmails = allEmails.where((e) => e.folder != 'Sent' && e.folder != 'SENT').toList();
-    final sentEmails = allEmails.where((e) => e.folder == 'Sent' || e.folder == 'SENT').toList();
-    // Query conversation roots from database for each account
-    final conversationRoots = <native.EmailMessage>[];
-    for (final account in config.accounts) {
-      if (account.email.isNotEmpty) {
-        try {
-          final threadRootsResult = native.EmailCore.queryThreadRoots(account.email);
-          final threadRootsDecoded = jsonDecode(threadRootsResult);
-          if (threadRootsDecoded['status'] == 'success') {
-            final threadRoots = threadRootsDecoded['emails'] as List;
-            for (final e in threadRoots) {
-              final flags = (e['flags'] is String && (e['flags'] as String).isNotEmpty) ? jsonDecode(e['flags']) : (e['flags'] is List ? e['flags'] : []);
-              final isAnswered = flags is List && flags.any((f) => f == '\\Answered');
-              conversationRoots.add(native.EmailMessage(
-                sender: e['from'] ?? e['from_addr'] ?? e['sender'] ?? '',
-                recipient: account.email,
-                subject: e['subject'] ?? '',
-                body: e['bodystructure'] ?? '',
-                timestamp: e['date'] ?? '',
-                uuid: e['uuid']?.toString() ?? '',
-                flags: flags is List ? flags.cast<String>() : [],
-                isAnswered: isAnswered,
-                inReplyTo: e['in_reply_to']?.toString() ?? '',
-                messageId: e['message_id']?.toString() ?? '',
-                folder: e['folder']?.toString() ?? 'INBOX',
-                isLocal: e['islocal'] is int ? e['islocal'] : (int.tryParse(e['islocal']?.toString() ?? '0') ?? 0),
-                sessionId: e['session_id']?.toString() ?? '',
-                rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
-                toAddr: e['to_addr']?.toString() ?? '',
-                file: e['file']?.toString() ?? '',
-                account: e['account']?.toString() ?? '',
-                groupId: e['group_id']?.toString() ?? '',
-                xMailer: e['x_mailer']?.toString() ?? '',
-                isSent: e['is_sent'] is int ? e['is_sent'] : (int.tryParse(e['is_sent']?.toString() ?? '0') ?? 0),
-              ));
-            }
-          }
-        } catch (e) {
-          _logToFile('reloadFromDb: queryThreadRoots error for ${account.email}: $e');
-        }
-      }
-    }
-
     setState(() {
       _emails = allEmails;
-      _conversationEmails = conversationRoots;
-      _inboxEmails = nonSentEmails;
-      _sentEmails = sentEmails;
       if (_selectedEmail >= _emails.length) {
         _selectedEmail = _emails.isEmpty ? 0 : _emails.length - 1;
       }
     });
-    _logToFile('reloadFromDb: UI updated with ${_emails.length} total emails (${_conversationEmails.length} conversations, ${_inboxEmails.length} inbox, ${_sentEmails.length} sent)');
+    _logToFile('reloadFromDb: UI updated with ${_emails.length} total emails');
 
-    // Load group list
-    loadGroupList();
+    // Load unified sessions
+    loadUnifiedSessions();
   }
 
   Future<void> _loadEmailsFromDb() async {
@@ -751,6 +702,14 @@ class EmailModuleState extends State<EmailModule>
           _logToFile('_loadEmailsFromDb: generateSessions error for ${account.email}: $e');
         }
       }
+    }
+
+    // Migrate legacy encrypted sessions to unified_session table
+    try {
+      final migResult = native.EmailCore.migrateEncryptedSessions();
+      _logToFile('_loadEmailsFromDb: migrateEncryptedSessions result: $migResult');
+    } catch (e) {
+      _logToFile('_loadEmailsFromDb: migrateEncryptedSessions error: $e');
     }
 
     List<native.EmailMessage> allEmails = [];
@@ -799,63 +758,16 @@ class EmailModuleState extends State<EmailModule>
       }
     }
 
-    final nonSentEmails = allEmails.where((e) => e.folder != 'Sent' && e.folder != 'SENT').toList();
-    final sentEmails = allEmails.where((e) => e.folder == 'Sent' || e.folder == 'SENT').toList();
-
-    // Query conversation roots from database for each account
-    final conversationRoots = <native.EmailMessage>[];
-    for (final account in config.accounts) {
-      if (account.email.isNotEmpty) {
-        try {
-          final threadRootsResult = native.EmailCore.queryThreadRoots(account.email);
-          _logToFile('_loadEmailsFromDb: queryThreadRoots for ${account.email}: $threadRootsResult');
-          final threadRootsDecoded = jsonDecode(threadRootsResult);
-          if (threadRootsDecoded['status'] == 'success') {
-            final threadRoots = threadRootsDecoded['emails'] as List;
-            for (final e in threadRoots) {
-              final flags = (e['flags'] is String && (e['flags'] as String).isNotEmpty) ? jsonDecode(e['flags']) : (e['flags'] is List ? e['flags'] : []);
-              final isAnswered = flags is List && flags.any((f) => f == '\\Answered');
-              conversationRoots.add(native.EmailMessage(
-                sender: e['from'] ?? e['from_addr'] ?? e['sender'] ?? '',
-                recipient: account.email,
-                subject: e['subject'] ?? '',
-                body: e['bodystructure'] ?? '',
-                timestamp: e['date'] ?? '',
-                uuid: e['uuid']?.toString() ?? '',
-                flags: flags is List ? flags.cast<String>() : [],
-                isAnswered: isAnswered,
-                inReplyTo: e['in_reply_to']?.toString() ?? '',
-                messageId: e['message_id']?.toString() ?? '',
-                folder: e['folder']?.toString() ?? 'INBOX',
-                isLocal: e['islocal'] is int ? e['islocal'] : (int.tryParse(e['islocal']?.toString() ?? '0') ?? 0),
-                sessionId: e['session_id']?.toString() ?? '',
-                rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
-                toAddr: e['to_addr']?.toString() ?? '',
-                file: e['file']?.toString() ?? '',
-                account: e['account']?.toString() ?? '',
-                groupId: e['group_id']?.toString() ?? '',
-                xMailer: e['x_mailer']?.toString() ?? '',
-                isSent: e['is_sent'] is int ? e['is_sent'] : (int.tryParse(e['is_sent']?.toString() ?? '0') ?? 0),
-              ));
-            }
-          }
-        } catch (e) {
-          _logToFile('_loadEmailsFromDb: queryThreadRoots error for ${account.email}: $e');
-        }
-        await Future.delayed(Duration.zero);
-      }
-    }
-
     setState(() {
       _emails = allEmails;
-      _conversationEmails = conversationRoots;
-      _inboxEmails = nonSentEmails;
-      _sentEmails = sentEmails;
+      if (_selectedEmail >= _emails.length) {
+        _selectedEmail = _emails.isEmpty ? 0 : _emails.length - 1;
+      }
     });
-    _logToFile('_loadEmailsFromDb: loaded ${_emails.length} total emails (${_conversationEmails.length} conversations, ${_inboxEmails.length} inbox, ${_sentEmails.length} sent)');
+    _logToFile('_loadEmailsFromDb: loaded ${_emails.length} total emails');
 
-    // Load group list
-    loadGroupList();
+    // Load unified sessions
+    loadUnifiedSessions();
   }
 
   void _seedSampleEmails() {
@@ -909,21 +821,12 @@ class EmailModuleState extends State<EmailModule>
 
   @override
   Widget build(BuildContext context) {
-    if (isGroupView && selectedGroupId != null) {
+    if (_selectedUnifiedSessionId != null) {
       return Row(
         children: [
           buildEmailList(),
           buildDraggableDivider(),
-          Expanded(child: buildGroupConversationView()),
-        ],
-      );
-    }
-    if (isConversationView && selectedConversationMessageId != null) {
-      return Row(
-        children: [
-          buildEmailList(),
-          buildDraggableDivider(),
-          buildConversationDetail(),
+          Expanded(child: buildUnifiedConversationView()),
         ],
       );
     }
@@ -936,480 +839,5 @@ class EmailModuleState extends State<EmailModule>
     );
   }
 
-  Widget buildGroupConversationView() {
-    final groupId = selectedGroupId!;
-    final messages = groupMessages;
-
-    // Find group info
-    Map<String, dynamic>? groupInfo;
-    for (final g in groupList) {
-      if (g['group_id'] == groupId) {
-        groupInfo = g;
-        break;
-      }
-    }
-    final subject = groupInfo?['subject'] as String? ?? '群组';
-    final members = (groupInfo?['members'] as List?)?.cast<String>() ?? [];
-    final owner = groupInfo?['owner'] as String? ?? '';
-    final ready = groupInfo?['ready'] as bool? ?? false;
-    final groupAccount = groupInfo?['account'] as String? ?? '';
-
-    final conversation = Container(
-      color: Colors.white,
-      child: Column(
-        children: [
-          // Header
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF5F5F5),
-              border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.group, color: Colors.green[700], size: 24),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(subject, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                      Text('${members.length}人', style: TextStyle(fontSize: 12, color: Colors.grey[500])),
-                    ],
-                  ),
-                ),
-                if (!ready)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(color: Colors.orange[100], borderRadius: BorderRadius.circular(4)),
-                    child: Text('等待密钥分发', style: TextStyle(fontSize: 12, color: Colors.orange[700])),
-                  ),
-                const SizedBox(width: 8),
-                IconButton(
-                  icon: const Icon(Icons.refresh),
-                  onPressed: () => loadGroupMessages(groupId),
-                  tooltip: '刷新',
-                ),
-                IconButton(
-                  icon: const Icon(Icons.more_horiz),
-                  onPressed: () => setState(() => _showGroupMembers = true),
-                  tooltip: '成员',
-                ),
-              ],
-            ),
-          ),
-          // Messages
-          Expanded(
-            child: messages.isEmpty
-                ? Center(child: Text('暂无消息', style: TextStyle(color: Colors.grey[400])))
-                : ListView.builder(
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) => _buildGroupMessageBubble(messages[index], members),
-                  ),
-          ),
-          // Input bar
-          _buildGroupInputBar(groupId, ready, members, groupAccount),
-        ],
-      ),
-    );
-
-    final memberPanel = Container(
-      width: 240,
-      decoration: BoxDecoration(
-        color: const Color(0xFFF7F7F7),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 12, offset: const Offset(-2, 0))],
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              children: [
-                Text('群成员', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Colors.grey[600])),
-                const SizedBox(width: 8),
-                Text('(${members.length})', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    groupId,
-                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 20),
-                  tooltip: '收起',
-                  padding: EdgeInsets.zero,
-                  onPressed: () => setState(() => _showGroupMembers = false),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              itemCount: members.length,
-              itemBuilder: (context, index) {
-                final m = members[index];
-                final isOwner = m == owner;
-                final isMe = m.toLowerCase() == groupAccount.toLowerCase();
-                return ListTile(
-                  dense: true,
-                  leading: CircleAvatar(
-                    radius: 16,
-                    backgroundColor: isOwner ? Colors.orange[100] : Colors.blue[100],
-                    child: Text(m.isNotEmpty ? m[0].toUpperCase() : '?',
-                        style: TextStyle(fontSize: 12, color: isOwner ? Colors.orange[700] : Colors.blue[700])),
-                  ),
-                  title: Text(m, style: TextStyle(fontSize: 12, color: Colors.grey[800]), overflow: TextOverflow.ellipsis),
-                  trailing: isOwner
-                      ? Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(color: Colors.orange[50], borderRadius: BorderRadius.circular(4)),
-                          child: Text('群主', style: TextStyle(fontSize: 10, color: Colors.orange[700])),
-                        )
-                      : isMe
-                          ? Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(color: Colors.green[50], borderRadius: BorderRadius.circular(4)),
-                              child: Text('我', style: TextStyle(fontSize: 10, color: Colors.green[700])),
-                            )
-                          : null,
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-
-    return Stack(
-      children: [
-        conversation,
-        Positioned(
-          top: 0,
-          right: 0,
-          bottom: 0,
-          child: AnimatedSlide(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOut,
-            offset: _showGroupMembers ? Offset.zero : const Offset(1, 0),
-            child: memberPanel,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildGroupMessageBubble(native.EmailMessage msg, List<String> members) {
-    final isMe = msg.isSent == 1;
-
-    // Resolve display body from the .eml file (handshake -> 🤝, group msg -> decrypted text)
-    bool isHandshake = native.XMailer.isKeyExchange(msg.xMailer);
-    String displayBody = '';
-    if (msg.file.isNotEmpty) {
-      final emlPath = '$_emailDataPath/${msg.account}/${msg.file}.eml';
-      final parsed = parseEmlFile(emlPath, account: msg.account, sessionId: msg.sessionId, fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
-      isHandshake = isHandshake || parsed.isHandshakeMessage;
-      displayBody = parsed.textBody;
-    } else if (!isHandshake) {
-      displayBody = AppStrings.isZh ? '[下载中...]' : '[Downloading...]';
-    }
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!isMe) ...[
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Colors.blue[100],
-              child: Text(msg.sender.isNotEmpty ? msg.sender[0].toUpperCase() : '?',
-                  style: TextStyle(color: Colors.blue[700])),
-            ),
-            const SizedBox(width: 8),
-          ],
-          Flexible(
-            child: Column(
-              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                if (!isMe)
-                  Text(msg.sender, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: isMe ? const Color(0xFF95EC69) : Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey[300]!),
-                  ),
-                  child: isHandshake
-                      ? const Text('🤝', style: TextStyle(fontSize: 20))
-                      : SelectableText(displayBody, style: const TextStyle(fontSize: 14)),
-                ),
-                const SizedBox(height: 2),
-                Text(msg.timestamp, style: TextStyle(fontSize: 11, color: Colors.grey[400])),
-              ],
-            ),
-          ),
-          if (isMe) ...[
-            const SizedBox(width: 8),
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Colors.green[100],
-              child: Text('我', style: TextStyle(color: Colors.green[700], fontSize: 12)),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildGroupInputBar(String groupId, bool ready, List<String> members, String groupAccount) {
-    final myEmail = groupAccount.isNotEmpty ? groupAccount : (native.EmailCore.loadConfig(_configPath)?.accounts.firstWhere((a) => a.email.isNotEmpty).email ?? '');
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF7F7F7),
-        border: Border(
-          top: BorderSide(color: Colors.grey[300]!, width: 0.5),
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: DropTarget(
-                  onDragDone: (detail) {
-                    setState(() {
-                      for (final file in detail.files) {
-                        final path = file.path;
-                        final name = path.split('/').last;
-                        int size = 0;
-                        try {
-                          size = File(path).lengthSync();
-                        } catch (_) {}
-                        _droppedFiles.add(DroppedFile(name: name, path: path, size: size));
-                        final cursor = _replyController.selection.baseOffset;
-                        final text = _replyController.text;
-                        final newText = text.substring(0, cursor.clamp(0, text.length)) +
-                            '\uFFFC' +
-                            text.substring(cursor.clamp(0, text.length));
-                        _replyController.value = TextEditingValue(
-                          text: newText,
-                          selection: TextSelection.collapsed(offset: cursor + 1),
-                        );
-                      }
-                      _isDragging = false;
-                    });
-                  },
-                  onDragEntered: (detail) {
-                    setState(() => _isDragging = true);
-                  },
-                  onDragExited: (detail) {
-                    setState(() => _isDragging = false);
-                  },
-                  child: Container(
-                    constraints: const BoxConstraints(maxHeight: 200),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(
-                          color: _isDragging ? const Color(0xFF07C160) : Colors.grey[300]!,
-                          width: 1,
-                        ),
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: SingleChildScrollView(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Theme(
-                                data: Theme.of(context).copyWith(
-                                  hoverColor: Colors.transparent,
-                                  highlightColor: Colors.transparent,
-                                ),
-                                child: TextField(
-                                  controller: _replyController,
-                                  maxLines: 5,
-                                  minLines: 2,
-                                  enabled: ready,
-                                  onTap: () {
-                                    if (_showEmojiPicker) {
-                                      setState(() => _showEmojiPicker = false);
-                                    }
-                                  },
-                                  decoration: InputDecoration(
-                                    hintText: ready ? AppStrings.sendMessageHint : '等待密钥分发完成...',
-                                    hintStyle: TextStyle(fontSize: 14, color: Colors.grey[400]),
-                                    border: InputBorder.none,
-                                    enabledBorder: InputBorder.none,
-                                    focusedBorder: InputBorder.none,
-                                    disabledBorder: InputBorder.none,
-                                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                                    isDense: true,
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.only(left: 4, bottom: 4),
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
-                                        onPressed: () {},
-                                        constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
-                                        padding: EdgeInsets.zero,
-                                      ),
-                                      IconButton(
-                                        icon: Icon(
-                                          _showEmojiPicker ? Icons.emoji_emotions : Icons.emoji_emotions_outlined,
-                                          size: 20,
-                                          color: _showEmojiPicker ? const Color(0xFF07C160) : Colors.grey[600],
-                                        ),
-                                        onPressed: ready ? () {
-                                          setState(() {
-                                            _showEmojiPicker = !_showEmojiPicker;
-                                          });
-                                        } : null,
-                                        constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
-                                        padding: EdgeInsets.zero,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              TextButton(
-                style: TextButton.styleFrom(
-                  backgroundColor: const Color(0xFF07C160),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                ),
-                onPressed: ready ? () {
-                  if (_showEmojiPicker) {
-                    setState(() => _showEmojiPicker = false);
-                  }
-                  _sendGroupMessage(groupId, myEmail, members);
-                } : null,
-                child: Text(AppStrings.send, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-              ),
-            ],
-          ),
-          if (_showEmojiPicker)
-            SizedBox(
-              height: 250,
-              child: EmojiPicker(
-                onEmojiSelected: (category, emoji) {
-                  if (emoji != null) {
-                    final text = _replyController.text;
-                    final selection = _replyController.selection;
-                    final cursorPos = selection.baseOffset < 0 ? text.length : selection.baseOffset;
-                    final newText = text.substring(0, cursorPos) + emoji.emoji + text.substring(cursorPos);
-                    _replyController.value = TextEditingValue(
-                      text: newText,
-                      selection: TextSelection.collapsed(offset: cursorPos + emoji.emoji.length),
-                    );
-                  }
-                },
-                config: Config(
-                  height: 250,
-                  checkPlatformCompatibility: true,
-                  emojiViewConfig: EmojiViewConfig(
-                    emojiSizeMax: 28,
-                    backgroundColor: Colors.white,
-                  ),
-                  categoryViewConfig: CategoryViewConfig(
-                    indicatorColor: const Color(0xFF07C160),
-                    iconColorSelected: const Color(0xFF07C160),
-                    backgroundColor: Colors.white,
-                  ),
-                  searchViewConfig: SearchViewConfig(
-                    backgroundColor: Colors.white,
-                    buttonIconColor: Colors.grey[600] ?? Colors.grey,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  void _sendGroupMessage(String groupId, String myEmail, List<String> members) {
-    final text = _replyController.text.trim();
-    if (text.isEmpty) return;
-
-    native.EmailCore.logWrite('[GROUP_SEND] groupId=$groupId, text=$text');
-
-    // Reply chain: in_reply_to = local x_message_id of the last message in this group.
-    final chain = groupMessages.where((m) => m.messageId.isNotEmpty).toList();
-    if (chain.isEmpty) {
-      native.EmailCore.logWrite('[GROUP_SEND] no root message in group=$groupId, cannot chain');
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('群组尚未建立消息链，无法发送'), duration: Duration(seconds: 3)),
-      );
-      return;
-    }
-    final inReplyTo = chain.last.messageId;
-
-    // MLS: group_send_message encrypts the plaintext and queues the task internally.
-    final result = native.EmailCore.groupSendMessage(myEmail, groupId, text, inReplyTo);
-    native.EmailCore.logWrite('[GROUP_SEND] groupSendMessage result: $result');
-
-    Map<String, dynamic> resultJson;
-    try {
-      resultJson = jsonDecode(result);
-    } catch (e) {
-      native.EmailCore.logWrite('[GROUP_SEND] parse error: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败: $e'), duration: const Duration(seconds: 3)),
-      );
-      return;
-    }
-
-    if (resultJson['status'] != 'success') {
-      final err = resultJson['error'] ?? 'unknown';
-      native.EmailCore.logWrite('[GROUP_SEND] failed: $err');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败: $err'), duration: const Duration(seconds: 3)),
-      );
-      return;
-    }
-
-    final rc = resultJson['task_id'] as int? ?? 0;
-    if (rc > 0) {
-      _replyController.clear();
-      setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('消息已发送'), duration: Duration(seconds: 1)),
-      );
-      loadGroupMessages(groupId);
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败: rc=$rc'), duration: const Duration(seconds: 3)),
-      );
-    }
-  }
+  // buildUnifiedConversationView is defined in conversation_view.dart mixin
 }

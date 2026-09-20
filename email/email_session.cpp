@@ -6,6 +6,7 @@
 #include "session_repo.h"
 #include "signal/signal_protocol.h"
 #include "key_repo.h"
+#include "unified/unified_session_repo.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <sstream>
 #include <chrono>
+#include <random>
 
 using json = nlohmann::json;
 
@@ -432,5 +434,99 @@ extern "C" int email_hide_session(const char* sessionId) {
     if (!s_sessionRepo.hideSession(sessionId)) return -4;
 
     LOG_INFO("email_hide_session: session %s hidden\n", sessionId);
+    return 0;
+}
+
+// Migrate legacy encrypted sessions (encrypt_method=1) to the unified_session table.
+// This ensures that sessions created before the unified session system are visible
+// in the unified session list and filtered from the legacy list.
+extern "C" int email_migrate_encrypted_sessions(char* outJson, int outSize) {
+    auto& conn = DbConnection::instance();
+    if (!conn.get()) {
+        if (outJson && outSize > 0)
+            snprintf(outJson, outSize, R"({"status":"error","error":"no_db"})");
+        return -1;
+    }
+
+    sqlite3* db = conn.get();
+    int created = 0;
+
+    // Find all distinct legacy sessions with encrypt_method=1 (Signal encrypted)
+    const char* sql =
+        "SELECT DISTINCT s.session_id, s.signal_session_id, "
+        "  l.account, COALESCE(NULLIF(l.sender,''), l.from_addr, '') AS sender, "
+        "  l.to_addr, l.subject, l.message_id "
+        "FROM session s "
+        "INNER JOIN localemail l ON l.id = s.email_id "
+        "WHERE s.encrypt_method = 1 AND s.visible = 1 AND l.visible = 1 "
+        "AND l.id = (SELECT MIN(email_id) FROM session WHERE session_id = s.session_id AND email_id > 0);";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        if (outJson && outSize > 0)
+            snprintf(outJson, outSize, R"({"status":"error","error":"prepare_failed"})");
+        return -1;
+    }
+
+    static UnifiedSessionRepo usRepo;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        std::string legacySid = (const char*)sqlite3_column_text(stmt, 0);
+        std::string signalSid  = sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
+        std::string account    = (const char*)sqlite3_column_text(stmt, 2);
+        std::string sender     = (const char*)sqlite3_column_text(stmt, 3);
+        std::string toAddr     = sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "";
+        std::string subject    = sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
+        std::string messageId  = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
+
+        // Determine peer: for sent emails peer is in toAddr, for received peer is sender
+        std::string peer;
+        if (!toAddr.empty()) {
+            // Could be comma-separated; take first address
+            auto comma = toAddr.find(',');
+            peer = (comma != std::string::npos) ? toAddr.substr(0, comma) : toAddr;
+            // Trim whitespace
+            while (!peer.empty() && peer.front() == ' ') peer.erase(peer.begin());
+            while (!peer.empty() && peer.back() == ' ') peer.pop_back();
+        }
+        if (peer.empty() || peer == account) {
+            peer = sender;
+        }
+        if (peer.empty() || peer == account) continue;
+
+        // Build members list
+        std::vector<std::string> members = {account, peer};
+
+        // Dedup by the conversation root (the legacy session's first message id),
+        // not by member set — multiple sessions can exist for the same peer pair.
+        UnifiedSession existing;
+        if (!messageId.empty() && usRepo.loadByRootMessageId(account, messageId, existing)) continue;
+
+        // Create unified session
+        UnifiedSession rec;
+        static std::mt19937_64 rng{std::random_device{}()};
+        auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        rec.sessionId = "us_" + std::to_string(secs) + "." + std::to_string(rng() % 100000000);
+        rec.account = account;
+        rec.subject = subject;
+        rec.mode = SessionMode::Signal;
+        rec.members = members;
+        rec.signalSessionId = signalSid;
+        rec.rootMessageId = messageId;
+        rec.status = 0;
+
+        if (usRepo.create(rec)) {
+            LOG_INFO("[migrate] created unified session %s for legacy %s (account=%s, peer=%s)\n",
+                     rec.sessionId.c_str(), legacySid.c_str(), account.c_str(), peer.c_str());
+            created++;
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (outJson && outSize > 0) {
+        snprintf(outJson, outSize, R"({"status":"success","created":%d})", created);
+    }
+    LOG_INFO("[migrate] encrypted sessions migration complete: %d unified sessions created\n", created);
     return 0;
 }

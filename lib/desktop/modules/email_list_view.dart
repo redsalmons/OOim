@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
+import '../../native/unified_session.dart';
 import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'conversation_view.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
-import '../dialogs/create_group_dialog.dart';
 import '../../i18n/app_strings.dart';
 
 mixin EmailListViewMixin on State<EmailModule> {
@@ -16,28 +15,21 @@ mixin EmailListViewMixin on State<EmailModule> {
   set searchQuery(String v);
   TextEditingController get searchController;
   List<native.EmailMessage> get emails;
-  List<native.EmailMessage> get conversationEmails;
   Set<String> get collapsedSections;
   Set<String> get collapsedGroups;
   int get selectedEmail;
   set selectedEmail(int v);
-  String? get selectedConversationMessageId;
-  set selectedConversationMessageId(String? v);
-  bool get isConversationView;
-  set isConversationView(bool v);
   Set<int> get unreadIndices;
   Map<String, int> get configIndexMap;
   String get configPath;
 
-  // Group state
-  List<Map<String, dynamic>> get groupList;
-  String? get selectedGroupId;
-  set selectedGroupId(String? v);
-  bool get isGroupView;
-  set isGroupView(bool v);
-  List<native.EmailMessage> get groupMessages;
-  void loadGroupList();
-  void loadGroupMessages(String groupId);
+  // Unified session state
+  List<UnifiedSessionInfo> get unifiedSessions;
+  String? get selectedUnifiedSessionId;
+  set selectedUnifiedSessionId(String? v);
+  List<native.EmailMessage> get unifiedMessages;
+  void loadUnifiedSessions();
+  void loadUnifiedSessionMessages(String unifiedSessionId);
 
   void refreshEmails() {}
   void fetchEmailsFromAccounts() {}
@@ -62,47 +54,34 @@ mixin EmailListViewMixin on State<EmailModule> {
   List<Widget> buildGroupedEmailList() {
     final List<Widget> widgets = [];
 
-    // Section 0: 群组 (groups)
-    if (groupList.isNotEmpty) {
-      final sectionKey = 'groups';
-      final isCollapsed = collapsedSections.contains(sectionKey);
-      widgets.add(_buildGroupSectionHeader('群组', groupList.length, sectionKey, isCollapsed));
-      if (!isCollapsed) {
-        for (final group in groupList) {
-          widgets.add(_buildGroupItem(group));
-        }
-      }
-    }
-
-    // Section 1: 会话 (conversations) - 一级分组
+    // Section 0: Unified sessions — grouped by account
     {
-      final sectionKey = 'conversations';
+      final sectionKey = 'unified_sessions';
       final isCollapsed = collapsedSections.contains(sectionKey);
-      widgets.add(buildConversationSectionHeader(AppStrings.conversation, conversationEmails.length, sectionKey, isCollapsed));
+      widgets.add(_buildUnifiedSectionHeader(
+          AppStrings.conversation, unifiedSessions.length, sectionKey, isCollapsed));
       if (!isCollapsed) {
-        // 二级分组：按接收邮箱分组
-        final accountConversations = <String, List<native.EmailMessage>>{};
-        for (final email in conversationEmails) {
-          final account = email.account.isNotEmpty ? email.account : (email.recipient.isNotEmpty ? email.recipient : AppStrings.unknownAccount);
-          accountConversations.putIfAbsent(account, () => []).add(email);
-        }
-
-        for (final accountEntry in accountConversations.entries) {
-          final account = accountEntry.key;
-          final convList = accountEntry.value;
-
-          final groupKey = 'conversations:$account';
-          final isGroupCollapsed = collapsedGroups.contains(groupKey);
-          widgets.add(buildGroupHeader(account, convList.length, groupKey, isGroupCollapsed));
-          if (!isGroupCollapsed) {
-            if (convList.isEmpty) {
-              widgets.add(Container(
-                padding: const EdgeInsets.fromLTRB(28, 6, 8, 6),
-                child: Text(AppStrings.noConversations, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
-              ));
-            } else {
-              for (final email in convList) {
-                widgets.add(buildConversationItem(email));
+        if (unifiedSessions.isEmpty) {
+          widgets.add(Container(
+            padding: const EdgeInsets.fromLTRB(28, 6, 8, 6),
+            child: Text(AppStrings.noConversations, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+          ));
+        } else {
+          // Group sessions by account
+          final sessionsByAccount = <String, List<UnifiedSessionInfo>>{};
+          for (final s in unifiedSessions) {
+            final acc = s.account.isNotEmpty ? s.account : AppStrings.unknownAccount;
+            sessionsByAccount.putIfAbsent(acc, () => []).add(s);
+          }
+          for (final entry in sessionsByAccount.entries) {
+            final account = entry.key;
+            final sessions = entry.value;
+            final groupKey = 'unified:$account';
+            final isGroupCollapsed = collapsedGroups.contains(groupKey);
+            widgets.add(buildGroupHeader(account, sessions.length, groupKey, isGroupCollapsed));
+            if (!isGroupCollapsed) {
+              for (final session in sessions) {
+                widgets.add(buildUnifiedSessionItem(session));
               }
             }
           }
@@ -217,53 +196,6 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
-  Widget buildConversationSectionHeader(String title, int count, String key, bool isCollapsed) {
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          if (isCollapsed) {
-            collapsedSections.remove(key);
-          } else {
-            collapsedSections.add(key);
-          }
-        });
-      },
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-        color: const Color(0xFFBBDEFB),
-        child: Row(
-          children: [
-            Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800])),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(8)),
-              child: Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
-            ),
-            const Spacer(),
-            GestureDetector(
-              onTap: () => _showCreateGroupDialog(),
-              child: Container(
-                padding: const EdgeInsets.all(2),
-                child: Icon(Icons.group_add, size: 18, color: Colors.green[700]),
-              ),
-            ),
-            const SizedBox(width: 4),
-            GestureDetector(
-              onTap: () => _showCreateSessionDialog(),
-              child: Container(
-                padding: const EdgeInsets.all(2),
-                child: Icon(Icons.add, size: 18, color: Colors.blue[700]),
-              ),
-            ),
-            const SizedBox(width: 4),
-            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 18, color: Colors.grey[600]),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _showCreateSessionDialog() {
     final config = native.EmailCore.loadConfig(configPath);
     final accounts = config?.accounts
@@ -293,36 +225,8 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
-  void _showCreateGroupDialog() {
-    final config = native.EmailCore.loadConfig(configPath);
-    final accounts = config?.accounts
-            .where((a) => a.email.isNotEmpty)
-            .map((a) => a.email)
-            .toList() ??
-        <String>[];
-    if (accounts.isEmpty) {
-      showDialog(
-        context: context,
-        builder: (context) => EmailConfigDialog(
-          configPath: configPath,
-          onDone: () async {
-            fetchEmailsFromAccounts();
-          },
-        ),
-      );
-      return;
-    }
-    showDialog(
-      context: context,
-      builder: (context) => CreateGroupDialog(
-        accounts: accounts,
-        configPath: configPath,
-        onCreated: () => refreshEmails(),
-      ),
-    );
-  }
 
-  Widget _buildGroupSectionHeader(String title, int count, String key, bool isCollapsed) {
+  Widget _buildUnifiedSectionHeader(String title, int count, String key, bool isCollapsed) {
     return GestureDetector(
       onTap: () {
         setState(() {
@@ -335,10 +239,10 @@ mixin EmailListViewMixin on State<EmailModule> {
       },
       child: Container(
         padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-        color: const Color(0xFFC8E6C9),
+        color: const Color(0xFFBBDEFB),
         child: Row(
           children: [
-            Icon(Icons.group, size: 16, color: Colors.green[800]),
+            Icon(Icons.chat, size: 16, color: Colors.blue[800]),
             const SizedBox(width: 6),
             Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800])),
             const SizedBox(width: 8),
@@ -348,6 +252,14 @@ mixin EmailListViewMixin on State<EmailModule> {
               child: Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
             ),
             const Spacer(),
+            GestureDetector(
+              onTap: () => _showCreateSessionDialog(),
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                child: Icon(Icons.add, size: 18, color: Colors.blue[700]),
+              ),
+            ),
+            const SizedBox(width: 4),
             Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 18, color: Colors.grey[600]),
           ],
         ),
@@ -355,46 +267,31 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
-  Widget _buildGroupItem(Map<String, dynamic> group) {
-    final groupId = group['group_id'] as String;
-    final subject = group['subject'] as String? ?? '群组';
-    final members = (group['members'] as List?)?.cast<String>() ?? [];
-    final ready = group['ready'] as bool? ?? false;
-    final isSelected = isGroupView && selectedGroupId == groupId;
+  Widget buildUnifiedSessionItem(UnifiedSessionInfo session) {
+    final isSelected = selectedUnifiedSessionId == session.sessionId;
+    final memberCount = session.members.length;
+    final isGroup = memberCount > 2;
 
-    final memberCount = members.length;
-    final displayMembers = members.take(3).join(', ');
-    final memberText = memberCount > 3 ? '$displayMembers 等$memberCount人' : displayMembers;
+    // Title: subject if available, otherwise member names
+    String title = session.subject.isNotEmpty ? session.subject : '';
+    if (title.isEmpty) {
+      final names = session.members.where((m) => m != session.account).take(3).toList();
+      title = names.join(', ');
+      if (memberCount - 1 > 3) title += ' ...';
+    }
+    if (title.isEmpty) title = AppStrings.noSubject;
 
     return GestureDetector(
       onTap: () {
         setState(() {
-          selectedGroupId = groupId;
-          isGroupView = true;
-          isConversationView = false;
-          loadGroupMessages(groupId);
-        });
-      },
-      onSecondaryTapDown: (details) {
-        showMenu<String>(
-          context: context,
-          position: RelativeRect.fromLTRB(
-            details.globalPosition.dx, details.globalPosition.dy,
-            details.globalPosition.dx, details.globalPosition.dy,
-          ),
-          items: [
-            const PopupMenuItem<String>(value: 'info', child: Text('群组信息')),
-          ],
-        ).then((value) {
-          if (value == 'info') {
-            _showGroupInfoDialog(groupId);
-          }
+          selectedUnifiedSessionId = session.sessionId;
+          loadUnifiedSessionMessages(session.sessionId);
         });
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE8F5E9) : Colors.transparent,
+          color: isSelected ? const Color(0xFFE3F2FD) : Colors.transparent,
           border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
         ),
         child: Row(
@@ -402,35 +299,27 @@ mixin EmailListViewMixin on State<EmailModule> {
           children: [
             CircleAvatar(
               radius: 18,
-              backgroundColor: Colors.green[100],
-              child: Icon(Icons.group, size: 18, color: Colors.green[700]),
+              backgroundColor: isGroup ? Colors.green[100] : Colors.blue[100],
+              child: Icon(
+                isGroup ? Icons.group : Icons.person,
+                size: 18,
+                color: isGroup ? Colors.green[700] : Colors.blue[700],
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          subject,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey[800]),
-                        ),
-                      ),
-                      if (!ready)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                          decoration: BoxDecoration(color: Colors.orange[100], borderRadius: BorderRadius.circular(4)),
-                          child: Text('等待密钥', style: TextStyle(fontSize: 10, color: Colors.orange[700])),
-                        ),
-                    ],
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey[800]),
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    memberText,
+                    '$memberCount${AppStrings.isZh ? "人" : " members"} · ${session.updatedAt}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 12, color: Colors.grey[500]),
@@ -440,47 +329,6 @@ mixin EmailListViewMixin on State<EmailModule> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  void _showGroupInfoDialog(String groupId) {
-    final config = native.EmailCore.loadConfig(configPath);
-    final account = config?.accounts.firstWhere((a) => a.email.isNotEmpty).email ?? '';
-    if (account.isEmpty) return;
-    final infoJson = native.EmailCore.groupGetInfo(account, groupId);
-    Map<String, dynamic> info;
-    try {
-      info = jsonDecode(infoJson) as Map<String, dynamic>;
-    } catch (_) {
-      info = {};
-    }
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('群组信息'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('群组: ${info['subject'] ?? ''}'),
-            const SizedBox(height: 8),
-            Text('Epoch: ${info['epoch'] ?? 0}'),
-            const SizedBox(height: 8),
-            const Text('成员:', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(height: 4),
-            ...((info['members'] as List?)?.cast<String>() ?? []).map((m) => Padding(
-              padding: const EdgeInsets.only(left: 16, top: 2),
-              child: Text(m, style: const TextStyle(fontSize: 13)),
-            )),
-            const SizedBox(height: 8),
-            Text('就绪: ${info['ready'] == true ? '是' : '否'}',
-                style: TextStyle(color: info['ready'] == true ? Colors.green : Colors.orange)),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: Text(AppStrings.cancel)),
-        ],
       ),
     );
   }
@@ -536,143 +384,6 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
-  Widget buildConversationItem(native.EmailMessage email) {
-    final sessionId = email.sessionId.isNotEmpty ? email.sessionId : email.messageId;
-    final isSelected = isConversationView && selectedConversationMessageId == sessionId;
-
-    // Query unread count for this session
-    final unreadCount = native.EmailCore.querySessionUnread(sessionId);
-
-    // Extract all members from thread emails (sender + to_addr + recipient)
-    final memberNames = <String>{};
-    final thread = emails.where((e) => e.sessionId == sessionId).toList();
-    for (final e in thread) {
-      if (e.sender.isNotEmpty) memberNames.add(extractName(e.sender));
-      if (e.toAddr.isNotEmpty) {
-        for (final addr in e.toAddr.split(',')) {
-          final trimmed = addr.trim();
-          if (trimmed.isNotEmpty) memberNames.add(extractName(trimmed));
-        }
-      }
-      if (e.recipient.isNotEmpty) memberNames.add(extractName(e.recipient));
-    }
-    // If still empty, use root email sender
-    if (memberNames.isEmpty) {
-      memberNames.add(extractName(email.sender));
-    }
-    
-    // Convert to a List and limit to avoid UI overflow (e.g., max 3-4 names)
-    var displayList = memberNames.toList();
-    if (displayList.length > 3) {
-      displayList = displayList.sublist(0, 3);
-      displayList.add('${memberNames.length}${AppStrings.andMore}');
-    }
-    final displayName = displayList.join(', ');
-    final index = emails.indexWhere((e) => e.uuid == email.uuid);
-    final unread = index >= 0 && unreadIndices.contains(index);
-
-    // Find the last message time in the thread
-    String lastMessageTime = email.timestamp;
-    if (thread.isNotEmpty) {
-      final sortedThread = List<native.EmailMessage>.from(thread)
-        ..sort((a, b) => a.rowid.compareTo(b.rowid));
-      lastMessageTime = sortedThread.last.timestamp;
-    }
-
-    return GestureDetector(
-      onSecondaryTapDown: (details) {
-        showMenu<String>(
-          context: context,
-          position: RelativeRect.fromLTRB(
-            details.globalPosition.dx,
-            details.globalPosition.dy,
-            details.globalPosition.dx,
-            details.globalPosition.dy,
-          ),
-          items: [
-            PopupMenuItem<String>(
-              value: 'delete',
-              child: Text(AppStrings.delete),
-            ),
-          ],
-        ).then((value) {
-          if (value == 'delete') {
-            native.EmailCore.hideSession(sessionId);
-            setState(() {
-              conversationEmails.removeWhere((e) =>
-                (e.sessionId.isNotEmpty ? e.sessionId : e.messageId) == sessionId);
-            });
-          }
-        });
-      },
-      onTap: () {
-        setState(() {
-          selectedConversationMessageId = sessionId;
-          isConversationView = true;
-          isGroupView = false;
-          if (index >= 0) {
-            selectedEmail = index;
-            unreadIndices.remove(index);
-          }
-        });
-        // Mark session as read
-        native.EmailCore.updateSessionRead(sessionId);
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE8F0FE) : Colors.transparent,
-          border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
-        ),
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                buildAvatar(displayName, email: email.sender),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(child: Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 19.5, fontWeight: unreadCount > 0 ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
-                          Text(formatTime(email.timestamp), style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(displayName, style: TextStyle(fontSize: 12, color: Colors.grey[600]), maxLines: 1, overflow: TextOverflow.ellipsis),
-                      const SizedBox(height: 2),
-                      Text(previewFor(email), style: TextStyle(fontSize: 11, color: Colors.grey[500]), maxLines: 1, overflow: TextOverflow.ellipsis),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            if (unreadCount > 0)
-              Positioned(
-                top: -2,
-                right: 0,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.red,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    unreadCount > 99 ? '99+' : '$unreadCount',
-                    style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget buildEmailItem(int index) {
     final email = emails[index];
     final isSelected = selectedEmail == index;
@@ -683,7 +394,7 @@ mixin EmailListViewMixin on State<EmailModule> {
       onTap: () {
         setState(() {
           selectedEmail = index;
-          isConversationView = false;
+          selectedUnifiedSessionId = null;
           unreadIndices.remove(index);
         });
       },

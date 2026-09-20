@@ -262,6 +262,9 @@ typedef _EmailQueryThreadDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 typedef _EmailGenerateSessionsNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailGenerateSessionsDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
+typedef _EmailMigrateEncryptedSessionsNative = Int32 Function(Pointer<Utf8>, Int32);
+typedef _EmailMigrateEncryptedSessionsDart = int Function(Pointer<Utf8>, int);
+
 typedef _EmailCreateSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int64, Pointer<Utf8>, Int32);
 typedef _EmailCreateSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, int, Pointer<Utf8>, int);
 
@@ -407,6 +410,8 @@ typedef _EmailTaskMarkFailedDart = int Function(int);
 
 typedef _EmailTaskProcessPendingNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailTaskProcessPendingDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _EmailTaskStatusNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailTaskStatusDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _EmailMigrateIslocalNative = Int32 Function();
 typedef _EmailMigrateIslocalDart = int Function();
@@ -467,6 +472,8 @@ typedef _GroupListDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _GroupSendMessageNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _GroupSendMessageDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+typedef _GroupSendFileNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _GroupSendFileDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _GroupHandleIncomingNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Int32);
 typedef _GroupHandleIncomingDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, int);
@@ -555,6 +562,7 @@ final _emailQueryLocalemail = _lib.lookupFunction<_EmailQueryLocalemailNative, _
 final _emailQueryThreadRoots = _lib.lookupFunction<_EmailQueryThreadRootsNative, _EmailQueryThreadRootsDart>('email_query_thread_roots');
 final _emailQueryThread = _lib.lookupFunction<_EmailQueryThreadNative, _EmailQueryThreadDart>('email_query_thread');
 final _emailGenerateSessions = _lib.lookupFunction<_EmailGenerateSessionsNative, _EmailGenerateSessionsDart>('email_generate_sessions');
+  final _emailMigrateEncryptedSessions = _lib.lookupFunction<_EmailMigrateEncryptedSessionsNative, _EmailMigrateEncryptedSessionsDart>('email_migrate_encrypted_sessions');
 final _emailCreateSession = _lib.lookupFunction<_EmailCreateSessionNative, _EmailCreateSessionDart>('email_create_session');
 final _emailCodeQueryByAccount = _lib.lookupFunction<_EmailCodeQueryByAccountNative, _EmailCodeQueryByAccountDart>('email_code_query_by_account');
 final _emailQuerySessionIndexUuid = _lib.lookupFunction<_EmailQuerySessionIndexUuidNative, _EmailQuerySessionIndexUuidDart>('email_query_session_index_uuid');
@@ -590,6 +598,7 @@ final _emailTaskQueryPending = _lib.lookupFunction<_EmailTaskQueryPendingNative,
 final _emailTaskMarkSent = _lib.lookupFunction<_EmailTaskMarkSentNative, _EmailTaskMarkSentDart>('email_task_mark_sent');
 final _emailTaskMarkFailed = _lib.lookupFunction<_EmailTaskMarkFailedNative, _EmailTaskMarkFailedDart>('email_task_mark_failed');
 final _emailTaskProcessPending = _lib.lookupFunction<_EmailTaskProcessPendingNative, _EmailTaskProcessPendingDart>('email_task_process_pending');
+final _emailTaskStatus = _lib.lookupFunction<_EmailTaskStatusNative, _EmailTaskStatusDart>('email_task_status');
 
 final _emailMigrateIslocal = _lib.lookupFunction<_EmailMigrateIslocalNative, _EmailMigrateIslocalDart>('email_migrate_islocal');
 
@@ -615,6 +624,7 @@ final _groupCreate = _lib.lookupFunction<_GroupCreateNative, _GroupCreateDart>('
 final _groupGetInfo = _lib.lookupFunction<_GroupGetInfoNative, _GroupGetInfoDart>('group_get_info');
 final _groupList = _lib.lookupFunction<_GroupListNative, _GroupListDart>('group_list');
 final _groupSendMessage = _lib.lookupFunction<_GroupSendMessageNative, _GroupSendMessageDart>('group_send_message');
+final _groupSendFile = _lib.lookupFunction<_GroupSendFileNative, _GroupSendFileDart>('group_send_file');
 final _groupHandleIncoming = _lib.lookupFunction<_GroupHandleIncomingNative, _GroupHandleIncomingDart>('group_handle_incoming');
 final _groupPrepareOutgoing = _lib.lookupFunction<_GroupPrepareOutgoingNative, _GroupPrepareOutgoingDart>('group_prepare_outgoing');
 final _groupAfterSent = _lib.lookupFunction<_GroupAfterSentNative, _GroupAfterSentDart>('group_after_sent');
@@ -748,21 +758,24 @@ class XMailer {
   static const String mlsWelcome    = '2.0.1';  // Welcome (invite to join group)
   static const String mlsCommit     = '2.0.2';  // Commit (tree change: add/remove)
   static const String mlsAppMsg     = '2.0.3';  // Group application message
+  static const String mlsFileMeta   = '2.0.4';  // Group file metadata (visible in UI)
+  static const String mlsFileChunk  = '2.0.5';  // Group file chunk data (hidden from UI)
 
   static const List<String> whitelist = [
     prekeyBundle, sessionInit, ratchetMsg, repairMsg, attachMeta, attachChunk,
-    mlsKeyPackage, mlsWelcome, mlsCommit, mlsAppMsg,
+    mlsKeyPackage, mlsWelcome, mlsCommit, mlsAppMsg, mlsFileMeta, mlsFileChunk,
   ];
 
   static const List<String> keyExchange = [
-    exchange, newSession, mlsKeyPackage,
+    exchange, mlsKeyPackage,
   ];
 
   static bool isValid(String value) => whitelist.contains(value);
   static bool isKeyExchange(String? value) =>
       value != null && value.isNotEmpty && keyExchange.contains(value);
   static bool isMls(String value) =>
-      value == mlsKeyPackage || value == mlsWelcome || value == mlsCommit || value == mlsAppMsg;
+      value == mlsKeyPackage || value == mlsWelcome || value == mlsCommit || value == mlsAppMsg ||
+      value == mlsFileMeta || value == mlsFileChunk;
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +1325,16 @@ class EmailCore {
     }
   }
 
+  static String migrateEncryptedSessions() {
+    final outJson = malloc.allocate<Utf8>(4096);
+    try {
+      _emailMigrateEncryptedSessions(outJson, 4096);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(outJson);
+    }
+  }
+
   static String createSession(String account, String subject, String members, String messageId, {int encryptMethod = 0, int localemailRowid = 0}) {
     final accountPtr = account.toNativeUtf8();
     final subjectPtr = subject.toNativeUtf8();
@@ -1744,6 +1767,22 @@ class EmailCore {
     }
   }
 
+  /// Queries outbox task status by account + message_id.
+  /// Returns JSON: {status, task_status: pending|failed|none, retry_count, last_error}.
+  static String taskStatus(String account, String messageId) {
+    final accountPtr = account.toNativeUtf8();
+    final msgPtr = messageId.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(4096);
+    try {
+      _emailTaskStatus(accountPtr, msgPtr, outJson, 4096);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(msgPtr);
+      malloc.free(outJson);
+    }
+  }
+
   /// Migration: Update islocal for existing emails. Returns 0 on success, negative on error.
   static int migrateIslocal() {
     return _emailMigrateIslocal();
@@ -2068,6 +2107,42 @@ class EmailCore {
       malloc.free(groupIdPtr);
       malloc.free(plaintextPtr);
       malloc.free(inReplyToPtr);
+      malloc.free(outBuf);
+    }
+  }
+
+  /// Send a file to an MLS group session (unified session id). Queues one 2.0.4
+  /// meta task plus N 2.0.5 chunk tasks; each task is MLS-encrypted right before send.
+  /// Returns JSON: {status, file_id, file_name, total_chunks, message_id}
+  static String groupSendFile(String account, String unifiedSessionId, String filePath,
+      String fileName, String inReplyTo, String subject, String text, String batchId) {
+    final accountPtr = account.toNativeUtf8();
+    final sessionIdPtr = unifiedSessionId.toNativeUtf8();
+    final filePathPtr = filePath.toNativeUtf8();
+    final fileNamePtr = fileName.toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
+    final subjectPtr = subject.toNativeUtf8();
+    final textPtr = text.toNativeUtf8();
+    final batchIdPtr = batchId.toNativeUtf8();
+    final outBuf = malloc<Uint8>(8192);
+    try {
+      final rc = _groupSendFile(accountPtr, sessionIdPtr, filePathPtr, fileNamePtr,
+          inReplyToPtr, subjectPtr, textPtr, batchIdPtr, outBuf.cast<Utf8>(), 8192);
+      final result = outBuf.cast<Utf8>().toDartString();
+      if (rc != 0) {
+        logWrite('[MLS] groupSendFile failed: rc=$rc, resp=$result');
+        return '{"status":"error","error":"send_failed","rc":$rc}';
+      }
+      return result;
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(sessionIdPtr);
+      malloc.free(filePathPtr);
+      malloc.free(fileNamePtr);
+      malloc.free(inReplyToPtr);
+      malloc.free(subjectPtr);
+      malloc.free(textPtr);
+      malloc.free(batchIdPtr);
       malloc.free(outBuf);
     }
   }

@@ -185,6 +185,10 @@ private:
     std::string graph_get_message_mime(const std::string& id);
     std::string parse_mime_to_json(const std::string& mime, const std::string& id);
 
+    // Plaintext to store in the local .eml for the message currently being sent
+    // (set by send_email from the "local_body" field; empty = store the wire body).
+    std::string pending_local_body_;
+
     // Helper methods for sending email
     bool send_email_via_graph_api(const std::string& recipient, const std::string& subject, 
                                    const std::string& body, const std::string& in_reply_to, 

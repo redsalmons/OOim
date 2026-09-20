@@ -83,6 +83,8 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN message_id TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
 
         // File transfer tables
         const char* sql_file_transfer = "CREATE TABLE IF NOT EXISTS file_transfer ("
@@ -102,6 +104,8 @@ int email_db_init(const char* path) {
                                         "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                         ");";
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, sql_file_transfer, NULL, NULL, &err);
         if (err) sqlite3_free(err);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err);
@@ -388,6 +392,8 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE code ADD COLUMN session_uuid TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN message_id TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
     }
 
     // Task table for queued email sending
@@ -403,6 +409,11 @@ int email_db_init(const char* path) {
                            "session_id TEXT,"
                            "x_session_chart TEXT DEFAULT '1.0.2',"
                            "status INTEGER DEFAULT 0,"
+                           "pre_encrypted INTEGER DEFAULT 0,"
+                           "local_body TEXT DEFAULT '',"
+                           "retry_count INTEGER DEFAULT 0,"
+                           "next_retry_at TEXT DEFAULT NULL,"
+                           "last_error TEXT DEFAULT '',"
                            "created_at TEXT DEFAULT (datetime('now','localtime'))"
                            ");";
     rc = sqlite3_exec(g_db, sql_task, NULL, NULL, &err_msg);
@@ -410,6 +421,15 @@ int email_db_init(const char* path) {
         LOG_INFO("SQL error (task): %s\n", err_msg);
         sqlite3_free(err_msg);
     } else {
+        // Outbox columns for the unified send pipeline: pre_encrypted/local_body hold
+        // the ciphertext + plaintext pair (encrypted once at queue time), retry_* drive
+        // the retry/backoff loop. A failing ALTER just means the column already exists.
+        sqlite3_exec(g_db, "ALTER TABLE task ADD COLUMN pre_encrypted INTEGER DEFAULT 0;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE task ADD COLUMN local_body TEXT DEFAULT '';", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE task ADD COLUMN retry_count INTEGER DEFAULT 0;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE task ADD COLUMN next_retry_at TEXT DEFAULT NULL;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE task ADD COLUMN last_error TEXT DEFAULT '';", NULL, NULL, NULL);
+        sqlite3_free(err_msg);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_task_account_status ON task(account, status);", NULL, NULL, &err_msg);
         if (err_msg) sqlite3_free(err_msg);
     }
@@ -428,6 +448,9 @@ int email_db_init(const char* path) {
                                     "chunk_size INTEGER NOT NULL,"
                                     "status INTEGER DEFAULT 0,"
                                     "message_id TEXT,"
+                                    "original_path TEXT,"
+                                    "compression TEXT,"
+                                    "compressed_md5 TEXT,"
                                     "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                     "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                     ");";
@@ -436,6 +459,9 @@ int email_db_init(const char* path) {
         LOG_INFO("SQL error (file_transfer): %s\n", err_msg);
         sqlite3_free(err_msg);
     } else {
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err_msg);
         if (err_msg) sqlite3_free(err_msg);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_session ON file_transfer(session_id);", NULL, NULL, &err_msg);
@@ -509,6 +535,7 @@ int email_db_init(const char* path) {
                                      "dh_self_password TEXT,"        // password for DH private key
                                      "dh_peer_pub TEXT,"             // current peer DH public key (PEM)
                                      "status INTEGER DEFAULT 0,"     // 0=active, 1=closed
+                                     "kex_done INTEGER DEFAULT 0,"  // peer's keys exchanged and acknowledged
                                      "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                      "updated_at TEXT DEFAULT (datetime('now','localtime')),"
                                      "UNIQUE(account, peer_email, session_id)"
@@ -518,6 +545,18 @@ int email_db_init(const char* path) {
     else {
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_session_account ON signal_session(account, peer_email);", NULL, NULL, &err_msg);
         if (err_msg) sqlite3_free(err_msg);
+
+        // A signal_session row is written the moment this side *initiates* X3DH, so row
+        // existence proves only that we hold the peer's keys. kex_done records that the
+        // peer provably holds ours too, which is what gates sending.
+        // A failing ALTER just means the column is already there.
+        if (sqlite3_exec(g_db, "ALTER TABLE signal_session ADD COLUMN kex_done INTEGER DEFAULT 0;", NULL, NULL, NULL) == SQLITE_OK) {
+            // Column is brand new, so every row present now predates the flag. Those
+            // exchanges were negotiated before this check existed and cannot be
+            // re-derived; release them so the gate only constrains new sessions.
+            sqlite3_exec(g_db, "UPDATE signal_session SET kex_done = 1;", NULL, NULL, &err_msg);
+            if (err_msg) sqlite3_free(err_msg);
+        }
     }
 
     const char* sql_signal_skipped_key = "CREATE TABLE IF NOT EXISTS signal_skipped_key ("
@@ -645,6 +684,32 @@ int email_db_init(const char* path) {
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS skipped_sender_keys;", NULL, NULL, &err_msg); if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
 
     LOG_INFO("Database tables (group_session, mls_state) created\n");
+
+    // Unified session table (facade over Signal 1:1 + MLS 1:n)
+    const char* sql_unified_session = "CREATE TABLE IF NOT EXISTS unified_session ("
+                                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                     "session_id TEXT NOT NULL UNIQUE,"
+                                     "account TEXT NOT NULL,"
+                                     "subject TEXT DEFAULT '',"
+                                     "mode TEXT NOT NULL DEFAULT 'signal',"
+                                     "members TEXT NOT NULL DEFAULT '[]',"
+                                     "signal_session_id TEXT DEFAULT '',"
+                                     "mls_group_id TEXT DEFAULT '',"
+                                     "root_message_id TEXT DEFAULT '',"
+                                     "status INTEGER DEFAULT 0,"
+                                     "created_at TEXT DEFAULT (datetime('now','localtime')),"
+                                     "updated_at TEXT DEFAULT (datetime('now','localtime'))"
+                                     ");";
+    rc = sqlite3_exec(g_db, sql_unified_session, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) { LOG_INFO("SQL error (unified_session): %s\n", err_msg); sqlite3_free(err_msg); }
+
+    sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_unified_session_account ON unified_session(account);", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
+    sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_unified_session_mode ON unified_session(account, mode);", NULL, NULL, &err_msg);
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
+    LOG_INFO("Database table (unified_session) created\n");
 
     return 0;
 }

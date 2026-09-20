@@ -740,9 +740,16 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         int encrypt_method = json_content.value("encrypt_method", 0);
         std::string members = json_content.value("members", "");
         std::string original_x_session_chart = x_session_chart;
+        // pre_encrypted: the body was already Signal-encrypted by the unified session
+        // layer (us_send_message). Transport must send it verbatim — no initiate/encrypt
+        // here — and keep X-Mailer as given. local_body: plaintext to store in the local
+        // .eml (Double Ratchet sending keys are one-shot, so the sender cannot decrypt
+        // its own ciphertext later).
+        bool pre_encrypted = json_content.value("pre_encrypted", false);
+        std::string local_body = json_content.value("local_body", "");
 
         // If encrypt_method not specified, infer from X-Mailer
-        if (encrypt_method == 0) {
+        if (encrypt_method == 0 && !pre_encrypted) {
             if (x_session_chart == XMailer::SESSION_INIT ||
                 x_session_chart == XMailer::RATCHET_MSG) {
                 encrypt_method = 1;
@@ -921,7 +928,19 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // New encrypted session: encrypt_method=1 and no existing email session
         // For new conversations (no session_id), always use SESSION_INIT
         // even if a Signal session exists from a previous conversation
-        if (encrypt_method == 1 && session_id.empty() && !primaryRecipient.empty()) {
+        if (XMailer::isMls(x_session_chart)) {
+            // 1:n MLS messages (2.0.x) are never touched by the 1:1 Double Ratchet,
+            // even when x_reply_to points into a former 1:1 conversation (Signal->MLS
+            // upgrade invite). The task processor already produced the final body.
+            LOG_INFO("163 send_email: MLS message x_mailer=%s, skipping Signal layer\n",
+                     x_session_chart.c_str());
+        } else if (pre_encrypted) {
+            // Already a Signal envelope; mark as such so the RATCHET_MSG guard below
+            // and the local-storage logic treat it as a Signal send.
+            useSignal = true;
+            LOG_INFO("163 send_email: body pre-encrypted by unified layer, sending verbatim (x_mailer=%s)\n",
+                     x_session_chart.c_str());
+        } else if (encrypt_method == 1 && session_id.empty() && !primaryRecipient.empty()) {
             LOG_INFO("163 send_email: using Signal session_initiate for new encrypted session\n");
             int initRc = signal_init_account(email_.c_str());
             LOG_INFO("163 send_email: signal_init_account rc=%d\n", initRc);
@@ -1101,7 +1120,9 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // over SMTP, but locally we want the .eml file to contain the human-readable
         // plaintext so the UI conversation view does not show raw JSON.
         std::string bodyForLocalStr = bodyToSend;
-        if (useSignal) {
+        if (!local_body.empty()) {
+            bodyForLocalStr = local_body;
+        } else if (useSignal) {
             if (x_session_chart == XMailer::PREKEY_BUNDLE) {
                 bodyForLocalStr = "[Signal prekey bundle sent - waiting for peer to initialize session]";
             } else {
@@ -1743,7 +1764,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         }
 
         // SELECT the folder before entering IDLE
-        std::cerr << "[IDLE] Selecting folder: " << folder << std::endl;
+        LOG_INFO("[IDLE] %s: selecting folder %s\n", email_.c_str(), folder.c_str());
         vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
             vmime::net::imap::IMAPCommand::createCommand("SELECT " + folder);
         conn->sendCommand(selectCmd);
@@ -1754,7 +1775,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
             selectOk = true;
         }
 
-        std::cerr << "[IDLE] SELECT result: " << (selectOk ? "OK" : "FAILED") << std::endl;
+        LOG_INFO("[IDLE] %s: SELECT %s\n", email_.c_str(), selectOk ? "OK" : "FAILED");
 
         if (!selectOk) {
             last_error_ = "IDLE: SELECT failed for folder " + folder;
@@ -1777,7 +1798,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         vmime::shared_ptr<vmime::net::imap::IMAPCommand> idleCmd =
             vmime::net::imap::IMAPCommand::createCommand("IDLE");
         conn->sendCommand(idleCmd);
-        std::cerr << "[IDLE] IDLE command sent via sendCommand, waiting for continuation..." << std::endl;
+        LOG_INFO("[IDLE] %s: IDLE sent, waiting for continuation\n", email_.c_str());
 
         // 2. Read the continuation response ("+ idling" or "+") directly from socket
         //    Bypass vmime's readResponse() which may not parse continuation correctly.
@@ -1801,7 +1822,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
                 std::string chunk;
                 sok->receive(chunk);
                 if (!chunk.empty()) {
-                    std::cerr << "[IDLE] continuation read: " << chunk.substr(0, 200) << std::endl;
+                    LOG_INFO("[IDLE] %s: continuation read: %s\n", email_.c_str(), chunk.substr(0, 200).c_str());
                 }
                 if (chunk.empty()) continue;
 
@@ -1870,6 +1891,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
                     if (!line.empty() && line.back() == '\r') {
                         line.pop_back();
                     }
+                    LOG_INFO("[IDLE] %s: server line: %s\n", email_.c_str(), line.substr(0, 200).c_str());
 
                     if (line.find("EXISTS") != std::string::npos) {
                         gotNotification = true;
@@ -1884,6 +1906,11 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
                 continue;
             }
         }
+
+        LOG_INFO("[IDLE] %s: leaving idle, gotNotification=%d, elapsed=%llds\n", email_.c_str(),
+                 gotNotification ? 1 : 0,
+                 (long long)std::chrono::duration_cast<std::chrono::seconds>(
+                     std::chrono::steady_clock::now() - startTime).count());
 
         // 4. Send DONE to exit IDLE mode
         std::string doneCmd = "DONE\r\n";
@@ -1913,11 +1940,11 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         return false;
     } catch (const vmime::exception& e) {
         last_error_ = std::string("IDLE wait failed: ") + e.what();
-        std::cerr << "[IDLE] vmime exception: " << e.what() << std::endl;
+        LOG_INFO("[IDLE] %s: vmime exception: %s\n", email_.c_str(), e.what());
         return false;
     } catch (const std::exception& e) {
         last_error_ = std::string("IDLE wait failed: ") + e.what();
-        std::cerr << "[IDLE] std exception: " << e.what() << std::endl;
+        LOG_INFO("[IDLE] %s: std exception: %s\n", email_.c_str(), e.what());
         return false;
     }
 }

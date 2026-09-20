@@ -1,9 +1,8 @@
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
+import '../../native/unified_session.dart';
 import '../../i18n/app_strings.dart';
-import 'create_group_dialog.dart';
 
 class CreateSessionDialog extends StatefulWidget {
   final List<String> accounts;
@@ -27,7 +26,6 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
   TextEditingController _membersController = TextEditingController();
   final List<String> _members = [];
   bool _creating = false;
-  int _encryptMethod = 0; // 0=none, 1=standard
 
   @override
   void initState() {
@@ -52,13 +50,6 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     });
   }
 
-  String _generateMessageId(String account) {
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    final rand = Random().nextInt(0xFFFFFF);
-    final domain = account.split('@').last;
-    return '<$ts.$rand@$domain>';
-  }
-
   Future<void> _createSession() async {
     final title = _titleController.text.trim();
     if (title.isEmpty) {
@@ -80,32 +71,51 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       return;
     }
 
-    // If more than 1 member (3+ people total), create a group session instead
-    if (_members.length > 1) {
+    setState(() => _creating = true);
+
+    // Build members list: self + all remote members
+    final allMembers = [_selectedAccount, ..._members];
+    native.EmailCore.logWrite('[CREATE_SESSION] Creating unified session: account=$_selectedAccount members=$allMembers title=$title');
+
+    // Create unified session via UnifiedSessionManager (auto-routes Signal/MLS)
+    String createResult;
+    try {
+      createResult = UnifiedSessionManager.createSession(_selectedAccount, title, allMembers);
+      native.EmailCore.logWrite('[CREATE_SESSION] createSession result: $createResult');
+    } catch (e) {
+      native.EmailCore.logWrite('[CREATE_SESSION] createSession exception: $e');
       if (mounted) {
-        Navigator.of(context).pop();
-        showDialog(
-          context: context,
-          builder: (context) => CreateGroupDialog(
-            accounts: widget.accounts,
-            configPath: widget.configPath,
-            onCreated: widget.onCreated,
-            initialTitle: title,
-            initialAccount: _selectedAccount,
-            initialMembers: List.from(_members),
-          ),
+        setState(() => _creating = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${AppStrings.createEmailInstanceFailed}: $e'), duration: const Duration(seconds: 3)),
         );
       }
       return;
     }
 
-    setState(() => _creating = true);
+    final createJson = jsonDecode(createResult);
+    if (createJson['status'] != 'success') {
+      setState(() => _creating = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${AppStrings.createEmailInstanceFailed}: ${createJson['error'] ?? 'unknown'}'), duration: const Duration(seconds: 3)),
+      );
+      return;
+    }
 
-    // 1. Generate message_id
-    final messageId = _generateMessageId(_selectedAccount);
-    native.EmailCore.logWrite('[CREATE_SESSION] Generated message_id: $messageId');
+    final messageId = createJson['message_id']?.toString() ?? '';
+    final xMailer = createJson['x_mailer']?.toString() ?? '';
+    final sessionId = createJson['session_id']?.toString() ?? '';
+    final encryptedBody = createJson['encrypted_body']?.toString() ?? '';
 
-    // 2. Load config to get account details for sending
+    // Determine if this is a Signal or MLS session based on member count.
+    // Signal (2 members): SMTP layer handles encryption — pass plaintext + empty session_id.
+    // MLS (3+ members): group_create already set up the group — pass x_mailer for task processing.
+    final isSignal = (_members.length == 1); // 1 remote member = 2 total = Signal
+    final bodyForSmtp = isSignal ? AppStrings.startNewSession : encryptedBody;
+    final sessionIdForSmtp = isSignal ? '' : sessionId;
+    final xMailerForSmtp = isSignal ? '' : xMailer;
+
+    // Load config for SMTP send
     final config = native.EmailCore.loadConfig(widget.configPath);
     if (config == null || config.accounts.isEmpty) {
       if (mounted) {
@@ -128,43 +138,18 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       return;
     }
 
-    // 3. Send email — C++ backend will handle insertSentEmail + createSession + addEmailToSession
-    // Self is NOT included in recipients — sent email is already stored in DB, and QQ/163
-    // mail servers auto-deliver self-addressed emails to INBOX causing duplicates.
-    final membersStr = _members.join(',');
-    final allRecipients = <String>{..._members};
-    final recipientStr = allRecipients.join(', ');
-
-    // Build email body as JSON with session_info
-    // needkey: all session members (only for standard encryption)
-    final needKey = _encryptMethod == 1
-        ? allRecipients.toList()
-        : <String>[];
-
-    final sessionInfo = <String, dynamic>{
-      'title': title,
-      'account': _selectedAccount,
-      'decodetype': _encryptMethod,
-    };
-    if (_encryptMethod == 1) {
-      sessionInfo['needkey'] = needKey;
-    }
-
-    final emailBody = jsonEncode({
-      'text': AppStrings.startNewSession,
-      'session_info': sessionInfo,
-    });
-
+    // Build SMTP content — recipients exclude self
+    final recipientStr = _members.join(', ');
     final content = jsonEncode({
       'recipient': recipientStr,
       'subject': title,
-      'body': emailBody,
+      'body': bodyForSmtp,
       'in_reply_to': '',
       'message_id': messageId,
-      'session_id': '',
-      'x_session_chart': native.XMailer.sessionInit,
-      'encrypt_method': _encryptMethod,
-      'members': membersStr,
+      'session_id': sessionIdForSmtp,
+      'x_session_chart': xMailerForSmtp,
+      'encrypt_method': isSignal ? 1 : 0,
+      'members': _members.join(','),
     });
 
     native.EmailCore.logWrite('[CREATE_SESSION] Sending email to: $recipientStr, subject: $title');
@@ -212,7 +197,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       return;
     }
 
-    native.EmailCore.logWrite('[CREATE_SESSION] Email sent successfully, session already created');
+    native.EmailCore.logWrite('[CREATE_SESSION] Unified session created and email sent, session_id=${createJson['session_id']}');
 
     setState(() => _creating = false);
 
@@ -364,23 +349,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
               Text(AppStrings.noMembers, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
             const SizedBox(height: 16),
 
-            // 3. 加密方式
-            Text(AppStrings.encryptionMethod, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-            const SizedBox(height: 6),
-            DropdownButtonFormField<int>(
-              value: _encryptMethod,
-              decoration: InputDecoration(
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
-              items: [
-                DropdownMenuItem(value: 0, child: Text(AppStrings.encryptionNone)),
-                DropdownMenuItem(value: 1, child: Text(AppStrings.encryptionStandard)),
-              ],
-              onChanged: (v) {
-                if (v != null) setState(() => _encryptMethod = v);
-              },
-            ),
+
           ],
         ),
       ),

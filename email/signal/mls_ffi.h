@@ -42,6 +42,9 @@ int mls_encrypt(const char* account, const char* group_id_hex,
 int mls_decrypt(const char* account, const char* group_id_hex,
                 const uint8_t* ciphertext, int ct_len, uint8_t* out, int out_len);
 
+// Last FFI error message (e.g. the OpenMLS error behind a generic rc=-4).
+int mls_last_error(uint8_t* out, int out_len);
+
 int mls_process_commit(const char* account, const char* group_id_hex,
                        const uint8_t* commit, int commit_len);
 

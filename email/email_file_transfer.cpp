@@ -6,6 +6,7 @@
 #include "persistence/file_transfer_repo.h"
 #include "persistence/task_repo.h"
 #include "persistence/session_repo.h"
+#include "file_chunk_util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,45 +23,11 @@ using json = nlohmann::json;
 static FileTransferRepo s_fileTransferRepo;
 static TaskRepo s_taskRepo;
 
-// Default chunk size: 3 MB (can be adjusted)
-static const int DEFAULT_CHUNK_SIZE = 3 * 1024 * 1024; // 3 MB
-
 // Generate a unique file_id
 static std::string generate_file_id() {
     auto now = std::chrono::system_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     return "file_" + std::to_string(ms) + "_" + std::to_string(rand() % 100000);
-}
-
-// Compute MD5 of a file's contents
-static std::string compute_file_md5(const std::string& filePath) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) return "";
-
-    std::string content((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-    file.close();
-    return compute_md5(content);
-}
-
-// Read a specific chunk from a file
-static std::vector<uint8_t> read_file_chunk(const std::string& filePath, int chunkIndex, int chunkSize) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) return {};
-
-    file.seekg((std::streamoff)chunkIndex * chunkSize, std::ios::beg);
-    std::vector<uint8_t> buffer(chunkSize);
-    file.read(reinterpret_cast<char*>(buffer.data()), chunkSize);
-    std::streamsize bytesRead = file.gcount();
-    buffer.resize(bytesRead);
-    return buffer;
-}
-
-// Get file size
-static int64_t get_file_size(const std::string& filePath) {
-    std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return -1;
-    return file.tellg();
 }
 
 // --- C API functions ---
@@ -112,10 +79,10 @@ extern "C" int email_prepare_truck_message(const char* fileId, int chunkIndex,
 }
 
 // Split a file into chunks and create send tasks for each chunk.
-// This creates:
-//   1. A "file" metadata message task
-//   2. N "truck" chunk message tasks
-// Each task is inserted into the task table for async sending.
+// Pipeline: whole-file compress (zlib, skipped when it does not pay off) -> 3 MB chunks
+// -> one "file" metadata task (1.0.4) + N "truck" chunk tasks (1.0.5). Bodies are stored
+// as plaintext JSON; the task processor Double-Ratchet-encrypts each one right before
+// sending so ratchet order == send order. sessionId is the unified session id.
 // Returns 0 on success, negative on error.
 extern "C" int email_file_split_and_send(const char* filePath, const char* fileName,
                                           const char* account, const char* recipient,
@@ -123,143 +90,93 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
                                           const char* subject, const char* text,
                                           const char* batchId,
                                           char* outJson, int outSize) {
-    if (!filePath || !fileName || !account || !recipient) {
-        if (outJson && outSize > 0) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"null_parameter"})");
-        }
-        return -1;
-    }
+    auto fail = [&](int rc, const char* err) {
+        if (outJson && outSize > 0) snprintf(outJson, outSize, R"({"status":"failed","error":"%s"})", err);
+        return rc;
+    };
+    if (!filePath || !fileName || !account || !recipient) return fail(-1, "null_parameter");
 
-    std::string filePathStr(filePath);
-    std::string fileNameStr(fileName);
-    std::string accountStr(account);
-    std::string recipientStr(recipient);
+    std::string accountStr(account), recipientStr(recipient);
     std::string sessionIdStr(sessionId ? sessionId : "");
     std::string inReplyToStr(inReplyTo ? inReplyTo : "");
     std::string subjectStr(subject ? subject : "");
+    std::string domain = accountStr.substr(accountStr.find('@') + 1);
 
-    // Get file size
-    int64_t fileSize = get_file_size(filePathStr);
-    if (fileSize < 0) {
-        LOG_INFO("email_file_split_and_send: cannot get file size for %s\n", filePathStr.c_str());
-        if (outJson && outSize > 0) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"file_not_found"})");
-        }
-        return -2;
-    }
+    filechunk::PreparedFile pf;
+    if (!filechunk::prepareFileForSend(filePath, fileName, pf)) return fail(-2, "file_not_found");
 
-    // Compute file MD5
-    std::string fileMd5 = compute_file_md5(filePathStr);
-    if (fileMd5.empty()) {
-        LOG_INFO("email_file_split_and_send: cannot compute MD5 for %s\n", filePathStr.c_str());
-        if (outJson && outSize > 0) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"md5_failed"})");
-        }
-        return -3;
-    }
-
-    // Calculate chunks
-    int chunkSize = DEFAULT_CHUNK_SIZE;
-    int totalChunks = (int)((fileSize + chunkSize - 1) / chunkSize);
-    if (totalChunks == 0) totalChunks = 1;
-
-    // Generate file_id
     std::string fileId = generate_file_id();
+    LOG_INFO("email_file_split_and_send: file=%s, size=%lld, md5=%s, compression=%s, stream=%lld, chunks=%d, file_id=%s\n",
+             pf.fileName.c_str(), (long long)pf.fileSize, pf.fileMd5.c_str(), pf.compression.c_str(),
+             (long long)pf.compressedSize, pf.totalChunks, fileId.c_str());
 
-    LOG_INFO("email_file_split_and_send: file=%s, size=%lld, md5=%s, chunks=%d, chunk_size=%d, file_id=%s\n",
-             fileNameStr.c_str(), (long long)fileSize, fileMd5.c_str(), totalChunks, chunkSize, fileId.c_str());
-
-    // Insert file_transfer record
     FileTransferRecord ftRec;
     ftRec.fileId = fileId;
     ftRec.sessionId = sessionIdStr;
     ftRec.account = accountStr;
     ftRec.sender = accountStr;
-    ftRec.fileName = fileNameStr;
-    ftRec.fileSize = fileSize;
-    ftRec.fileMd5 = fileMd5;
-    ftRec.totalChunks = totalChunks;
-    ftRec.chunkSize = chunkSize;
-    ftRec.status = 0; // Pending until confirmed via INBOX
-    ftRec.originalPath = filePathStr;
-
+    ftRec.fileName = pf.fileName;
+    ftRec.fileSize = pf.fileSize;
+    ftRec.fileMd5 = pf.fileMd5;
+    ftRec.totalChunks = pf.totalChunks;
+    ftRec.chunkSize = pf.chunkSize;
+    ftRec.status = 0;
+    ftRec.originalPath = filePath;
+    ftRec.compression = pf.compression;
+    ftRec.compressedMd5 = pf.compressedMd5;
     if (!s_fileTransferRepo.insertFileTransfer(ftRec)) {
-        LOG_INFO("email_file_split_and_send: failed to insert file_transfer record\n");
-        if (outJson && outSize > 0) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"db_insert_failed"})");
-        }
-        return -4;
+        filechunk::releasePrepared(pf);
+        return fail(-4, "db_insert_failed");
     }
 
-    // Create "file" metadata message task (X-Mailer=1.0.4)
-    std::string fileMsgId;
+    // "file" metadata task (1.0.4). x_reply_to = last message of the conversation.
+    std::string fileMsgId = "<file_" + fileId + "@" + domain + ">";
     {
-        char fileMsgJson[8192];
-        int rc = email_prepare_file_message(fileId.c_str(), fileNameStr.c_str(),
-                                            fileSize, fileMd5.c_str(),
-                                            totalChunks, chunkSize,
-                                            text ? text : "",
-                                            batchId ? batchId : "",
-                                            fileMsgJson, sizeof(fileMsgJson));
-        if (rc != 0) {
-            LOG_INFO("email_file_split_and_send: failed to prepare file message, rc=%d\n", rc);
-        } else {
-            std::string domain = accountStr.substr(accountStr.find('@') + 1);
-            fileMsgId = "<file_" + fileId + "@" + domain + ">";
-            s_taskRepo.insert(accountStr, recipientStr, subjectStr, fileMsgJson,
-                              inReplyToStr, fileMsgId, fileMsgId, sessionIdStr, XMailer::ATTACH_META);
-            LOG_INFO("email_file_split_and_send: created file metadata task (1.0.4), msg_id=%s\n", fileMsgId.c_str());
-        }
+        json meta = {
+            {"msg_type", "file"}, {"file_id", fileId}, {"file_name", pf.fileName},
+            {"file_size", pf.fileSize}, {"file_md5", pf.fileMd5},
+            {"compression", pf.compression}, {"compressed_size", pf.compressedSize},
+            {"compressed_md5", pf.compressedMd5},
+            {"total_chunks", pf.totalChunks}, {"chunk_size", pf.chunkSize},
+            {"text", text ? text : ""}, {"batch_id", batchId ? batchId : ""},
+            {"x_message_id", fileMsgId}, {"x_reply_to", inReplyToStr},
+        };
+        s_taskRepo.insert(accountStr, recipientStr, subjectStr, meta.dump(),
+                          inReplyToStr, fileMsgId, fileMsgId, sessionIdStr, XMailer::ATTACH_META);
+        LOG_INFO("email_file_split_and_send: created file metadata task (1.0.4), msg_id=%s\n", fileMsgId.c_str());
     }
 
-    // Create "truck" chunk message tasks (X-Mailer=1.0.5)
-    // Chain: truck_0.last_message_id → file metadata, truck_i.last_message_id → truck_(i-1)
-    std::string prevMsgId = fileMsgId; // First truck points to file metadata
-    for (int i = 0; i < totalChunks; i++) {
-        auto chunkData = read_file_chunk(filePathStr, i, chunkSize);
-        if (chunkData.empty() && i < totalChunks - 1) {
+    // "truck" chunk tasks (1.0.5). Chain: truck_0 -> file meta, truck_i -> truck_(i-1).
+    std::string prevMsgId = fileMsgId;
+    int queued = 0;
+    for (int i = 0; i < pf.totalChunks; i++) {
+        auto chunk = filechunk::readChunk(pf, i);
+        if (chunk.empty() && i < pf.totalChunks - 1) {
             LOG_INFO("email_file_split_and_send: failed to read chunk %d\n", i);
             continue;
         }
-
-        std::string chunkB64 = base64_encode(chunkData.data(), chunkData.size());
-        std::string chunkMd5 = compute_md5(std::string(chunkData.begin(), chunkData.end()));
-
-        size_t truckBufSize = chunkB64.size() + 4096;
-        std::vector<char> truckMsgJson(truckBufSize);
-        int rc = email_prepare_truck_message(fileId.c_str(), i,
-                                             chunkB64.c_str(), chunkMd5.c_str(),
-                                             truckMsgJson.data(), (int)truckMsgJson.size());
-        if (rc != 0) {
-            LOG_INFO("email_file_split_and_send: failed to prepare truck message %d, rc=%d\n", i, rc);
-            continue;
-        }
-
-        std::string domain = accountStr.substr(accountStr.find('@') + 1);
         std::string truckMsgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" + domain + ">";
-        s_taskRepo.insert(accountStr, recipientStr, subjectStr, truckMsgJson.data(),
+        json truck = {
+            {"msg_type", "truck"}, {"file_id", fileId}, {"chunk_index", i},
+            {"chunk_data", base64_encode(chunk.data(), chunk.size())},
+            {"chunk_md5", compute_md5(std::string(chunk.begin(), chunk.end()))},
+            {"x_message_id", truckMsgId}, {"x_reply_to", prevMsgId},
+        };
+        s_taskRepo.insert(accountStr, recipientStr, subjectStr, truck.dump(),
                           prevMsgId, truckMsgId, truckMsgId, sessionIdStr, XMailer::ATTACH_CHUNK);
-        LOG_INFO("email_file_split_and_send: created chunk %d task (1.0.5), msg_id=%s, last_msg_id=%s\n",
-                 i, truckMsgId.c_str(), prevMsgId.c_str());
-        prevMsgId = truckMsgId; // Next truck points to this one
+        prevMsgId = truckMsgId;
+        queued++;
     }
+    filechunk::releasePrepared(pf);
 
-    // Build response
     if (outJson && outSize > 0) {
-        json resp;
-        resp["status"] = "success";
-        resp["file_id"] = fileId;
-        resp["file_name"] = fileNameStr;
-        resp["file_size"] = fileSize;
-        resp["file_md5"] = fileMd5;
-        resp["total_chunks"] = totalChunks;
-        resp["chunk_size"] = chunkSize;
-        std::string jsonStr = resp.dump();
-        snprintf(outJson, outSize, "%s", jsonStr.c_str());
+        json resp = {{"status", "success"}, {"file_id", fileId}, {"file_name", pf.fileName},
+                     {"file_size", pf.fileSize}, {"file_md5", pf.fileMd5},
+                     {"compression", pf.compression}, {"total_chunks", pf.totalChunks},
+                     {"chunk_size", pf.chunkSize}, {"message_id", fileMsgId}};
+        snprintf(outJson, outSize, "%s", resp.dump().c_str());
     }
-
-    LOG_INFO("email_file_split_and_send: success, file_id=%s, total_tasks=%d\n",
-             fileId.c_str(), totalChunks + 1);
+    LOG_INFO("email_file_split_and_send: success, file_id=%s, total_tasks=%d\n", fileId.c_str(), queued + 1);
     return 0;
 }
 
@@ -270,6 +187,7 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
                                                   const char* fileName, int64_t fileSize,
                                                   const char* fileMd5, int totalChunks, int chunkSize,
                                                   const char* messageId,
+                                                  const char* compression, const char* compressedMd5,
                                                   char* outJson, int outSize) {
     if (!fileId || !account || !fileName) {
         if (outJson && outSize > 0) {
@@ -326,6 +244,8 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
     rec.chunkSize = chunkSize;
     rec.messageId = messageIdStr;
     rec.status = 0;
+    rec.compression = compression ? compression : "";
+    rec.compressedMd5 = compressedMd5 ? compressedMd5 : "";
 
     if (!s_fileTransferRepo.insertFileTransfer(rec)) {
         LOG_INFO("email_file_transfer_receive_file: failed to insert record for file_id=%s\n", fileIdStr.c_str());
@@ -410,31 +330,17 @@ extern "C" int email_file_transfer_receive_truck(const char* fileId, int chunkIn
              receivedCount, ftRec.totalChunks, fileIdStr.c_str(), complete);
 
     if (complete && outputDir && outputDir[0]) {
-        // Reassemble file
         auto chunks = s_fileTransferRepo.queryChunksByFileId(fileIdStr);
+        std::vector<std::string> ordered;
+        for (const auto& c : chunks) ordered.push_back(c.chunkData);
         std::string outPath = std::string(outputDir) + "/" + ftRec.fileName;
-
-        std::ofstream outFile(outPath, std::ios::binary);
-        if (!outFile.is_open()) {
-            LOG_INFO("email_file_transfer_receive_truck: cannot open output file %s\n", outPath.c_str());
+        int rrc = filechunk::reassembleFile(ordered, {ftRec.fileMd5, ftRec.compression, ftRec.compressedMd5}, outPath);
+        if (rrc == 0) {
+            LOG_INFO("email_file_transfer_receive_truck: file reassembled successfully at %s\n", outPath.c_str());
+            s_fileTransferRepo.updateStatus(fileIdStr, 1);
         } else {
-            for (const auto& chunk : chunks) {
-                auto chunkBytes = base64_decode(chunk.chunkData);
-                outFile.write(reinterpret_cast<const char*>(chunkBytes.data()), chunkBytes.size());
-            }
-            outFile.close();
-
-            // Verify file MD5
-            std::string actualMd5 = compute_file_md5(outPath);
-            if (!ftRec.fileMd5.empty() && actualMd5 != ftRec.fileMd5) {
-                LOG_INFO("email_file_transfer_receive_truck: file MD5 mismatch! expected=%s, got=%s\n",
-                         ftRec.fileMd5.c_str(), actualMd5.c_str());
-                s_fileTransferRepo.updateStatus(fileIdStr, 2);  // failed
-            } else {
-                LOG_INFO("email_file_transfer_receive_truck: file reassembled successfully at %s\n",
-                         outPath.c_str());
-                s_fileTransferRepo.updateStatus(fileIdStr, 1);  // complete
-            }
+            LOG_INFO("email_file_transfer_receive_truck: reassemble failed rc=%d for %s\n", rrc, outPath.c_str());
+            s_fileTransferRepo.updateStatus(fileIdStr, 2);
         }
     }
 
@@ -543,29 +449,12 @@ extern "C" int email_file_transfer_reassemble(const char* fileId, const char* ou
     }
 
     auto chunks = s_fileTransferRepo.queryChunksByFileId(fileId);
+    std::vector<std::string> ordered;
+    for (const auto& c : chunks) ordered.push_back(c.chunkData);
     std::string outPath = std::string(outputDir) + "/" + rec.fileName;
-
-    std::ofstream outFile(outPath, std::ios::binary);
-    if (!outFile.is_open()) {
-        snprintf(outJson, outSize, R"({"status":"failed","error":"cannot_open_output"})");
-        return -3;
-    }
-
-    for (const auto& chunk : chunks) {
-        auto chunkBytes = base64_decode(chunk.chunkData);
-        outFile.write(reinterpret_cast<const char*>(chunkBytes.data()), chunkBytes.size());
-    }
-    outFile.close();
-
-    // Verify MD5
-    std::string actualMd5 = compute_file_md5(outPath);
-    bool md5Ok = rec.fileMd5.empty() || actualMd5 == rec.fileMd5;
-
-    if (md5Ok) {
-        s_fileTransferRepo.updateStatus(fileId, 1);
-    } else {
-        s_fileTransferRepo.updateStatus(fileId, 2);
-    }
+    int rrc = filechunk::reassembleFile(ordered, {rec.fileMd5, rec.compression, rec.compressedMd5}, outPath);
+    bool md5Ok = (rrc == 0);
+    s_fileTransferRepo.updateStatus(fileId, md5Ok ? 1 : 2);
 
     json resp;
     resp["status"] = md5Ok ? "success" : "failed";
@@ -574,7 +463,7 @@ extern "C" int email_file_transfer_reassemble(const char* fileId, const char* ou
     resp["output_path"] = outPath;
     resp["md5_match"] = md5Ok;
     resp["expected_md5"] = rec.fileMd5;
-    resp["actual_md5"] = actualMd5;
+    resp["reassemble_rc"] = rrc;
     std::string jsonStr = resp.dump();
     snprintf(outJson, outSize, "%s", jsonStr.c_str());
 

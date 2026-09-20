@@ -91,6 +91,7 @@ add_library(email_core STATIC
     email_contact.cpp
     email_addressbook.cpp
     email_file_transfer.cpp
+    file_chunk_util.cpp
     signal/signal_protocol.cpp
     signal/signal_message.cpp
     signal/signal_c_api.cpp
@@ -110,6 +111,9 @@ add_library(email_core STATIC
     persistence/signal_session_repo.cpp
     persistence/mls_repo.cpp
     persistence/group_session_repo.cpp
+    unified/unified_session_repo.cpp
+    unified/unified_session_manager.cpp
+    unified/unified_session_c_api.cpp
 )
 
 # Email core shared library (used by Flutter via dart:ffi)
@@ -123,6 +127,7 @@ add_library(email_core_shared SHARED
     email_contact.cpp
     email_addressbook.cpp
     email_file_transfer.cpp
+    file_chunk_util.cpp
     signal/signal_protocol.cpp
     signal/signal_message.cpp
     signal/signal_c_api.cpp
@@ -142,6 +147,9 @@ add_library(email_core_shared SHARED
     persistence/signal_session_repo.cpp
     persistence/mls_repo.cpp
     persistence/group_session_repo.cpp
+    unified/unified_session_repo.cpp
+    unified/unified_session_manager.cpp
+    unified/unified_session_c_api.cpp
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
@@ -154,6 +162,7 @@ target_include_directories(email_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
+    ${CMAKE_CURRENT_SOURCE_DIR}/unified
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
@@ -163,6 +172,7 @@ target_include_directories(email_core_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
+    ${CMAKE_CURRENT_SOURCE_DIR}/unified
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
