@@ -697,11 +697,22 @@ int email_db_init(const char* path) {
                                      "mls_group_id TEXT DEFAULT '',"
                                      "root_message_id TEXT DEFAULT '',"
                                      "status INTEGER DEFAULT 0,"
+                                     "mailmen TEXT NOT NULL DEFAULT '[]',"
+                                     "mailman_cursor INTEGER DEFAULT 0,"
+                                     "pinned INTEGER DEFAULT 0,"
+                                     "hidden INTEGER DEFAULT 0,"
                                      "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                      "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                      ");";
     rc = sqlite3_exec(g_db, sql_unified_session, NULL, NULL, &err_msg);
     if (rc != SQLITE_OK) { LOG_INFO("SQL error (unified_session): %s\n", err_msg); sqlite3_free(err_msg); }
+
+    // Idempotent migration for existing DBs: sending mailmen pool columns
+    sqlite3_exec(g_db, "ALTER TABLE unified_session ADD COLUMN mailmen TEXT NOT NULL DEFAULT '[]';", NULL, NULL, NULL);
+    sqlite3_exec(g_db, "ALTER TABLE unified_session ADD COLUMN mailman_cursor INTEGER DEFAULT 0;", NULL, NULL, NULL);
+    // Idempotent migration: pin / hide flags
+    sqlite3_exec(g_db, "ALTER TABLE unified_session ADD COLUMN pinned INTEGER DEFAULT 0;", NULL, NULL, NULL);
+    sqlite3_exec(g_db, "ALTER TABLE unified_session ADD COLUMN hidden INTEGER DEFAULT 0;", NULL, NULL, NULL);
 
     sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_unified_session_account ON unified_session(account);", NULL, NULL, &err_msg);
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }

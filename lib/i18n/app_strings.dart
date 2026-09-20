@@ -59,6 +59,13 @@ class AppStrings {
   static String get enterSessionTitle => isZh ? '输入会话标题' : 'Enter session title';
   static String get selectAccount => isZh ? '选择要使用的账户' : 'Select account to use';
   static String get sessionMembers => isZh ? '会话成员' : 'Session Members';
+  static String get mailmanPool => isZh ? '发送邮箱池' : 'Sending Mail Pool';
+  static String get mailmanPoolHint =>
+      isZh ? '主邮箱默认发送，可勾选更多邮箱轮流发送以突破单邮箱频率限制' : 'Primary mailbox always sends; check more mailboxes to rotate sending and bypass per-mailbox rate limits';
+  static String get pinSession => isZh ? '置顶' : 'Pin to top';
+  static String get hideSession => isZh ? '隐藏会话' : 'Hide session';
+  static String get pinnedSection => isZh ? '置顶' : 'Pinned';
+  static String get hiddenSection => isZh ? '隐藏' : 'Hidden';
   static String get enterEmail => isZh ? '输入邮箱地址' : 'Enter email address';
   static String get noMembers => isZh ? '暂未添加成员' : 'No members added';
   static String get pleaseEnterTitle => isZh ? '请输入会话标题' : 'Please enter session title';

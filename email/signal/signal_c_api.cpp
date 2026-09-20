@@ -68,6 +68,46 @@ extern "C" int signal_get_prekey_bundle(const char* account, char* outJson, int 
     return 0;
 }
 
+extern "C" int signal_get_prekey_bundle_for_session(const char* account, const char* sessionId,
+                                                    char* outJson, int outSize) {
+    if (!account || !sessionId || !outJson || outSize <= 0) return -1;
+    std::string acc(account);
+    std::string sigId(sessionId);
+    if (sigId.empty()) return -1;
+
+    // Provision per-session keys for this specific sig_xxx (idempotent)
+    if (!ensure_identity_key_for_session(sigId)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"no_identity_key"})");
+        return -2;
+    }
+    if (!ensure_signed_prekey_for_session(sigId)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"no_signed_prekey"})");
+        return -3;
+    }
+
+    PrekeyBundle bundle = build_prekey_bundle_for_session(sigId);
+    if (bundle.ikPub.empty()) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"no_identity_key"})");
+        return -2;
+    }
+
+    json j;
+    j["status"] = "success";
+    j["session_id"] = sigId;
+    j["prekey_bundle"] = {
+        {"ik_pub", bundle.ikPub},
+        {"spk_pub", bundle.spkPub},
+        {"spk_sig", bundle.spkSig},
+        {"opk_pub", bundle.opkPub}
+    };
+
+    std::string s = j.dump();
+    snprintf(outJson, outSize, "%s", s.c_str());
+    LOG_INFO("[Signal] signal_get_prekey_bundle_for_session: bundle for session=%s, account=%s\n",
+             sigId.c_str(), acc.c_str());
+    return 0;
+}
+
 extern "C" int signal_session_initiate(const char* account, const char* peerEmail,
                                        const char* plaintext, char* outJson, int outSize,
                                        const char* messageId,
@@ -159,6 +199,91 @@ extern "C" int signal_session_initiate(const char* account, const char* peerEmai
     return 0;
 }
 
+extern "C" int signal_session_initiate_with_id(const char* account, const char* peerEmail,
+                                               const char* sessionId,
+                                               const char* plaintext, char* outJson, int outSize,
+                                               const char* messageId,
+                                               const char* inReplyTo) {
+    if (!account || !peerEmail || !sessionId || !plaintext || !outJson || outSize <= 0) return -1;
+
+    std::string acc(account);
+    std::string peer(peerEmail);
+    std::string sid(sessionId);
+    std::string text(plaintext);
+    if (sid.empty()) return -1;
+
+    // Load peer's prekey (stored during PREKEY_BUNDLE exchange)
+    SignalPeerPrekeyRecord peerRec;
+    if (!s_signalKeyRepo.loadPeerPrekey(acc, peer, peerRec)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"no_peer_prekey"})");
+        LOG_INFO("[Signal] signal_session_initiate_with_id: no peer prekey for %s, session=%s\n",
+                 peer.c_str(), sid.c_str());
+        return -4;
+    }
+
+    // Ensure our per-session keys exist (should already from PREKEY_BUNDLE creation)
+    if (!ensure_identity_key_for_session(sid)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"no_identity_key"})");
+        return -2;
+    }
+    if (!ensure_signed_prekey_for_session(sid)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"no_signed_prekey"})");
+        return -3;
+    }
+
+    PrekeyBundle peerBundle;
+    peerBundle.ikPub = peerRec.ikPub;
+    peerBundle.spkPub = peerRec.spkPub;
+    peerBundle.spkSig = peerRec.spkSig;
+    peerBundle.opkPub = peerRec.opkPub;
+
+    // X3DH: compute root key using our per-session IK + peer's bundle
+    std::string rootKey, ekPub, ekPriv, ekPassword;
+    if (!x3dh_initiate_for_session(sid, peerBundle, rootKey, ekPub, ekPriv, ekPassword)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"x3dh_failed"})");
+        return -6;
+    }
+
+    // Initialize Double Ratchet (as initiator)
+    if (!dr_initialize_for_session(sid, acc, peer, sid, rootKey, peerBundle.spkPub, true)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"dr_init_failed"})");
+        return -7;
+    }
+
+    // Encrypt first message
+    EncryptedMessage encMsg;
+    if (!dr_encrypt(acc, peer, sid, text, encMsg)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"dr_encrypt_failed"})");
+        return -8;
+    }
+
+    // Build our own per-session prekey bundle to include in the init message
+    PrekeyBundle myBundle = build_prekey_bundle_for_session(sid);
+
+    // Encode as SESSION_INIT message
+    std::vector<std::string> recipients = {peer};
+    json msgJson = signal_msg::encode_session_init(
+        sid, acc, recipients, encMsg,
+        myBundle.ikPub, ekPub, myBundle,
+        messageId ? messageId : "",
+        inReplyTo ? inReplyTo : "",
+        peerBundle.spkPub,
+        peerBundle.ikPub
+    );
+
+    json result;
+    result["status"] = "success";
+    result["session_id"] = sid;
+    result["message"] = msgJson;
+
+    std::string s = result.dump();
+    snprintf(outJson, outSize, "%s", s.c_str());
+
+    LOG_INFO("[Signal] signal_session_initiate_with_id: session %s for %s -> %s\n",
+             sid.c_str(), acc.c_str(), peer.c_str());
+    return 0;
+}
+
 extern "C" int signal_session_encrypt(const char* account, const char* peerEmail,
                                       const char* sessionId, const char* plaintext,
                                       char* outJson, int outSize,
@@ -213,6 +338,9 @@ extern "C" int signal_session_decrypt(const char* account, const char* peerEmail
         snprintf(outJson, outSize, R"({"status":"error","error":"parse_failed"})");
         return -2;
     }
+
+    // Body 明文 from 是身份路由键：信封 from 只是邮差，不参与身份判定
+    peer = parsed.fromAccount;
 
     // If this is a SESSION_INIT, we need to create the session first
     if (parsed.isInit) {

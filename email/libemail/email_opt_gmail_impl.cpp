@@ -488,6 +488,8 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         int encrypt_method = json_content.value("encrypt_method", 0);
         std::string members = json_content.value("members", "");
         std::string local_body = json_content.value("local_body", "");
+        std::string owner_account = json_content.value("owner_account", email_);
+        if (owner_account.empty()) owner_account = email_;
 
         LOG_INFO("Gmail send_email - parsed: recipient='%s', subject='%s', in_reply_to='%s'\n",
                  recipient.c_str(), subject.c_str(), in_reply_to.c_str());
@@ -554,21 +556,14 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         // For non-new types, find session via in_reply_to
         if (sid.empty() && !in_reply_to.empty()) {
             static SessionRepo s_sessionRepo;
-            sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
+            sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, owner_account);
             LOG_INFO("Gmail send_email: x_mailer=%s, found session_id=%s via in_reply_to=%s\n",
                      x_session_chart.c_str(), sid.c_str(), in_reply_to.c_str());
         }
 
         LOG_INFO("Gmail send_email: using session_id=%s\n", sid.c_str());
 
-        // Legacy encryption disabled — all encryption handled by Signal protocol
-        std::string bodyToSend = body;
-        bool needsEncryption = false;
-
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
-        vmime::shared_ptr<vmime::message> msg = builder.construct();
-
-        // Set Message-ID
+        // Message id (this message's identity; also stamped into 1.0.0 bodies below)
         std::string msg_id;
         if (!message_id.empty()) {
             msg_id = message_id;
@@ -576,6 +571,28 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         } else {
             msg_id = "<" + generate_random_string(24) + "@gmail.com>";
         }
+
+        // Legacy encryption disabled — all encryption handled by Signal protocol
+        std::string bodyToSend = body;
+        bool needsEncryption = false;
+
+        // PREKEY_BUNDLE (1.0.0) is plaintext JSON built by the transport layer: stamp
+        // x_message_id / x_reply_to into the body (all other types get them from the
+        // Signal/MLS layer).
+        if (x_session_chart == XMailer::PREKEY_BUNDLE) {
+            try {
+                auto bodyJson = nlohmann::json::parse(bodyToSend);
+                bodyJson["x_message_id"] = msg_id;
+                bodyJson["x_reply_to"] = in_reply_to;
+                bodyToSend = bodyJson.dump();
+            } catch (...) {
+                LOG_INFO("Gmail send_email: PREKEY_BUNDLE body is not JSON, ids not injected\n");
+            }
+        }
+
+        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
+        vmime::shared_ptr<vmime::message> msg = builder.construct();
+
         msg->getHeader()->MessageId()->setValue(msg_id);
 
         // Set In-Reply-To and References
@@ -610,7 +627,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
         char json_buffer[8192];
         const std::string& bodyForLocal = local_body.empty() ? bodyToSend : local_body;
         int insert_result = email_insert_sent_email(
-            email_.c_str(), email_.c_str(), email_.c_str(),
+            owner_account.c_str(), email_.c_str(), email_.c_str(),
             recipient.c_str(), subject.c_str(), date_str,
             msg_id.c_str(), in_reply_to.c_str(), bodyForLocal.c_str(),
             data_dir_.c_str(), json_buffer, sizeof(json_buffer),
@@ -647,7 +664,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                     char session_buffer[8192];
                     int encMethod = needsEncryption ? 1 : (encrypt_method == 1 ? 1 : 0);
                     int session_result = email_add_email_to_session(
-                        sid.c_str(), email_id.c_str(), email_.c_str(),
+                        sid.c_str(), email_id.c_str(), owner_account.c_str(),
                         encMethod, session_buffer, sizeof(session_buffer)
                     );
 

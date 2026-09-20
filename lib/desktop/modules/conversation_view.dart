@@ -411,6 +411,34 @@ mixin ConversationViewMixin on State<EmailModule> {
               ),
             ),
           ),
+          // 置顶 / 隐藏会话 开关（持久化到 DB，切换后刷新列表分组）
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+            child: Column(
+              children: [
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                  title: Text(AppStrings.pinSession, style: const TextStyle(fontSize: 13)),
+                  value: session.pinned,
+                  onChanged: (v) {
+                    UnifiedSessionManager.setSessionFlags(session.sessionId, v, session.hidden);
+                    loadUnifiedSessions();
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                  title: Text(AppStrings.hideSession, style: const TextStyle(fontSize: 13)),
+                  value: session.hidden,
+                  onChanged: (v) {
+                    UnifiedSessionManager.setSessionFlags(session.sessionId, session.pinned, v);
+                    loadUnifiedSessions();
+                  },
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

@@ -14,6 +14,7 @@
 #include "task_repo.h"
 #include "file_transfer_repo.h"
 #include "signal_session_repo.h"
+#include "signal_message.h"
 #include "persistence/group_session_repo.h"
 #include "unified/unified_session_repo.h"
 #include "unified/unified_session_manager.h"
@@ -355,6 +356,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         // Body-level ids extracted from the decrypted attachment envelopes
         // (x-message-id / x-reply-to are canonical; headers are not).
         std::string attachMsgId, attachReplyTo;
+        // Body-level ids of any other JSON-bodied mail (MLS, plaintext protocol mail);
+        // used as the row's identity / chain parent when present.
+        std::string bodyMessageId, bodyReplyTo;
 
         try {
 
@@ -363,6 +367,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 LOG_INFO("[DB] download_pending: X-Mailer=1.0.0 (PREKEY_BUNDLE), processing prekey bundle\n");
                 std::string prekeySessionId;
                 std::string bodyReplyTo;
+                std::string bodyMsgId;
                 try {
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                     msg->parse(emlContent);
@@ -379,7 +384,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     std::string spkSig = pb.value("spk_sig", "");
                     std::string opkPub = pb.value("opk_pub", "");
                     prekeySessionId = bodyJson.value("session_id", "");
-                    bodyReplyTo = bodyJson.value("reply_to", "");
+                    // x_reply_to is the bundle this one answers ("" for the conversation root).
+                    bodyMsgId = bodyJson.value("x_message_id", "");
+                    bodyReplyTo = bodyJson.value("x_reply_to", "");
 
                     if (!ikPub.empty() && !spkPub.empty()) {
                         int rc = signal_store_peer_prekey(
@@ -427,8 +434,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     }
                 }
 
-                // Mark as processed and continue
-                s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
+                // Persist body ids (x_message_id / x_reply_to) as this row's identity and
+                // chain parent.
+                s_emailRepo.updateAfterDownload(pe, accountStr, bodyMsgId, bodyReplyTo, pe);
                 s_emailRepo.setIslocal(pe, accountStr, 2);
                 LOG_INFO("[DB] download_pending: set islocal=2 for PREKEY_BUNDLE uuid=%s\n", pe.c_str());
 
@@ -442,13 +450,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         LOG_INFO("[DB] download_pending: PREKEY_BUNDLE lookup by body reply_to=%s -> session_id=%s\n",
                                  bodyReplyTo.c_str(), existingSessionId.c_str());
                     }
-                    // Fallback: try by EML in_reply_to header
-                    if (existingSessionId.empty() && !in_reply_to.empty()) {
-                        static SessionRepo s_sessionRepo;
-                        existingSessionId = s_sessionRepo.querySessionByInReplyTo(in_reply_to, accountStr);
-                        LOG_INFO("[DB] download_pending: PREKEY_BUNDLE lookup by in_reply_to=%s -> session_id=%s\n",
-                                 in_reply_to.c_str(), existingSessionId.c_str());
-                    }
+                    // No header fallback: body reply_to is the only chain reference.
 
                     if (existingSessionId.empty()) {
                         char create_session_json[4096];
@@ -494,8 +496,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         }
 
                         // Save sig_xxx from PREKEY_BUNDLE as signal_session_id for this email session
-                        // ONLY if not already set — the PREKEY_BUNDLE's session_id is for future
-                        // sessions, don't overwrite the existing SESSION_INIT mapping
                         if (!prekeySessionId.empty()) {
                             static SessionRepo s_sessionRepo;
                             std::string existingSigSid = s_sessionRepo.getSignalSessionId(existingSessionId);
@@ -507,21 +507,102 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 LOG_INFO("[DB] download_pending: PREKEY_BUNDLE keeping existing signal_session_id=%s for email session=%s (not overwriting with %s)\n",
                                          existingSigSid.c_str(), existingSessionId.c_str(), prekeySessionId.c_str());
                             }
-                            // Mark that peer has responded (PREKEY_BUNDLE = peer acknowledged the session)
-                            // This allows the initiator to send subsequent messages
-                            static SignalSessionRepo s_signalSessionRepo;
-                            s_signalSessionRepo.markReceivedBySessionId(accountStr, prekeySessionId);
-                            LOG_INFO("[DB] download_pending: PREKEY_BUNDLE marked recv_n for account=%s, signal_session=%s\n",
-                                     accountStr.c_str(), prekeySessionId.c_str());
 
-                            // Key exchange for this conversation is now complete: the peer
-                            // answered our SESSION_INIT, so it holds our bundle and we hold
-                            // its one. Mark OUR session row — prekeySessionId travels in the
-                            // body as the peer's id for *future* sessions and has no row here.
-                            std::string ourSigSid = existingSigSid.empty() ? prekeySessionId : existingSigSid;
-                            if (s_signalSessionRepo.markKexDone(accountStr, ourSigSid)) {
-                                LOG_INFO("[DB] download_pending: PREKEY_BUNDLE key exchange complete, signal_session=%s\n",
-                                         ourSigSid.c_str());
+                            if (bodyReplyTo.empty()) {
+                                // === 我是应答方（B）：对称回复 PREKEY_BUNDLE ===
+                                // 用发起方的 session_id 生成我的 per-session 密钥（每个 session 密钥隔离）
+                                char replyPrekeyBuf[65536];
+                                int replyRc = signal_get_prekey_bundle_for_session(
+                                    accountStr.c_str(), prekeySessionId.c_str(),
+                                    replyPrekeyBuf, sizeof(replyPrekeyBuf));
+                                if (replyRc == 0) {
+                                    std::string replyBody(replyPrekeyBuf);
+                                    try {
+                                        auto rj = json::parse(replyBody);
+                                        rj["x_reply_to"] = message_id;
+                                        replyBody = rj.dump();
+                                    } catch (...) {}
+
+                                    std::string replySubject = "Re: " + eml_subject;
+                                    char replyMsgId[256];
+                                    snprintf(replyMsgId, sizeof(replyMsgId), "<%lld.%s@oim>",
+                                             (long long)time(nullptr), accountStr.c_str());
+
+                                    int64_t taskId = s_taskRepo.insert(
+                                        accountStr, eml_from, replySubject, replyBody,
+                                        message_id, replyMsgId, "", "",
+                                        XMailer::PREKEY_BUNDLE);
+                                    if (taskId > 0) {
+                                        LOG_INFO("[DB] download_pending: queued symmetric PREKEY_BUNDLE reply to %s, session=%s, task=%lld\n",
+                                                 eml_from.c_str(), prekeySessionId.c_str(), (long long)taskId);
+                                    }
+                                } else {
+                                    LOG_INFO("[DB] download_pending: signal_get_prekey_bundle_for_session failed rc=%d for session=%s\n",
+                                             replyRc, prekeySessionId.c_str());
+                                }
+                            } else {
+                                // === 我是发起方（A）：收到 B 的回复，自动续发 SESSION_INIT ===
+                                static SignalSessionRepo s_signalSessionRepo;
+                                s_signalSessionRepo.markReceivedBySessionId(accountStr, prekeySessionId);
+
+                                // 找到对应的 unified_session（创建时 signalSessionId=sigA）
+                                static UnifiedSessionRepo s_usRepo;
+                                UnifiedSession us;
+                                if (s_usRepo.loadBySignalSessionId(accountStr, prekeySessionId, us)) {
+                                    std::string peer;
+                                    for (auto& m : us.members) {
+                                        if (m != accountStr) { peer = m; break; }
+                                    }
+                                    if (!peer.empty()) {
+                                        // 防重复：如果 signal_session 已存在（已 initiate 过），跳过
+                                        if (signal_session_exists(accountStr.c_str(), peer.c_str(), prekeySessionId.c_str()) == 1) {
+                                            LOG_INFO("[DB] download_pending: signal_session already exists for sig=%s, skipping duplicate auto-initiate\n",
+                                                     prekeySessionId.c_str());
+                                        } else {
+                                        // 用 sigA + B 的 prekey 做 X3DH + 双棘轮 + 加密首条消息
+                                        std::string startMsg = us.subject;
+                                        char initBuf[65536];
+                                        char initMsgId[256];
+                                        snprintf(initMsgId, sizeof(initMsgId), "<%lld.%s@oim>",
+                                                 (long long)time(nullptr), accountStr.c_str());
+
+                                        // Chain: INIT replies to the LAST message — B's bundle
+                                        // reply (its body x_message_id).
+                                        const std::string& initParent = bodyMsgId;
+                                        int initRc = signal_session_initiate_with_id(
+                                            accountStr.c_str(), peer.c_str(), prekeySessionId.c_str(),
+                                            startMsg.c_str(), initBuf, sizeof(initBuf),
+                                            initMsgId, initParent.c_str());
+                                        if (initRc == 0) {
+                                            try {
+                                                auto initResp = json::parse(initBuf);
+                                                if (initResp.value("status", "") == "success") {
+                                                    std::string encBody = initResp["message"].dump();
+                                                    int64_t taskId = s_taskRepo.insert(
+                                                        accountStr, peer, us.subject, encBody,
+                                                        initParent, initMsgId, initMsgId, us.sessionId,
+                                                        XMailer::SESSION_INIT, 1, startMsg);
+                                                    if (taskId > 0) {
+                                                        LOG_INFO("[DB] download_pending: auto-initiated SESSION_INIT us=%s, sig=%s, peer=%s, task=%lld\n",
+                                                                 us.sessionId.c_str(), prekeySessionId.c_str(),
+                                                                 peer.c_str(), (long long)taskId);
+                                                        // X3DH 已建立，密钥交换完成
+                                                        s_signalSessionRepo.markKexDone(accountStr, prekeySessionId);
+                                                    }
+                                                }
+                                            } catch (const std::exception& e) {
+                                                LOG_INFO("[DB] download_pending: auto-initiate parse error: %s\n", e.what());
+                                            }
+                                        } else {
+                                            LOG_INFO("[DB] download_pending: signal_session_initiate_with_id failed rc=%d for sig=%s\n",
+                                                     initRc, prekeySessionId.c_str());
+                                        }
+                                        } // end anti-duplicate else
+                                    }
+                                } else {
+                                    LOG_INFO("[DB] download_pending: no unified_session for sig=%s, skipping auto-initiate\n",
+                                             prekeySessionId.c_str());
+                                }
                             }
                         }
                     }
@@ -545,6 +626,15 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     bool dummyHasAttachment = false;
                     extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
                     std::string bodyText = textBody.empty() ? htmlBody : textBody;
+
+                    // Body ids (the MLS envelope is JSON with x_message_id / x_reply_to).
+                    try {
+                        auto envJson = json::parse(bodyText);
+                        bodyMessageId = envJson.value("x_message_id", "");
+                        bodyReplyTo = envJson.value("x_reply_to", "");
+                    } catch (...) {}
+                    message_id = bodyMessageId;
+                    in_reply_to = bodyReplyTo;
 
                     char outGroupId[128] = {0};
                     // Plaintext can be a multi-MB file chunk JSON — size the buffer to the body.
@@ -664,6 +754,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             std::string signalInReplyTo;
             std::string signalMessageId;
             std::string signalSessionIdFromDecrypt;
+            // Body 明文 from 是身份键：信封 from 只是邮差，不参与身份判定（无回退）
+            std::string signalFromBody;
             try {
                 vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                 msg->parse(emlContent);
@@ -672,6 +764,13 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 bool dummyHasAttachment = false;
                 extractParts(std::static_pointer_cast<vmime::bodyPart>(msg), textBody, htmlBody, dummyAttachments, dummyHasAttachment);
                 std::string bodyText = textBody.empty() ? htmlBody : textBody;
+
+                {
+                    signal_msg::ParsedSignalMessage envParsed;
+                    if (signal_msg::decode_signal_message_str(bodyText, envParsed) && !envParsed.fromAccount.empty()) {
+                        signalFromBody = envParsed.fromAccount;
+                    }
+                }
 
                 std::vector<char> outBuf(65536);
                 int rc = signal_session_decrypt(
@@ -698,8 +797,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             // Replace emlContent with a minimal text/plain message containing the decrypted plaintext
                             emlContent.clear();
                             emlContent.reserve(plaintext.size() + 256);
-                            if (!eml_from.empty()) {
-                                emlContent += "From: " + eml_from + "\r\n";
+                            if (!signalFromBody.empty()) {
+                                emlContent += "From: " + signalFromBody + "\r\n";
                             }
                             if (!eml_to.empty()) {
                                 emlContent += "To: " + eml_to + "\r\n";
@@ -838,9 +937,23 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             // by member set — a new SESSION_INIT from the same peer is a new
                             // session and must get its own unified record.
                             std::string usRoot = signalMessageId.empty() ? message_id : signalMessageId;
-                            std::vector<std::string> usMembers = {accountStr, eml_from};
+                            std::vector<std::string> usMembers = {accountStr, signalFromBody};
                             UnifiedSession existingUs;
-                            if (usRoot.empty() || !s_usRepo.loadByRootMessageId(accountStr, usRoot, existingUs)) {
+                            // The INIT is the third handshake step of a conversation whose
+                            // Signal session (sig_xxx) was fixed by the initiator's bundle.
+                            // Our unified session for that handshake (created from the bundle's
+                            // legacy session) carries the same sig id — join it, never split
+                            // one handshake into two sessions. Also dedup on the INIT id itself.
+                            bool usFound = false;
+                            if (!signalSessionIdFromDecrypt.empty() &&
+                                s_usRepo.loadBySignalSessionId(accountStr, signalSessionIdFromDecrypt, existingUs)) {
+                                usFound = true;
+                                LOG_INFO("[DB] download_pending: SESSION_INIT joins unified session=%s (sig=%s)\n",
+                                         existingUs.sessionId.c_str(), signalSessionIdFromDecrypt.c_str());
+                            } else if (!usRoot.empty() && s_usRepo.loadByRootMessageId(accountStr, usRoot, existingUs)) {
+                                usFound = true;
+                            }
+                            if (!usFound) {
                                 UnifiedSession usRec;
                                 // Generate us_<secs>.<random> id (same format as UnifiedSessionManager)
                                 static std::mt19937_64 rng{std::random_device{}()};
@@ -852,7 +965,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 usRec.mode = SessionMode::Signal;
                                 usRec.members = usMembers;
                                 usRec.signalSessionId = signalSessionIdFromDecrypt;
-                                usRec.rootMessageId = usRoot;
+                                // Root = the first message of the handshake's legacy session
+                                // (the initiator's bundle — same root on both sides).
+                                usRec.rootMessageId = s_sessionRepo.queryFirstMessageId(newSessionId);
                                 usRec.status = 0;
                                 if (s_usRepo.create(usRec)) {
                                     LOG_INFO("[DB] download_pending: created unified session=%s for received SESSION_INIT\n",
@@ -863,46 +978,17 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             }
                         }
 
-                        // Send our PREKEY_BUNDLE (1.0.0) back to the initiator so they can
-                        // initiate future sessions with our latest prekeys.
+                        // New flow: key exchange already completed during the PREKEY_BUNDLE
+                        // phase (A sends PREKEY_BUNDLE → B replies symmetrically → A sends
+                        // SESSION_INIT). Decrypting the SESSION_INIT means the ratchet is
+                        // established; just mark kex done. Do NOT reply with another
+                        // PREKEY_BUNDLE here — that old-flow remnant generated a brand-new sig
+                        // and a junk 1.0.0 email, causing duplicate key-exchange records in GUI.
                         {
-                            char prekeyBuf[65536];
-                            int prekeyRc = signal_get_prekey_bundle(accountStr.c_str(), prekeyBuf, sizeof(prekeyBuf));
-                            if (prekeyRc == 0) {
-                                std::string prekeyBody(prekeyBuf);
-                                // Add reply_to to body so receiver can associate with the correct session
-                                try {
-                                    auto pkJson = json::parse(prekeyBody);
-                                    pkJson["reply_to"] = message_id;
-                                    prekeyBody = pkJson.dump();
-                                } catch (...) {}
-                                std::string prekeySubject = "Re: " + eml_subject;
-                                std::string prekeyReplyTo = message_id;
-                                // Generate a unique message_id for the prekey bundle email
-                                char prekeyMsgId[256];
-                                snprintf(prekeyMsgId, sizeof(prekeyMsgId), "%lld.%s@oim",
-                                         (long long)time(nullptr), accountStr.c_str());
-
-                                int64_t taskId = s_taskRepo.insert(
-                                    accountStr, eml_from, prekeySubject, prekeyBody,
-                                    prekeyReplyTo, prekeyMsgId, "", "",
-                                    XMailer::PREKEY_BUNDLE);
-                                if (taskId > 0) {
-                                    LOG_INFO("[DB] download_pending: queued PREKEY_BUNDLE (1.0.0) to %s, task_id=%lld\n",
-                                             eml_from.c_str(), (long long)taskId);
-                                    // We are the responder: decrypting the SESSION_INIT gave us
-                                    // the initiator's keys, and our own bundle is now handed to
-                                    // the transport for it. Both directions are covered.
-                                    static SignalSessionRepo s_signalSessionRepo;
-                                    if (s_signalSessionRepo.markKexDone(accountStr, signalSessionIdFromDecrypt)) {
-                                        LOG_INFO("[DB] download_pending: SESSION_INIT reply queued, key exchange complete, signal_session=%s\n",
-                                                 signalSessionIdFromDecrypt.c_str());
-                                    }
-                                } else {
-                                    LOG_INFO("[DB] download_pending: failed to queue PREKEY_BUNDLE task\n");
-                                }
-                            } else {
-                                LOG_INFO("[DB] download_pending: signal_get_prekey_bundle failed rc=%d, skipping PREKEY_BUNDLE reply\n", prekeyRc);
+                            static SignalSessionRepo s_signalSessionRepo;
+                            if (s_signalSessionRepo.markKexDone(accountStr, signalSessionIdFromDecrypt)) {
+                                LOG_INFO("[DB] download_pending: SESSION_INIT decrypted, key exchange complete, signal_session=%s\n",
+                                         signalSessionIdFromDecrypt.c_str());
                             }
                         }
                     }
@@ -924,15 +1010,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         existingSessionId = existingSid;
                     }
 
-                    // Fallback 1: try email header in_reply_to
-                    if (existingSessionId.empty() && !in_reply_to.empty()) {
-                        char existingSid[512];
-                        existingSid[0] = '\0';
-                        email_query_session_by_message_id(in_reply_to.c_str(), accountStr.c_str(), existingSid, sizeof(existingSid));
-                        existingSessionId = existingSid;
-                    }
-
-                    // Fallback 2: use Signal session_id mapping when Message-Id has been rewritten by server
+                    // Fallback: the Signal session id embedded in the ratchet header maps
+                    // to the legacy session established by the handshake (no header ids).
                     if (existingSessionId.empty() && !signalSessionIdFromDecrypt.empty()) {
                         std::string sidBySignal = s_sessionRepo.findSessionIdBySignalSessionId(accountStr, signalSessionIdFromDecrypt);
                         if (!sidBySignal.empty()) {
@@ -966,8 +1045,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             // (from the Signal envelope) so the reply chain matches the sender's own records even
             // when the mail server rewrote the Message-ID header.
             {
-                const std::string& storeMsgId = signalMessageId.empty() ? message_id : signalMessageId;
-                const std::string& storeInReplyTo = signalInReplyTo.empty() ? in_reply_to : signalInReplyTo;
+                const std::string& storeMsgId = signalMessageId;
+                const std::string& storeInReplyTo = signalInReplyTo;
                 s_emailRepo.updateAfterDownload(pe, accountStr, storeMsgId, storeInReplyTo, pe);
             }
             s_emailRepo.setIslocal(pe, accountStr, 2);
@@ -998,7 +1077,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             attachMsgId = fileJson.value("x_message_id", "");
                             attachReplyTo = fileJson.value("x_reply_to", "");
                             std::string sid;
-                            if (!in_reply_to.empty()) sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, accountStr);
+                            if (!attachReplyTo.empty()) sid = s_sessionRepo.querySessionByInReplyTo(attachReplyTo, accountStr);
                             char ftResult[4096];
                             email_file_transfer_receive_file(
                                 fileJson.value("file_id","").c_str(), sid.c_str(), accountStr.c_str(), eml_from.c_str(),
@@ -1076,8 +1155,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             }
 
             // Session association via embedded IDs / in_reply_to for non-attachment types
-            // 优先使用 body 里的 x-message-id / x-reply-id / last_message_id，
-            // 再回退到 Header 的 In-Reply-To。
+            // Session association uses the body's x_reply_to only (x_message_id is the
+            // message identity). Envelope headers are never consulted.
             if (x_session_chart != XMailer::ATTACH_CHUNK && x_session_chart != XMailer::RATCHET_MSG && x_session_chart != XMailer::ATTACH_META) {
                 std::string replyIdFromBody;
 
@@ -1097,23 +1176,21 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         try {
                             auto bodyJson = json::parse(bodyText);
 
-                            // x-reply-id style: allow multiple spellings and legacy last_message_id
-                            if (bodyJson.contains("x_reply_id") && bodyJson["x_reply_id"].is_string()) {
-                                replyIdFromBody = bodyJson["x_reply_id"].get<std::string>();
-                            } else if (bodyJson.contains("x-reply-id") && bodyJson["x-reply-id"].is_string()) {
-                                replyIdFromBody = bodyJson["x-reply-id"].get<std::string>();
-                            } else if (bodyJson.contains("last_message_id") && bodyJson["last_message_id"].is_string()) {
-                                replyIdFromBody = bodyJson["last_message_id"].get<std::string>();
+                            if (bodyJson.contains("x_reply_to") && bodyJson["x_reply_to"].is_string()) {
+                                replyIdFromBody = bodyJson["x_reply_to"].get<std::string>();
+                            }
+                            if (bodyJson.contains("x_message_id") && bodyJson["x_message_id"].is_string()) {
+                                bodyMessageId = bodyJson["x_message_id"].get<std::string>();
                             }
                         } catch (...) {
-                            // Body is not JSON, ignore
+                            // Body is not JSON: an ordinary external mail, no chain ids
                         }
                     }
                 } catch (...) {
-                    // Parsing body failed, ignore and fall back to header
+                    // Parsing body failed: treat as a mail without chain ids
                 }
+                if (!replyIdFromBody.empty()) bodyReplyTo = replyIdFromBody;
 
-                // Prefer body-level reply id; fall back to header In-Reply-To
                 auto tryLinkWithId = [&](const std::string& replyId, const char* sourceLabel) {
                     if (replyId.empty()) return false;
                     char foundSid[512];
@@ -1135,14 +1212,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     return false;
                 };
 
-                bool linked = false;
-                // 1. Body JSON x-reply-id / last_message_id
-                linked = tryLinkWithId(replyIdFromBody, "body");
-
-                // 2. Fallback: header In-Reply-To
-                if (!linked && !in_reply_to.empty()) {
-                    linked = tryLinkWithId(in_reply_to, "header");
-                }
+                // Body x_reply_to is the only chain reference (no header fallback).
+                bool linked = tryLinkWithId(replyIdFromBody, "body");
 
                 if (!linked) {
                     LOG_INFO("[DB] download_pending: data email - could not find session for reply_id(body='%s', header='%s'), account=%s\n",
@@ -1160,11 +1231,15 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         // ATTACH_META/CHUNK: use the body-level x-message-id/x-reply-to extracted
         // during decryption, falling back to envelope headers.
         if (x_session_chart == XMailer::ATTACH_META || x_session_chart == XMailer::ATTACH_CHUNK) {
-            const std::string& m = attachMsgId.empty() ? message_id : attachMsgId;
-            const std::string& r = attachReplyTo.empty() ? in_reply_to : attachReplyTo;
-            s_emailRepo.updateAfterDownload(pe, accountStr, m, r, pe);
+            s_emailRepo.updateAfterDownload(pe, accountStr, attachMsgId, attachReplyTo, pe);
         } else if (x_session_chart != XMailer::RATCHET_MSG) {
-            s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
+            // Protocol mail: body ids. Ordinary external mail (no X-Mailer, no JSON body)
+            // has no body ids and never joins a session; its envelope values are kept
+            // only so it can be listed.
+            const bool protocolMail = XMailer::isValid(x_session_chart);
+            const std::string& m = protocolMail ? bodyMessageId : message_id;
+            const std::string& r = protocolMail ? bodyReplyTo : in_reply_to;
+            s_emailRepo.updateAfterDownload(pe, accountStr, m, r, pe);
         }
 
         // Mark as fully processed to prevent reprocessing
@@ -1707,11 +1782,16 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
             }
         }
 
-        // 1:1 ratchet app message (1.0.2): the body was already Double-Ratchet-
-        // encrypted once at enqueue time (us_send_message), so it must be sent
-        // verbatim — including on retries, where re-encrypting would advance the
-        // ratchet again and desync the peer.
-        if (t.xSessionChart == XMailer::RATCHET_MSG && t.preEncrypted) {
+        // 1:1 Signal messages whose body was already Double-Ratchet-encrypted at
+        // enqueue time must be sent verbatim — including on retries, where
+        // re-encrypting would advance the ratchet again and desync the peer.
+        //   - RATCHET_MSG (1.0.2): encrypted by us_send_message
+        //   - SESSION_INIT (1.0.1): encrypted by the auto-initiate in download_pending
+        //     (signal_session_initiate_with_id). Without this the transport re-enters
+        //     the "existing session" re-encrypt branch, resolves an empty legacy
+        //     signal_session_id from the unified id, and fails "not ready for peer".
+        if ((t.xSessionChart == XMailer::RATCHET_MSG ||
+             t.xSessionChart == XMailer::SESSION_INIT) && t.preEncrypted) {
             wireBody = t.body;
             localBody = t.localBody;
             preEncrypted = true;
@@ -1734,6 +1814,22 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
         if (preEncrypted) {
             emailContent["pre_encrypted"] = true;
             emailContent["local_body"] = localBody;
+        }
+        // Mailman rotation: the physical sender (this account) may differ from the
+        // conversation owner. The local sent copy must land under the OWNER so the
+        // owner's conversation shows it (and its "sending…" bubble resolves); the
+        // mailman is only a transport and keeps no record. Always emitted — some
+        // transports (Outlook) have no reliable local account string of their own.
+        {
+            std::string ownerAccount = account;
+            if (t.sessionId.rfind("us_", 0) == 0) {
+                static UnifiedSessionRepo s_usRepoOwner;
+                UnifiedSession us;
+                if (s_usRepoOwner.load(t.sessionId, us) && !us.account.empty()) {
+                    ownerAccount = us.account;
+                }
+            }
+            emailContent["owner_account"] = ownerAccount;
         }
 
         // Note: encryption is handled by send_email() when X-Mailer is 1.0.2/1.0.4/1.0.5

@@ -39,6 +39,10 @@ static json sessionToJson(const UnifiedSession& s) {
     j["signal_session_id"] = s.signalSessionId;
     j["mls_group_id"] = s.mlsGroupId;
     j["root_message_id"] = s.rootMessageId;
+    j["mailmen"] = s.mailmen;
+    j["mailman_cursor"] = s.mailmanCursor;
+    j["pinned"] = s.pinned;
+    j["hidden"] = s.hidden;
     j["status"] = s.status;
     j["created_at"] = s.createdAt;
     j["updated_at"] = s.updatedAt;
@@ -52,7 +56,9 @@ extern "C" {
 // Auto-selects Signal (2 members) or MLS (3+ members).
 // outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
 int us_create_session(const char* account, const char* subject,
-                      const char* membersJson, char* outJson, int outSize) {
+                      const char* membersJson, const char* mailmenJson,
+                      int pinned, int hidden,
+                      char* outJson, int outSize) {
     if (!account || !membersJson || !outJson || outSize <= 0) return -1;
 
     auto members = parseMembersJson(membersJson);
@@ -62,7 +68,10 @@ int us_create_session(const char* account, const char* subject,
         return -2;
     }
 
-    auto result = s_manager.createSession(account, subject ? subject : "", members);
+    auto mailmen = parseMembersJson(mailmenJson);
+
+    auto result = s_manager.createSession(account, subject ? subject : "", members, mailmen,
+                                          pinned, hidden);
 
     json resp;
     resp["status"] = result.success ? "success" : "error";
@@ -203,6 +212,24 @@ int us_get_session(const char* sessionId, char* outJson, int outSize) {
 
     snprintf(outJson, outSize, "%s", resp.dump().c_str());
     return session.sessionId.empty() ? -2 : 0;
+}
+
+// Update the pinned/hidden display flags of a session.
+// outJson: {status}
+int us_set_session_flags(const char* sessionId, int pinned, int hidden,
+                         char* outJson, int outSize) {
+    if (!sessionId || !outJson || outSize <= 0) return -1;
+
+    bool ok = s_manager.setSessionFlags(sessionId, pinned, hidden);
+
+    json resp;
+    resp["status"] = ok ? "success" : "error";
+    if (!ok) resp["error"] = "update_failed";
+    snprintf(outJson, outSize, "%s", resp.dump().c_str());
+
+    LOG_INFO("[US] us_set_session_flags: session=%s pinned=%d hidden=%d ok=%d\n",
+             sessionId, pinned, hidden, ok ? 1 : 0);
+    return ok ? 0 : -2;
 }
 
 // Check if a session is ready for sending.

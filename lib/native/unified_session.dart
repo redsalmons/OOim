@@ -43,10 +43,11 @@ final DynamicLibrary _lib = _loadLibrary();
 // ---------------------------------------------------------------------------
 
 // us_create_session
+// (account, subject, membersJson, mailmenJson, pinned, hidden, outJson, outSize)
 typedef _UsCreateSessionNative = Int32 Function(
-    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int32, Pointer<Utf8>, Int32);
 typedef _UsCreateSessionDart = int Function(
-    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, int, Pointer<Utf8>, int);
 
 // us_send_message
 typedef _UsSendMessageNative = Int32 Function(
@@ -72,6 +73,13 @@ typedef _UsAddMembersDart = int Function(
 typedef _UsQueryNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _UsQueryDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
+// us_set_session_flags
+// (sessionId, pinned, hidden, outJson, outSize)
+typedef _UsSetSessionFlagsNative = Int32 Function(
+    Pointer<Utf8>, Int32, Int32, Pointer<Utf8>, Int32);
+typedef _UsSetSessionFlagsDart = int Function(
+    Pointer<Utf8>, int, int, Pointer<Utf8>, int);
+
 // us_is_ready
 typedef _UsIsReadyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _UsIsReadyDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
@@ -86,6 +94,7 @@ final _usHandleIncoming = _lib.lookupFunction<_UsHandleIncomingNative, _UsHandle
 final _usAddMembers = _lib.lookupFunction<_UsAddMembersNative, _UsAddMembersDart>('us_add_members');
 final _usListSessions = _lib.lookupFunction<_UsQueryNative, _UsQueryDart>('us_list_sessions');
 final _usGetSession = _lib.lookupFunction<_UsQueryNative, _UsQueryDart>('us_get_session');
+final _usSetSessionFlags = _lib.lookupFunction<_UsSetSessionFlagsNative, _UsSetSessionFlagsDart>('us_set_session_flags');
 final _usIsReady = _lib.lookupFunction<_UsIsReadyNative, _UsIsReadyDart>('us_is_ready');
 
 // ---------------------------------------------------------------------------
@@ -102,6 +111,8 @@ class UnifiedSessionInfo {
   final String mlsGroupId;
   final String rootMessageId;
   final int status;
+  final bool pinned;    // 置顶
+  final bool hidden;    // 隐藏
   final String createdAt;
   final String updatedAt;
 
@@ -115,6 +126,8 @@ class UnifiedSessionInfo {
     this.mlsGroupId = '',
     this.rootMessageId = '',
     this.status = 0,
+    this.pinned = false,
+    this.hidden = false,
     this.createdAt = '',
     this.updatedAt = '',
   });
@@ -130,6 +143,8 @@ class UnifiedSessionInfo {
       mlsGroupId: json['mls_group_id']?.toString() ?? '',
       rootMessageId: json['root_message_id']?.toString() ?? '',
       status: json['status'] is int ? json['status'] : (int.tryParse(json['status']?.toString() ?? '0') ?? 0),
+      pinned: (json['pinned'] == 1 || json['pinned'] == true),
+      hidden: (json['hidden'] == 1 || json['hidden'] == true),
       createdAt: json['created_at']?.toString() ?? '',
       updatedAt: json['updated_at']?.toString() ?? '',
     );
@@ -152,6 +167,8 @@ class UnifiedSessionInfo {
       mlsGroupId: mlsGroupId ?? this.mlsGroupId,
       rootMessageId: rootMessageId,
       status: status,
+      pinned: pinned,
+      hidden: hidden,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );
@@ -166,23 +183,29 @@ class UnifiedSessionManager {
   /// Create a new encrypted session.
   ///
   /// [members] must include the local account + all remote participants.
+  /// [mailmen] is the sending pool (round-robin); empty means only the main account.
   /// - 2 members → Signal 1:1
   /// - 3+ members → MLS 1:n
   ///
   /// Returns a JSON string: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
-  static String createSession(String account, String subject, List<String> members) {
+  static String createSession(String account, String subject, List<String> members,
+      {List<String> mailmen = const [], bool pinned = false, bool hidden = false}) {
     final accountPtr = account.toNativeUtf8();
     final subjectPtr = subject.toNativeUtf8();
     final membersJson = jsonEncode(members);
     final membersPtr = membersJson.toNativeUtf8();
+    final mailmenJson = jsonEncode(mailmen);
+    final mailmenPtr = mailmenJson.toNativeUtf8();
     final outBuf = malloc.allocate<Utf8>(65536);
     try {
-      _usCreateSession(accountPtr, subjectPtr, membersPtr, outBuf, 65536);
+      _usCreateSession(accountPtr, subjectPtr, membersPtr, mailmenPtr,
+          pinned ? 1 : 0, hidden ? 1 : 0, outBuf, 65536);
       return outBuf.toDartString();
     } finally {
       malloc.free(accountPtr);
       malloc.free(subjectPtr);
       malloc.free(membersPtr);
+      malloc.free(mailmenPtr);
       malloc.free(outBuf);
     }
   }
@@ -305,6 +328,21 @@ class UnifiedSessionManager {
     final outBuf = malloc.allocate<Utf8>(65536);
     try {
       _usGetSession(sessionPtr, outBuf, 65536);
+      return outBuf.toDartString();
+    } finally {
+      malloc.free(sessionPtr);
+      malloc.free(outBuf);
+    }
+  }
+
+  /// Update the pinned/hidden display flags of a session.
+  ///
+  /// Returns a JSON string: {status}
+  static String setSessionFlags(String sessionId, bool pinned, bool hidden) {
+    final sessionPtr = sessionId.toNativeUtf8();
+    final outBuf = malloc.allocate<Utf8>(65536);
+    try {
+      _usSetSessionFlags(sessionPtr, pinned ? 1 : 0, hidden ? 1 : 0, outBuf, 65536);
       return outBuf.toDartString();
     } finally {
       malloc.free(sessionPtr);

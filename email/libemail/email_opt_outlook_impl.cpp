@@ -1056,6 +1056,8 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
         encrypt_method_val = j.value("encrypt_method", 0);
         members_str = j.value("members", "");
         pending_local_body_ = j.value("local_body", "");
+        pending_owner_account_ = j.value("owner_account", "");
+        if (pending_owner_account_.empty()) pending_owner_account_ = email_;
     } catch (const std::exception& e) {
         last_error_ = std::string("send_email: invalid JSON content: ") + e.what();
         LOG_INFO("Outlook send_email: %s\n", last_error_.c_str());
@@ -1078,7 +1080,7 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
     // For non-new types, find session via in_reply_to
     if (sid.empty() && !in_reply_to_str.empty()) {
         static SessionRepo s_sessionRepo;
-        sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to_str, email_);
+        sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to_str, pending_owner_account_);
         LOG_INFO("Outlook send_email_via_graph_api: x_mailer=%s, found session_id=%s via in_reply_to=%s\n",
                  x_session_chart_str.c_str(), sid.c_str(), in_reply_to_str.c_str());
     }
@@ -1087,6 +1089,24 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
 
     // Legacy encryption disabled — all encryption handled by Signal protocol
     bool needsEncryption = false;
+
+    // PREKEY_BUNDLE (1.0.0) is plaintext JSON built by the transport layer: stamp
+    // x_message_id / x_reply_to into the body. Both send paths receive body_str.
+    if (x_session_chart_str == XMailer::PREKEY_BUNDLE) {
+        if (message_id_str.empty()) {
+            message_id_str = "<" + generate_random_string(24) + "@outlook.com>";
+        } else if (message_id_str.front() != '<') {
+            message_id_str = "<" + message_id_str + ">";
+        }
+        try {
+            auto bodyJson = nlohmann::json::parse(body_str);
+            bodyJson["x_message_id"] = message_id_str;
+            bodyJson["x_reply_to"] = in_reply_to_str;
+            body_str = bodyJson.dump();
+        } catch (...) {
+            LOG_INFO("Outlook send_email: PREKEY_BUNDLE body is not JSON, ids not injected\n");
+        }
+    }
 
     // Choose sending method based on account type
     LOG_INFO("Outlook send_email: session_id=%s\n", session_id_str.c_str());
@@ -1258,7 +1278,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     LOG_INFO("Outlook send_email_via_graph_api: calling email_insert_sent_email, data_dir='%s', msg_id='%s'\n", data_dir_.c_str(), msg_id.c_str());
     const std::string& bodyForLocal = pending_local_body_.empty() ? body : pending_local_body_;
     int insert_result = email_insert_sent_email(
-        email_.c_str(),
+        pending_owner_account_.c_str(),
         email_.c_str(),
         email_.c_str(),
         recipient.c_str(),
@@ -1288,7 +1308,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                 std::string sid = session_id;
                 if (sid.empty() && !in_reply_to.empty()) {
                     static SessionRepo s_sessionRepo;
-                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
+                    sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, pending_owner_account_);
                     LOG_INFO("Outlook send_email_via_graph_api: found session_id=%s via in_reply_to=%s\n",
                              sid.c_str(), in_reply_to.c_str());
                 }
@@ -1322,7 +1342,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
                 int session_result = XMailer::isMls(x_session_chart) ? 0 : email_add_email_to_session(
                     sid.c_str(),
                     email_id.c_str(),
-                    email_.c_str(),
+                    pending_owner_account_.c_str(),
                     encMethod,
                     session_buffer,
                     sizeof(session_buffer)
@@ -1478,7 +1498,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         char json_buffer[8192];
         const std::string& bodyForLocal = pending_local_body_.empty() ? body : pending_local_body_;
         int insert_result = email_insert_sent_email(
-            email_.c_str(),
+            pending_owner_account_.c_str(),
             email_.c_str(),
             email_.c_str(),
             recipient.c_str(),
@@ -1526,7 +1546,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                     // For non-new types, find session via in_reply_to
                     if (sid.empty() && !in_reply_to.empty()) {
                         static SessionRepo s_sessionRepo2;
-                        sid = s_sessionRepo2.querySessionByInReplyTo(in_reply_to, email_);
+                        sid = s_sessionRepo2.querySessionByInReplyTo(in_reply_to, pending_owner_account_);
                         LOG_INFO("Outlook send_email_via_vmime_smtp: found session_id=%s via in_reply_to=%s\n",
                                  sid.c_str(), in_reply_to.c_str());
                     }
@@ -1540,7 +1560,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
                     int session_result = XMailer::isMls(x_session_chart) ? 0 : email_add_email_to_session(
                         sid.c_str(),
                         email_id.c_str(),
-                        email_.c_str(),
+                        pending_owner_account_.c_str(),
                         encMethod,
                         session_buffer,
                         sizeof(session_buffer)

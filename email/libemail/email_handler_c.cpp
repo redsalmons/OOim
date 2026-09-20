@@ -862,26 +862,16 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             // 1.0.0~1.0.4: download full EML now, then insert with islocal=1
             // download_pending_bodies will process (decrypt/session/key) and set islocal=2
 
-            // Check if a record with the same message_id already exists (from sent email or previous sync)
+            // Check if a record with the same x-message-id already exists (our own sent
+            // copy, or a previous sync). x-message-id is the ONLY identity of a message;
+            // never match by in_reply_to — our own reply and the peer's reply to the
+            // same parent share it, and matching would overwrite one with the other.
             bool found_existing = false;
             int64_t existing_id = 0;
             if (!message_id.empty()) {
                 existing_id = s_emailRepo.findIdByMessageId(message_id, accountStr);
                 if (existing_id > 0) {
                     found_existing = true;
-                }
-            }
-            // Fallback: if message_id not found, try matching sent email (uuid=0) by in_reply_to
-            // This handles the case where SMTP rewrote the Message-ID.
-            // MLS group messages share the same in_reply_to thread id, so they must not
-            // overwrite the pending sent row; always insert a new row.
-            if (!found_existing && !in_reply_to.empty() &&
-                !XMailer::isMls(x_session_chart)) {
-                existing_id = s_emailRepo.findSentByInReplyTo(in_reply_to, accountStr);
-                if (existing_id > 0) {
-                    found_existing = true;
-                    LOG_INFO("FetchAndStore_c: matched sent email by in_reply_to=%s, id=%lld (message_id was rewritten)\n",
-                             in_reply_to.c_str(), (long long)existing_id);
                 }
             }
 
@@ -991,12 +981,6 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             int64_t existing_id = 0;
             if (!dc.message_id.empty()) {
                 existing_id = s_emailRepo.findIdByMessageId(dc.message_id, accountStr);
-                if (existing_id > 0) {
-                    found_existing = true;
-                }
-            }
-            if (!found_existing && !dc.in_reply_to.empty()) {
-                existing_id = s_emailRepo.findSentByInReplyTo(dc.in_reply_to, accountStr);
                 if (existing_id > 0) {
                     found_existing = true;
                 }

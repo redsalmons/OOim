@@ -701,8 +701,12 @@ bool dr_encrypt(const std::string& account, const std::string& peerEmail,
         rec.dhSelfPub = dhPub;
         rec.dhSelfPriv = dhPriv;
         rec.dhSelfPassword = dhPassword;
-        rec.recvN = 0;
-        rec.recvChainKey = "";
+        // Do NOT clear recvN / recvChainKey here. In the Double Ratchet the sending
+        // and receiving chains evolve independently: switching our sending chain must
+        // leave the receiving chain intact, because the peer may still be sending
+        // several messages on the SAME DH key (n=0,1,2…). Clearing it made the
+        // responder unable to decrypt the initiator's n>=1 messages (rc=-5) whenever
+        // the responder replied in between.
     }
 
     // Derive message key and advance chain

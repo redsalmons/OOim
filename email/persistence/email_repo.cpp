@@ -247,25 +247,6 @@ int64_t EmailRepo::findIdByMessageId(const std::string& messageId, const std::st
     return result;
 }
 
-int64_t EmailRepo::findSentByInReplyTo(const std::string& inReplyTo, const std::string& account) {
-    auto& conn = DbConnection::instance();
-    sqlite3* db = conn.get();
-    if (!db || inReplyTo.empty()) return 0;
-
-    const char* sql = "SELECT id FROM localemail WHERE in_reply_to = ? AND account = ? AND uuid = '0' LIMIT 1;";
-    sqlite3_stmt* stmt;
-    int64_t result = 0;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, inReplyTo.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, account.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            result = sqlite3_column_int64(stmt, 0);
-        }
-        sqlite3_finalize(stmt);
-    }
-    return result;
-}
-
 int64_t EmailRepo::insert(const EmailRecord& rec) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();

@@ -39,8 +39,13 @@ void UnifiedSessionRepo::fillRecord(sqlite3_stmt* stmt, UnifiedSession& out) {
     out.mlsGroupId      = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
     out.rootMessageId   = sqlite3_column_text(stmt, 7) ? (const char*)sqlite3_column_text(stmt, 7) : "";
     out.status          = sqlite3_column_int(stmt, 8);
-    out.createdAt       = sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "";
-    out.updatedAt       = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
+    out.mailmen         = jsonToMembers(
+                            sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "[]");
+    out.mailmanCursor   = sqlite3_column_int(stmt, 10);
+    out.pinned          = sqlite3_column_int(stmt, 11);
+    out.hidden          = sqlite3_column_int(stmt, 12);
+    out.createdAt       = sqlite3_column_text(stmt, 13) ? (const char*)sqlite3_column_text(stmt, 13) : "";
+    out.updatedAt       = sqlite3_column_text(stmt, 14) ? (const char*)sqlite3_column_text(stmt, 14) : "";
 }
 
 // ---------- CRUD ----------
@@ -52,8 +57,9 @@ bool UnifiedSessionRepo::create(const UnifiedSession& rec) {
 
     const char* sql = "INSERT OR IGNORE INTO unified_session "
                       "(session_id, account, subject, mode, members, "
-                      " signal_session_id, mls_group_id, root_message_id, status) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                      " signal_session_id, mls_group_id, root_message_id, status, "
+                      " mailmen, mailman_cursor, pinned, hidden) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         LOG_INFO("[USRepo] create prepare error: %s\n", sqlite3_errmsg(db));
@@ -69,6 +75,10 @@ bool UnifiedSessionRepo::create(const UnifiedSession& rec) {
     sqlite3_bind_text(stmt, 7, rec.mlsGroupId.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 8, rec.rootMessageId.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 9, rec.status);
+    sqlite3_bind_text(stmt, 10, membersToJson(rec.mailmen).c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 11, rec.mailmanCursor);
+    sqlite3_bind_int(stmt, 12, rec.pinned);
+    sqlite3_bind_int(stmt, 13, rec.hidden);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -90,7 +100,7 @@ bool UnifiedSessionRepo::load(const std::string& sessionId, UnifiedSession& out)
 
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
-                      "created_at, updated_at "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
                       "FROM unified_session WHERE session_id=? LIMIT 1;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
@@ -116,7 +126,7 @@ bool UnifiedSessionRepo::loadByMembers(const std::string& account,
     // Load all active sessions for this account and compare member sets.
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
-                      "created_at, updated_at "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
                       "FROM unified_session WHERE account=? AND status=0;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
@@ -153,7 +163,7 @@ bool UnifiedSessionRepo::loadByRootMessageId(const std::string& account,
 
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
-                      "created_at, updated_at "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
                       "FROM unified_session WHERE account=? AND root_message_id=? AND status=0 "
                       "LIMIT 1;";
     sqlite3_stmt* stmt;
@@ -161,6 +171,33 @@ bool UnifiedSessionRepo::loadByRootMessageId(const std::string& account,
 
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, rootMessageId.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        fillRecord(stmt, out);
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool UnifiedSessionRepo::loadBySignalSessionId(const std::string& account,
+                                               const std::string& signalSessionId,
+                                               UnifiedSession& out) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "SELECT session_id, account, subject, mode, members, "
+                      "signal_session_id, mls_group_id, root_message_id, status, "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
+                      "FROM unified_session WHERE account=? AND signal_session_id=? AND status=0 "
+                      "LIMIT 1;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, signalSessionId.c_str(), -1, SQLITE_TRANSIENT);
 
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -249,7 +286,7 @@ std::vector<UnifiedSession> UnifiedSessionRepo::listByAccount(const std::string&
 
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
-                      "created_at, updated_at "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
                       "FROM unified_session WHERE account=? AND status=0 "
                       "ORDER BY updated_at DESC;";
     sqlite3_stmt* stmt;
@@ -264,6 +301,43 @@ std::vector<UnifiedSession> UnifiedSessionRepo::listByAccount(const std::string&
     }
     sqlite3_finalize(stmt);
     return result;
+}
+
+bool UnifiedSessionRepo::updateMailmanCursor(const std::string& sessionId, int cursor) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE unified_session SET mailman_cursor=?, "
+                      "updated_at=datetime('now','localtime') "
+                      "WHERE session_id=?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_int(stmt, 1, cursor);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+bool UnifiedSessionRepo::updateFlags(const std::string& sessionId, int pinned, int hidden) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE unified_session SET pinned=?, hidden=?, "
+                      "updated_at=datetime('now','localtime') "
+                      "WHERE session_id=?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_int(stmt, 1, pinned);
+    sqlite3_bind_int(stmt, 2, hidden);
+    sqlite3_bind_text(stmt, 3, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
 }
 
 bool UnifiedSessionRepo::close(const std::string& sessionId) {

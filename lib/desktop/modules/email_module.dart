@@ -43,6 +43,8 @@ class EmailModuleState extends State<EmailModule>
 
   final Set<String> _collapsedSections = {};
   final Set<String> _collapsedGroups = {};
+  // 置顶/隐藏子 section 默认折叠（只在首次加载时写入，用户点击后可展开）
+  bool _defaultGroupCollapseInitialized = false;
 
   final Map<String, int> _configIndexMap = {};
 
@@ -106,6 +108,15 @@ class EmailModuleState extends State<EmailModule>
   }
 
   void loadUnifiedSessions() {
+    // 首次加载：置顶/隐藏子 section 默认折叠（正常会话默认打开）
+    if (!_defaultGroupCollapseInitialized) {
+      for (final account in _configAccounts()) {
+        _collapsedGroups.add('unified:$account:pinned');
+        _collapsedGroups.add('unified:$account:hidden');
+      }
+      _defaultGroupCollapseInitialized = true;
+    }
+
     final all = <UnifiedSessionInfo>[];
     final seen = <String>{};
     for (final account in _configAccounts()) {

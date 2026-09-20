@@ -367,6 +367,12 @@ int signal_init_account(const char* account);
 // Returns 0 on success, negative on error.
 int signal_get_prekey_bundle(const char* account, char* outJson, int outSize);
 
+// Build a Prekey Bundle for a specific session_id (per-session keys).
+// Used by the responder to reply with keys scoped to the initiator's session.
+// Returns 0 on success, negative on error.
+int signal_get_prekey_bundle_for_session(const char* account, const char* sessionId,
+                                         char* outJson, int outSize);
+
 // Initiate a new Signal session: X3DH + first encrypted message.
 // Generates session_id, computes root key, encrypts plaintext.
 // Returns JSON with session_id + encrypted message body in outJson.
@@ -375,6 +381,15 @@ int signal_session_initiate(const char* account, const char* peerEmail,
                             const char* plaintext, char* outJson, int outSize,
                             const char* messageId,
                             const char* inReplyTo);
+
+// Initiate a Signal session with a pre-existing session_id (from PREKEY_BUNDLE exchange).
+// Same as signal_session_initiate but uses the given sessionId instead of generating a new one.
+// Returns 0 on success, negative on error.
+int signal_session_initiate_with_id(const char* account, const char* peerEmail,
+                                    const char* sessionId,
+                                    const char* plaintext, char* outJson, int outSize,
+                                    const char* messageId,
+                                    const char* inReplyTo);
 
 // Encrypt a message in an existing Signal session (Double Ratchet).
 // Returns JSON with encrypted message body in outJson.
@@ -492,9 +507,12 @@ int group_after_sent(const char* account, const char* xMailer,
 
 // Create a new encrypted session (auto-selects Signal for 2 members, MLS for 3+).
 // membersJson: JSON array of email addresses (must include the local account).
+// pinned/hidden: 1=置顶/隐藏 at creation time.
 // outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
 int us_create_session(const char* account, const char* subject,
-                      const char* membersJson, char* outJson, int outSize);
+                      const char* membersJson, const char* mailmenJson,
+                      int pinned, int hidden,
+                      char* outJson, int outSize);
 
 // Send a message in an existing session (auto-routes to Signal or MLS).
 // outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
@@ -523,6 +541,11 @@ int us_list_sessions(const char* account, char* outJson, int outSize);
 // Get a specific session by its unified session_id.
 // outJson: {status, session: {session_id, mode, members, ...}}
 int us_get_session(const char* sessionId, char* outJson, int outSize);
+
+// Update the pinned/hidden display flags of a session.
+// outJson: {status}
+int us_set_session_flags(const char* sessionId, int pinned, int hidden,
+                         char* outJson, int outSize);
 
 // Check if a session is ready for sending. Returns 1 if ready, 0 if not, negative on error.
 int us_is_ready(const char* account, const char* sessionId);

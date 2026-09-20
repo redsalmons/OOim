@@ -21,7 +21,10 @@ public:
     // Auto-selects Signal (2 members) or MLS (3+ members).
     SendResult createSession(const std::string& account,
                              const std::string& subject,
-                             const std::vector<std::string>& members);
+                             const std::vector<std::string>& members,
+                             const std::vector<std::string>& mailmen = {},
+                             int pinned = 0,
+                             int hidden = 0);
 
     // Send a message in an existing session.
     // Routes to Signal or MLS encryption based on the session's mode.
@@ -59,6 +62,9 @@ public:
     // Check if a session is ready for sending (keys exchanged, MLS joined, etc.).
     bool isReady(const std::string& account, const std::string& sessionId);
 
+    // Update the pinned/hidden display flags of a session.
+    bool setSessionFlags(const std::string& sessionId, int pinned, int hidden);
+
     // Double-Ratchet-encrypt an arbitrary plaintext for a Signal (1:1) session.
     // Output is the wire envelope JSON, sized dynamically (used for large file
     // chunks). Returns false with `error` set when the session is not Signal or
@@ -74,12 +80,18 @@ private:
     // Internal: create a 1:1 Signal session.
     SendResult createSignalSession_(const std::string& account,
                                     const std::string& subject,
-                                    const std::vector<std::string>& members);
+                                    const std::vector<std::string>& members,
+                                    const std::vector<std::string>& mailmen,
+                                    int pinned,
+                                    int hidden);
 
     // Internal: create a 1:n MLS session.
     SendResult createMlsSession_(const std::string& account,
                                  const std::string& subject,
-                                 const std::vector<std::string>& members);
+                                 const std::vector<std::string>& members,
+                                 const std::vector<std::string>& mailmen,
+                                 int pinned,
+                                 int hidden);
 
     // Internal: upgrade a Signal session to MLS (irreversible).
     SendResult upgradeToMls_(const std::string& account,

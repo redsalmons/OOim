@@ -28,6 +28,12 @@ public:
                              const std::string& rootMessageId,
                              UnifiedSession& out);
 
+    // Find an active session by its signal_session_id (sig_xxx).
+    // Used after PREKEY_BUNDLE exchange to locate the unified session for auto-initiation.
+    bool loadBySignalSessionId(const std::string& account,
+                               const std::string& signalSessionId,
+                               UnifiedSession& out);
+
     // Upgrade a session from Signal to MLS (irreversible).
     // Sets mode=mls, mls_group_id, and updates members.
     bool upgradeToMls(const std::string& sessionId,
@@ -41,6 +47,10 @@ public:
     // Update the signal_session_id of a session (after SMTP send establishes it).
     bool updateSignalSessionId(const std::string& sessionId,
                                const std::string& signalSessionId);
+    bool updateMailmanCursor(const std::string& sessionId, int cursor);
+
+    // Update the pinned/hidden display flags of a session.
+    bool updateFlags(const std::string& sessionId, int pinned, int hidden);
 
     // List all active sessions for an account.
     std::vector<UnifiedSession> listByAccount(const std::string& account);

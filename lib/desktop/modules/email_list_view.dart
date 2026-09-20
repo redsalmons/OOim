@@ -80,8 +80,43 @@ mixin EmailListViewMixin on State<EmailModule> {
             final isGroupCollapsed = collapsedGroups.contains(groupKey);
             widgets.add(buildGroupHeader(account, sessions.length, groupKey, isGroupCollapsed));
             if (!isGroupCollapsed) {
-              for (final session in sessions) {
-                widgets.add(buildUnifiedSessionItem(session));
+              // 三个子 section：置顶 / 会话 / 隐藏。隐藏优先于置顶。
+              final hiddenList = sessions.where((s) => s.hidden).toList();
+              final pinnedList = sessions.where((s) => s.pinned && !s.hidden).toList();
+              final normalList = sessions.where((s) => !s.pinned && !s.hidden).toList();
+
+              if (pinnedList.isNotEmpty) {
+                final key = '$groupKey:pinned';
+                final collapsed = collapsedGroups.contains(key);
+                widgets.add(buildGroupHeader(AppStrings.pinnedSection, pinnedList.length, key, collapsed));
+                if (!collapsed) {
+                  for (final session in pinnedList) {
+                    widgets.add(buildUnifiedSessionItem(session));
+                  }
+                }
+              }
+
+              // 正常会话 section（默认打开）
+              {
+                final key = '$groupKey:normal';
+                final collapsed = collapsedGroups.contains(key);
+                widgets.add(buildGroupHeader(AppStrings.conversation, normalList.length, key, collapsed));
+                if (!collapsed) {
+                  for (final session in normalList) {
+                    widgets.add(buildUnifiedSessionItem(session));
+                  }
+                }
+              }
+
+              if (hiddenList.isNotEmpty) {
+                final key = '$groupKey:hidden';
+                final collapsed = collapsedGroups.contains(key);
+                widgets.add(buildGroupHeader(AppStrings.hiddenSection, hiddenList.length, key, collapsed));
+                if (!collapsed) {
+                  for (final session in hiddenList) {
+                    widgets.add(buildUnifiedSessionItem(session));
+                  }
+                }
               }
             }
           }

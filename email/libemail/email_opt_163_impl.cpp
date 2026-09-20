@@ -747,6 +747,10 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // its own ciphertext later).
         bool pre_encrypted = json_content.value("pre_encrypted", false);
         std::string local_body = json_content.value("local_body", "");
+        // owner_account: set when this account is only a rotating mailman; the local
+        // sent copy is archived under the conversation owner instead of this account.
+        std::string owner_account = json_content.value("owner_account", email_);
+        if (owner_account.empty()) owner_account = email_;
 
         // If encrypt_method not specified, infer from X-Mailer
         if (encrypt_method == 0 && !pre_encrypted) {
@@ -851,7 +855,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // For non-new types, find session via in_reply_to
         if (sid.empty() && !in_reply_to.empty()) {
             static SessionRepo s_sessionRepo;
-            sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, email_);
+            sid = s_sessionRepo.querySessionByInReplyTo(in_reply_to, owner_account);
             LOG_INFO("163 send_email: x_mailer=%s, found session_id=%s via in_reply_to=%s\n",
                      x_session_chart.c_str(), sid.c_str(), in_reply_to.c_str());
         }
@@ -912,6 +916,21 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         // Inject x_message_id and last_message_id into body for encrypted and exchange types
         std::string bodyToSend = body;
+
+        // PREKEY_BUNDLE (1.0.0) is sent as plaintext JSON by the transport layer, so it
+        // is the one message type whose body ids are stamped here: x_message_id (this
+        // message's identity) and x_reply_to (the bundle it answers, "" for the
+        // conversation root). Every other type has them stamped by the Signal/MLS layer.
+        if (x_session_chart == XMailer::PREKEY_BUNDLE) {
+            try {
+                auto bodyJson = nlohmann::json::parse(bodyToSend);
+                bodyJson["x_message_id"] = msg_id;
+                bodyJson["x_reply_to"] = in_reply_to;
+                bodyToSend = bodyJson.dump();
+            } catch (...) {
+                LOG_INFO("163 send_email: PREKEY_BUNDLE body is not JSON, ids not injected\n");
+            }
+        }
 
         // Signal protocol integration
         bool useSignal = false;
@@ -1133,7 +1152,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         char json_buffer[8192];
         int insert_result = email_insert_sent_email(
-            email_.c_str(),
+            owner_account.c_str(),
             email_.c_str(),
             email_.c_str(),
             recipient.c_str(),
@@ -1189,7 +1208,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                         int session_result = email_add_email_to_session(
                             sid.c_str(),
                             email_id.c_str(),
-                            email_.c_str(),
+                            owner_account.c_str(),
                             encMethod,
                             session_buffer,
                             sizeof(session_buffer)
@@ -1697,7 +1716,13 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
             what.find("connection reset") != std::string::npos ||
             what.find("broken pipe") != std::string::npos) {
             std::cerr << "163 fetch_email_headers - connection lost, reconnecting..." << std::endl;
-            if (store_) store_->disconnect();
+            // Guard disconnect(): on a broken-pipe socket it sends LOGOUT and throws another
+            // EPIPE, which would escape this handler and skip connect_() below, leaving the
+            // account permanently stuck. Mirror connect_() (L88): swallow the error, then reset
+            // store_/session_ so connect_() rebuilds a fresh connection.
+            try { if (store_) store_->disconnect(); } catch (...) {}
+            session_.reset();
+            store_.reset();
             if (connect_()) {
                 // Retry fetch by recursing once (connect_ re-establishes connection)
                 // Avoid infinite recursion by not retrying on second failure

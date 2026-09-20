@@ -188,6 +188,7 @@ private:
     // Plaintext to store in the local .eml for the message currently being sent
     // (set by send_email from the "local_body" field; empty = store the wire body).
     std::string pending_local_body_;
+    std::string pending_owner_account_;
 
     // Helper methods for sending email
     bool send_email_via_graph_api(const std::string& recipient, const std::string& subject, 

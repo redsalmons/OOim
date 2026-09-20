@@ -25,6 +25,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
   final _titleController = TextEditingController();
   TextEditingController _membersController = TextEditingController();
   final List<String> _members = [];
+  final Set<String> _mailmen = {}; // 附加发送邮差池（主邮箱默认总是邮差，不在此列）
   bool _creating = false;
 
   @override
@@ -80,7 +81,9 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     // Create unified session via UnifiedSessionManager (auto-routes Signal/MLS)
     String createResult;
     try {
-      createResult = UnifiedSessionManager.createSession(_selectedAccount, title, allMembers);
+      createResult = UnifiedSessionManager.createSession(
+          _selectedAccount, title, allMembers,
+          mailmen: [_selectedAccount, ..._mailmen.where((m) => m != _selectedAccount)]);
       native.EmailCore.logWrite('[CREATE_SESSION] createSession result: $createResult');
     } catch (e) {
       native.EmailCore.logWrite('[CREATE_SESSION] createSession exception: $e');
@@ -108,12 +111,12 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
     final encryptedBody = createJson['encrypted_body']?.toString() ?? '';
 
     // Determine if this is a Signal or MLS session based on member count.
-    // Signal (2 members): SMTP layer handles encryption — pass plaintext + empty session_id.
+    // Signal (2 members): 创建即密钥交换 — 发明文 PREKEY_BUNDLE(1.0.0)，body 是 prekey bundle JSON。
     // MLS (3+ members): group_create already set up the group — pass x_mailer for task processing.
     final isSignal = (_members.length == 1); // 1 remote member = 2 total = Signal
-    final bodyForSmtp = isSignal ? AppStrings.startNewSession : encryptedBody;
+    final bodyForSmtp = encryptedBody;  // Signal: prekey bundle JSON; MLS: group encrypted body
     final sessionIdForSmtp = isSignal ? '' : sessionId;
-    final xMailerForSmtp = isSignal ? '' : xMailer;
+    final xMailerForSmtp = isSignal ? '1.0.0' : xMailer;  // Signal: PREKEY_BUNDLE
 
     // Load config for SMTP send
     final config = native.EmailCore.loadConfig(widget.configPath);
@@ -148,7 +151,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       'message_id': messageId,
       'session_id': sessionIdForSmtp,
       'x_session_chart': xMailerForSmtp,
-      'encrypt_method': isSignal ? 1 : 0,
+      'encrypt_method': 0,  // PREKEY_BUNDLE 是明文发送，不需要 SMTP 层加密
       'members': _members.join(','),
     });
 
@@ -220,6 +223,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: Text(AppStrings.newSession),
       content: SizedBox(
         width: 440,
@@ -347,7 +351,35 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
               ),
             if (_members.isEmpty)
               Text(AppStrings.noMembers, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+
+            // 3. 发送邮差池（多邮箱轮流发送，绕过单邮箱频率限制）
+            Text(AppStrings.mailmanPool, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: widget.accounts
+                  .where((a) => a != _selectedAccount) // 主邮箱默认发送，不显示在池子里
+                  .map((acc) {
+                final checked = _mailmen.contains(acc);
+                return FilterChip(
+                  label: Text(acc, style: const TextStyle(fontSize: 12)),
+                  selected: checked,
+                  onSelected: (v) {
+                    setState(() {
+                      if (v) {
+                        _mailmen.add(acc);
+                      } else {
+                        _mailmen.remove(acc);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            Text(AppStrings.mailmanPoolHint, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+            const SizedBox(height: 8),
 
 
           ],

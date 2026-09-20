@@ -47,7 +47,10 @@ static std::string joinRecipients(const std::vector<std::string>& v,
 
 SendResult UnifiedSessionManager::createSession(const std::string& account,
                                                  const std::string& subject,
-                                                 const std::vector<std::string>& members) {
+                                                 const std::vector<std::string>& members,
+                                                 const std::vector<std::string>& mailmen,
+                                                 int pinned,
+                                                 int hidden) {
     SendResult result;
 
     if (members.size() < 2) {
@@ -61,12 +64,16 @@ SendResult UnifiedSessionManager::createSession(const std::string& account,
         allMembers.insert(allMembers.begin(), account);
     }
 
+    // 邮差池归一化：空则只有主账户（现状行为）
+    std::vector<std::string> mailmenNorm = mailmen;
+    if (mailmenNorm.empty()) mailmenNorm.push_back(account);
+
     if (allMembers.size() == 2) {
         // 1:1 → Signal
-        result = createSignalSession_(account, subject, allMembers);
+        result = createSignalSession_(account, subject, allMembers, mailmenNorm, pinned, hidden);
     } else {
         // 1:n → MLS
-        result = createMlsSession_(account, subject, allMembers);
+        result = createMlsSession_(account, subject, allMembers, mailmenNorm, pinned, hidden);
     }
 
     return result;
@@ -76,7 +83,10 @@ SendResult UnifiedSessionManager::createSession(const std::string& account,
 
 SendResult UnifiedSessionManager::createSignalSession_(const std::string& account,
                                                         const std::string& subject,
-                                                        const std::vector<std::string>& members) {
+                                                        const std::vector<std::string>& members,
+                                                        const std::vector<std::string>& mailmen,
+                                                        int pinned,
+                                                        int hidden) {
     SendResult result;
 
     // Find the peer (the one that is not the local account).
@@ -89,23 +99,53 @@ SendResult UnifiedSessionManager::createSignalSession_(const std::string& accoun
         return result;
     }
 
-    // Generate unified session id.
+    // Generate unified session id and root message id.
     std::string usId = generateSessionId();
     std::string msgId = generateMessageId(account);
 
-    // NOTE: We do NOT call signal_session_initiate() here.
-    // The SMTP layer (sendViaConfigRaw) handles Signal session initiation
-    // and encryption when it sees encrypt_method=1 and session_id=''.
-    // This avoids double-initiation conflicts.
+    // === 创建即密钥交换：生成 per-session 密钥 + PREKEY_BUNDLE ===
+    // signal_get_prekey_bundle 生成新的 sig_xxx，为该 session 创建独立的 IK/SPK。
+    // 这是明文操作，不需要对方 prekey。每个 session 的公私钥完全隔离。
+    char prekeyBuf[65536];
+    int prekeyRc = signal_get_prekey_bundle(account.c_str(), prekeyBuf, sizeof(prekeyBuf));
+    if (prekeyRc != 0) {
+        result.error = "signal_get_prekey_bundle failed rc=" + std::to_string(prekeyRc);
+        LOG_INFO("[USMgr] createSignalSession_: signal_get_prekey_bundle failed rc=%d\n", prekeyRc);
+        return result;
+    }
 
-    // Persist unified session with empty signal_session_id.
+    // Parse sig_xxx and build the PREKEY_BUNDLE body (plaintext JSON).
+    std::string sigId;
+    std::string prekeyBody;
+    try {
+        auto resp = json::parse(prekeyBuf);
+        if (resp.value("status", "") != "success") {
+            result.error = "signal_get_prekey_bundle error: " + resp.value("error", "unknown");
+            return result;
+        }
+        sigId = resp.value("session_id", "");
+        prekeyBody = resp.dump();
+    } catch (const std::exception& e) {
+        result.error = std::string("parse prekey bundle failed: ") + e.what();
+        return result;
+    }
+
+    if (sigId.empty()) {
+        result.error = "signal_get_prekey_bundle returned empty session_id";
+        return result;
+    }
+
+    // Persist unified session with signalSessionId = sig_xxx (per-session key scope).
     UnifiedSession rec;
     rec.sessionId = usId;
     rec.account = account;
     rec.subject = subject;
     rec.mode = SessionMode::Signal;
     rec.members = members;
-    rec.signalSessionId = "";  // will be filled after first SMTP send
+    rec.mailmen = mailmen;
+    rec.pinned = pinned;
+    rec.hidden = hidden;
+    rec.signalSessionId = sigId;  // per-session key scope, established at creation
     rec.rootMessageId = msgId;
     rec.status = 0;
     if (!repo_.create(rec)) {
@@ -113,11 +153,14 @@ SendResult UnifiedSessionManager::createSignalSession_(const std::string& accoun
         return result;
     }
 
+    LOG_INFO("[USMgr] createSignalSession_: us=%s, sig=%s, peer=%s, sending PREKEY_BUNDLE\n",
+             usId.c_str(), sigId.c_str(), peer.c_str());
+
     result.success = true;
     result.sessionId = usId;
     result.messageId = msgId;
-    result.xMailer = XMailer::SESSION_INIT;
-    result.encryptedBody = "";  // SMTP layer will encrypt
+    result.xMailer = XMailer::PREKEY_BUNDLE;  // 创建即密钥交换
+    result.encryptedBody = prekeyBody;  // 明文 prekey bundle JSON
     return result;
 }
 
@@ -125,7 +168,10 @@ SendResult UnifiedSessionManager::createSignalSession_(const std::string& accoun
 
 SendResult UnifiedSessionManager::createMlsSession_(const std::string& account,
                                                      const std::string& subject,
-                                                     const std::vector<std::string>& members) {
+                                                     const std::vector<std::string>& members,
+                                                     const std::vector<std::string>& mailmen,
+                                                     int pinned,
+                                                     int hidden) {
     SendResult result;
 
     std::string usId = generateSessionId();
@@ -163,6 +209,9 @@ SendResult UnifiedSessionManager::createMlsSession_(const std::string& account,
     rec.subject = subject;
     rec.mode = SessionMode::Mls;
     rec.members = members;
+    rec.mailmen = mailmen;
+    rec.pinned = pinned;
+    rec.hidden = hidden;
     rec.mlsGroupId = groupId;
     rec.rootMessageId = rootMsgId;
     rec.status = 0;
@@ -251,11 +300,19 @@ SendResult UnifiedSessionManager::sendMessage(const std::string& account,
             return result;
         }
 
+        // 邮差轮换：密文永远用主会话加密，物理发送账户在邮差池中轮换
+        std::string mailman = account;
+        if (!session.mailmen.empty()) {
+            int n = (int)session.mailmen.size();
+            mailman = session.mailmen[session.mailmanCursor % n];
+            repo_.updateMailmanCursor(sessionId, (session.mailmanCursor + 1) % n);
+        }
+
         // Outbox: persist before sending. The task body holds the ciphertext
         // (pre_encrypted=1), local_body holds the plaintext for the local archive,
         // and the per-account background loop delivers it with retry/backoff.
         static TaskRepo s_outboxRepo;
-        int64_t taskId = s_outboxRepo.insert(account, peer, session.subject,
+        int64_t taskId = s_outboxRepo.insert(mailman, peer, session.subject,
                                              encryptedBody, inReplyTo, msgId,
                                              msgId, sessionId, XMailer::RATCHET_MSG,
                                              1, plaintext);
@@ -528,6 +585,10 @@ UnifiedSession UnifiedSessionManager::getSession(const std::string& sessionId) {
     UnifiedSession session;
     repo_.load(sessionId, session);
     return session;
+}
+
+bool UnifiedSessionManager::setSessionFlags(const std::string& sessionId, int pinned, int hidden) {
+    return repo_.updateFlags(sessionId, pinned ? 1 : 0, hidden ? 1 : 0);
 }
 
 bool UnifiedSessionManager::isReady(const std::string& account, const std::string& sessionId) {

@@ -27,6 +27,10 @@ struct UnifiedSession {
     std::string signalSessionId;  // sig_xxx when mode=Signal
     std::string mlsGroupId;       // group_session.group_id when mode=Mls
     std::string rootMessageId;    // x_message_id of the first message
+    std::vector<std::string> mailmen;  // 发送邮差池（round-robin 轮换）
+    int mailmanCursor = 0;        // 轮换游标
+    int pinned = 0;               // 1=置顶
+    int hidden = 0;               // 1=隐藏
     int status = 0;               // 0=active, 1=closed
     std::string createdAt;
     std::string updatedAt;
