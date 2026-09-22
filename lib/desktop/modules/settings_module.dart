@@ -1,8 +1,12 @@
 import 'dart:io';
+import 'dart:convert';
+import '../../native/email_core.dart' as native;
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../../i18n/app_strings.dart';
+import '../../main.dart' show appThemeMode, appTextScale, kTextScaleSmall, kTextScaleMedium, kTextScaleLarge;
+import '../app_theme.dart';
 
 class SettingsModule extends StatefulWidget {
   const SettingsModule({super.key});
@@ -12,11 +16,19 @@ class SettingsModule extends StatefulWidget {
 }
 
 class _SettingsModuleState extends State<SettingsModule> {
-  bool _darkMode = false;
   bool _notifications = true;
   bool _autoUpdate = true;
   String _language = AppStrings.isZh ? '简体中文' : 'English';
   String _configPath = '';
+  String _username = '';
+  String _defaultEmail = '';
+  bool _editingName = false;
+  final TextEditingController _nameController = TextEditingController();
+  late final FocusNode _nameFocusNode = FocusNode()
+    ..addListener(() {
+      // Blur: non-empty commits, empty abandons.
+      if (!_nameFocusNode.hasFocus && _editingName) _commitNameEdit();
+    });
 
   @override
   void initState() {
@@ -31,6 +43,41 @@ class _SettingsModuleState extends State<SettingsModule> {
     setState(() {
       _configPath = '${appDir.path}/config/oim.conf';
     });
+    _loadProfile();
+  }
+
+  String get _prefsPath =>
+      '${File(_configPath).parent.path}/user_prefs.json';
+
+  Future<void> _loadProfile() async {
+    final cfg = native.EmailCore.loadConfig(_configPath);
+    final def = cfg?.accounts.where((a) => a.isDefault).firstOrNull ??
+        (cfg != null && cfg.accounts.isNotEmpty ? cfg.accounts.first : null);
+    String name = '';
+    try {
+      final f = File(_prefsPath);
+      if (f.existsSync()) {
+        final j = jsonDecode(f.readAsStringSync());
+        name = j['username']?.toString() ?? '';
+      }
+    } catch (_) {}
+    if (name.isEmpty && def != null) name = def.email.split('@').first;
+    if (!mounted) return;
+    setState(() {
+      _username = name;
+      _defaultEmail = def?.email ?? '';
+    });
+  }
+
+  void _commitNameEdit() {
+    final v = _nameController.text.trim();
+    setState(() => _editingName = false);
+    if (v.isEmpty || v == _username) return;
+    _username = v;
+    setState(() {});
+    try {
+      File(_prefsPath).writeAsStringSync(jsonEncode({'username': v}));
+    } catch (_) {}
   }
 
   @override
@@ -101,7 +148,7 @@ class _SettingsModuleState extends State<SettingsModule> {
           ),
           child: Center(
             child: Text(
-              AppStrings.me,
+              _username.isNotEmpty ? _username[0].toUpperCase() : AppStrings.me,
               style: const TextStyle(color: Colors.white, fontSize: 24),
             ),
           ),
@@ -111,21 +158,42 @@ class _SettingsModuleState extends State<SettingsModule> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                AppStrings.username,
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-              ),
+              _editingName
+                  ? SizedBox(
+                      height: 26,
+                      child: TextField(
+                        controller: _nameController,
+                        focusNode: _nameFocusNode,
+                        autofocus: true,
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.zero,
+                          border: InputBorder.none,
+                        ),
+                        onSubmitted: (_) => _commitNameEdit(),
+                        onEditingComplete: _commitNameEdit,
+                      ),
+                    )
+                  : GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _nameController.text = _username;
+                          _editingName = true;
+                        });
+                      },
+                      child: Text(
+                        _username.isEmpty ? AppStrings.username : _username,
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                      ),
+                    ),
               const SizedBox(height: 4),
               Text(
-                'user@example.com',
-                style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                _defaultEmail,
+                style: TextStyle(fontSize: 14, color: context.oim.textSecondary),
               ),
             ],
           ),
-        ),
-        TextButton(
-          onPressed: () {},
-          child: Text(AppStrings.edit),
         ),
       ],
     );
@@ -144,17 +212,7 @@ class _SettingsModuleState extends State<SettingsModule> {
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
-            _buildSwitchItem(
-              Icons.dark_mode,
-              AppStrings.darkMode,
-              AppStrings.darkModeDesc,
-              _darkMode,
-              (value) {
-                setState(() {
-                  _darkMode = value;
-                });
-              },
-            ),
+            _buildThemeModeItem(),
             const Divider(),
             _buildSettingsItem(
               Icons.language,
@@ -162,14 +220,73 @@ class _SettingsModuleState extends State<SettingsModule> {
               _language,
               () {},
             ),
-            _buildSettingsItem(
-              Icons.text_fields,
-              AppStrings.fontSize,
-              AppStrings.fontSizeMedium,
-              () {},
-            ),
+            _buildFontSizeItem(),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildThemeModeItem() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.brightness_6, size: 24, color: context.oim.textSecondary),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(AppStrings.themeMode, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+          ),
+          ValueListenableBuilder<ThemeMode>(
+            valueListenable: appThemeMode,
+            builder: (context, mode, _) => SegmentedButton<ThemeMode>(
+              showSelectedIcon: false,
+              style: ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                textStyle: WidgetStatePropertyAll(const TextStyle(fontSize: 12)),
+              ),
+              segments: [
+                ButtonSegment(value: ThemeMode.system, label: Text(AppStrings.themeFollowSystem)),
+                ButtonSegment(value: ThemeMode.light, label: Text(AppStrings.themeLight)),
+                ButtonSegment(value: ThemeMode.dark, label: Text(AppStrings.themeDark)),
+              ],
+              selected: {mode},
+              onSelectionChanged: (sel) => appThemeMode.value = sel.first,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFontSizeItem() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.text_fields, size: 24, color: context.oim.textSecondary),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(AppStrings.fontSize, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+          ),
+          ValueListenableBuilder<double>(
+            valueListenable: appTextScale,
+            builder: (context, scale, _) => SegmentedButton<double>(
+              showSelectedIcon: false,
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                textStyle: WidgetStatePropertyAll(TextStyle(fontSize: 12)),
+              ),
+              segments: [
+                ButtonSegment(value: kTextScaleSmall, label: Text(AppStrings.fontSizeSmall)),
+                ButtonSegment(value: kTextScaleMedium, label: Text(AppStrings.fontSizeMedium)),
+                ButtonSegment(value: kTextScaleLarge, label: Text(AppStrings.fontSizeLarge)),
+              ],
+              selected: {scale},
+              onSelectionChanged: (sel) => appTextScale.value = sel.first,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -330,7 +447,7 @@ class _SettingsModuleState extends State<SettingsModule> {
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
           children: [
-            Icon(icon, size: 24, color: Colors.grey[700]),
+            Icon(icon, size: 24, color: context.oim.textSecondary),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -343,12 +460,12 @@ class _SettingsModuleState extends State<SettingsModule> {
                   if (subtitle.isNotEmpty)
                     Text(
                       subtitle,
-                      style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                      style: TextStyle(fontSize: 13, color: context.oim.textSecondary),
                     ),
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: Colors.grey[400], size: 20),
+            Icon(Icons.chevron_right, color: context.oim.textMuted, size: 20),
           ],
         ),
       ),
@@ -366,7 +483,7 @@ class _SettingsModuleState extends State<SettingsModule> {
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
-          Icon(icon, size: 24, color: Colors.grey[700]),
+          Icon(icon, size: 24, color: context.oim.textSecondary),
           const SizedBox(width: 16),
           Expanded(
             child: Column(
@@ -378,7 +495,7 @@ class _SettingsModuleState extends State<SettingsModule> {
                 ),
                 Text(
                   subtitle,
-                  style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                  style: TextStyle(fontSize: 13, color: context.oim.textSecondary),
                 ),
               ],
             ),
@@ -394,14 +511,12 @@ class _SettingsModuleState extends State<SettingsModule> {
 
   void _showAccountConfigDialog() {
     if (_configPath.isEmpty) return;
-    showDialog(
-      context: context,
-      builder: (context) => EmailConfigDialog(
-        configPath: _configPath,
-        onDone: () async {
-          // Optionally trigger a reload of the email module
-          // This would require a callback or event system
-        },
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => EmailConfigDialog(
+          configPath: _configPath,
+          asPage: true,
+        ),
       ),
     );
   }

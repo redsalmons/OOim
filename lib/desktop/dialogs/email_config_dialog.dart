@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import '../../native/email_core.dart' as native;
 import '../../i18n/app_strings.dart';
+import '../app_theme.dart';
 
 class ConfigField {
   final String label;
@@ -161,12 +162,15 @@ class EmailProviders {
 class EmailConfigDialog extends StatefulWidget {
   final String configPath;
   final bool standalone;
+  /// Render as a pushed full page (AppBar with back button) instead of a Dialog.
+  final bool asPage;
   final Future<void> Function()? onDone;
 
   const EmailConfigDialog({
     super.key,
     required this.configPath,
     this.standalone = false,
+    this.asPage = false,
     this.onDone,
   });
 
@@ -511,7 +515,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!widget.standalone) ...[
+          if (!widget.standalone && !widget.asPage) ...[
             Stack(
               alignment: Alignment.center,
               children: [
@@ -565,6 +569,21 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       );
     }
 
+    if (widget.asPage) {
+      return Scaffold(
+        appBar: AppBar(
+          title: Text(AppStrings.accountManagement),
+          centerTitle: true,
+        ),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: _buildContent(),
+          ),
+        ),
+      );
+    }
+
     final screenH = MediaQuery.of(context).size.height;
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -584,7 +603,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
     final email = def?.email ?? '';
     return Row(
       children: [
-        Icon(Icons.info_outline, size: 14, color: Colors.grey[500]),
+        Icon(Icons.info_outline, size: 14, color: context.oim.textMuted),
         const SizedBox(width: 6),
         Expanded(
           child: Text(
@@ -593,7 +612,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
                     ? '暂无账号。添加邮箱后可设为默认发送邮箱。'
                     : 'No accounts. Add a mailbox to set a default sender.')
                 : '$email${AppStrings.defaultSenderHint}',
-            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            style: TextStyle(fontSize: 12, color: context.oim.textMuted),
           ),
         ),
       ],
@@ -668,7 +687,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       return Center(
         child: Text(
           AppStrings.noEmailConfig,
-          style: TextStyle(color: Colors.grey[600]),
+          style: TextStyle(color: context.oim.textSecondary),
         ),
       );
     }
@@ -785,13 +804,13 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
                 decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey[400]!),
+                  border: Border.all(color: context.oim.border),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
                   account.authorized ? AppStrings.authorized : AppStrings.unauthorized,
                   style: TextStyle(
-                    color: account.authorized ? Colors.green : Colors.grey[700],
+                    color: account.authorized ? Colors.green : context.oim.textSecondary,
                   ),
                 ),
               ),

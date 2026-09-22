@@ -5,6 +5,7 @@ import 'email_module_base.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
 import '../../i18n/app_strings.dart';
+import '../app_theme.dart';
 
 mixin EmailListViewMixin on State<EmailModule> {
   double get listWidth;
@@ -35,7 +36,7 @@ mixin EmailListViewMixin on State<EmailModule> {
   Widget buildEmailList() {
     return Container(
       width: listWidth,
-      color: const Color(0xFFFAFAFA),
+      color: context.oim.listPane,
       child: Column(
         children: [
           buildSearchBar(),
@@ -82,7 +83,7 @@ mixin EmailListViewMixin on State<EmailModule> {
         if (filteredSessions.isEmpty) {
           widgets.add(Container(
             padding: const EdgeInsets.fromLTRB(28, 6, 8, 6),
-            child: Text(AppStrings.noConversations, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+            child: Text(AppStrings.noConversations, style: TextStyle(fontSize: 12, color: context.oim.textMuted)),
           ));
         } else {
           // 三个子 section：置顶（上）/ 会话（中）/ 隐藏（下）。隐藏优先于置顶。
@@ -142,14 +143,14 @@ mixin EmailListViewMixin on State<EmailModule> {
       },
       child: Container(
         padding: const EdgeInsets.fromLTRB(28, 8, 8, 4),
-        color: const Color(0xFFF0F0F0),
+        color: context.oim.groupHeader,
         child: Row(
           children: [
-            Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.grey[700])),
+            Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: context.oim.textSecondary)),
             const SizedBox(width: 6),
-            Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+            Text('$count', style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
             const Spacer(),
-            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 16, color: Colors.grey[500]),
+            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 16, color: context.oim.textMuted),
           ],
         ),
       ),
@@ -199,28 +200,28 @@ mixin EmailListViewMixin on State<EmailModule> {
       },
       child: Container(
         padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-        color: const Color(0xFFE4E4E4),
+        color: context.oim.sectionHeader,
         child: Row(
           children: [
-            Icon(Icons.chat, size: 16, color: Colors.blue[800]),
+            Icon(Icons.chat, size: 16, color: context.scheme.primary),
             const SizedBox(width: 6),
-            Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800])),
+            Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: context.oim.textPrimary)),
             const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(8)),
-              child: Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+              decoration: BoxDecoration(color: context.oim.border, borderRadius: BorderRadius.circular(8)),
+              child: Text('$count', style: TextStyle(fontSize: 11, color: context.oim.textSecondary)),
             ),
             const Spacer(),
             GestureDetector(
               onTap: () => _showCreateSessionDialog(),
               child: Container(
                 padding: const EdgeInsets.all(2),
-                child: Icon(Icons.add, size: 18, color: Colors.blue[700]),
+                child: Icon(Icons.add, size: 18, color: context.scheme.primary),
               ),
             ),
             const SizedBox(width: 4),
-            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 18, color: Colors.grey[600]),
+            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 18, color: context.oim.textSecondary),
           ],
         ),
       ),
@@ -246,19 +247,19 @@ mixin EmailListViewMixin on State<EmailModule> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE3F2FD) : Colors.transparent,
-          border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
+          color: isSelected ? context.oim.selectedItem : Colors.transparent,
+          border: Border(bottom: BorderSide(color: context.oim.border, width: 0.5)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             CircleAvatar(
               radius: 18,
-              backgroundColor: isGroup ? Colors.green[100] : Colors.blue[100],
+              backgroundColor: isGroup ? context.oim.avatarGroupBg : context.oim.avatarTheirsBg,
               child: Icon(
                 isGroup ? Icons.group : Icons.person,
                 size: 18,
-                color: isGroup ? Colors.green[700] : Colors.blue[700],
+                color: isGroup ? context.oim.avatarGroupFg : context.oim.avatarTheirsFg,
               ),
             ),
             const SizedBox(width: 12),
@@ -270,14 +271,14 @@ mixin EmailListViewMixin on State<EmailModule> {
                     title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey[800]),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: context.oim.textPrimary),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     '$memberCount${AppStrings.isZh ? "人" : " members"} · ${session.updatedAt}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                    style: TextStyle(fontSize: 12, color: context.oim.textMuted),
                   ),
                 ],
               ),
@@ -294,9 +295,9 @@ mixin EmailListViewMixin on State<EmailModule> {
       child: Container(
         height: 32,
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: context.oim.inputField,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey[300]!, width: 0.5),
+          border: Border.all(color: context.oim.border, width: 0.5),
         ),
         child: TextField(
           controller: searchController,
@@ -306,8 +307,8 @@ mixin EmailListViewMixin on State<EmailModule> {
           },
           decoration: InputDecoration(
             hintText: AppStrings.search,
-            hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
-            prefixIcon: Icon(Icons.search, size: 18, color: Colors.grey[400]),
+            hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
+            prefixIcon: Icon(Icons.search, size: 18, color: context.oim.textMuted),
             prefixIconConstraints: const BoxConstraints(minWidth: 36),
             border: InputBorder.none,
             contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -332,7 +333,7 @@ mixin EmailListViewMixin on State<EmailModule> {
           height: double.infinity,
           color: Colors.transparent,
           child: Center(
-            child: Container(width: 1, height: double.infinity, color: Colors.grey[300]),
+            child: Container(width: 1, height: double.infinity, color: context.oim.border),
           ),
         ),
       ),

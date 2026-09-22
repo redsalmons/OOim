@@ -35,6 +35,8 @@ class _ConfigWindowApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      themeMode: ThemeMode.system,
       home: EmailConfigDialog(
         configPath: configPath,
         standalone: true,
@@ -47,16 +49,39 @@ class _ConfigWindowApp extends StatelessWidget {
   }
 }
 
+/// Global theme mode. Defaults to following the OS; the settings page can
+/// override it at runtime.
+final ValueNotifier<ThemeMode> appThemeMode = ValueNotifier(ThemeMode.system);
+
+/// Global text scale: small 0.9x / medium 1.0x / large 1.15x. Applied through
+/// MediaQuery so every Text (including hard-coded fontSize) follows it.
+final ValueNotifier<double> appTextScale = ValueNotifier(1.0);
+const double kTextScaleSmall = 0.9;
+const double kTextScaleMedium = 1.0;
+const double kTextScaleLarge = 1.15;
+
 class OIMApp extends StatelessWidget {
   const OIMApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'OIM',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.light(),
-      home: const AppRoot(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: appThemeMode,
+      builder: (context, mode, _) => ValueListenableBuilder<double>(
+        valueListenable: appTextScale,
+        builder: (context, scale, _) => MaterialApp(
+          title: 'OIM',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: mode,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
+          home: const AppRoot(),
+        ),
+      ),
     );
   }
 }
@@ -157,7 +182,7 @@ class _AppRootState extends State<AppRoot> {
   @override
   Widget build(BuildContext context) {
     if (_checking || !_configured) {
-      return const Scaffold(backgroundColor: Colors.white);
+      return const Scaffold();
     }
     return const DesktopHome();
   }

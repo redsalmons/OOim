@@ -43,11 +43,15 @@ class AppStrings {
   static String get accountManagementDesc => isZh ? '添加、编辑或删除邮箱账户' : 'Add, edit or remove email accounts';
   static String get username => isZh ? '用户名' : 'Username';
   static String get appearance => isZh ? '外观' : 'Appearance';
-  static String get darkMode => isZh ? '深色模式' : 'Dark Mode';
-  static String get darkModeDesc => isZh ? '启用深色主题' : 'Enable dark theme';
+  static String get themeMode => isZh ? '主题' : 'Theme';
+  static String get themeFollowSystem => isZh ? '跟随系统' : 'System';
+  static String get themeLight => isZh ? '浅色' : 'Light';
+  static String get themeDark => isZh ? '深色' : 'Dark';
   static String get language => isZh ? '语言' : 'Language';
   static String get fontSize => isZh ? '字体大小' : 'Font Size';
+  static String get fontSizeSmall => isZh ? '小' : 'Small';
   static String get fontSizeMedium => isZh ? '中' : 'Medium';
+  static String get fontSizeLarge => isZh ? '大' : 'Large';
 
   // Create session dialog
   static String get newSession => isZh ? '新建会话' : 'New Session';

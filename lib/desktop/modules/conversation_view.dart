@@ -10,6 +10,7 @@ import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'eml_parser.dart';
 import '../../i18n/app_strings.dart';
+import '../app_theme.dart';
 
 class DroppedFile {
   final String name;
@@ -42,7 +43,7 @@ class RichTextReplyController extends TextEditingController {
         if (fileIndex < droppedFiles.length) {
           children.add(WidgetSpan(
             alignment: PlaceholderAlignment.middle,
-            child: _buildInlineFileChip(droppedFiles[fileIndex], fileIndex),
+            child: _buildInlineFileChip(context, droppedFiles[fileIndex], fileIndex),
           ));
           fileIndex++;
         }
@@ -58,7 +59,7 @@ class RichTextReplyController extends TextEditingController {
     return TextSpan(children: children, style: style);
   }
 
-  Widget _buildInlineFileChip(DroppedFile file, int index) {
+  Widget _buildInlineFileChip(BuildContext context, DroppedFile file, int index) {
     final ext = file.name.split('.').last.toLowerCase();
     IconData fileIcon;
     Color iconColor;
@@ -79,16 +80,16 @@ class RichTextReplyController extends TextEditingController {
       iconColor = Colors.orange[700]!;
     } else {
       fileIcon = Icons.insert_drive_file;
-      iconColor = Colors.grey[600]!;
+      iconColor = context.oim.textSecondary;
     }
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 1),
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
       decoration: BoxDecoration(
-        color: const Color(0xFFF0F0F0),
+        color: context.oim.groupHeader,
         borderRadius: BorderRadius.circular(3),
-        border: Border.all(color: Colors.grey[300]!, width: 0.5),
+        border: Border.all(color: context.oim.border, width: 0.5),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -122,7 +123,7 @@ class RichTextReplyController extends TextEditingController {
               droppedFiles.removeAt(index);
               onChangedCallback?.call();
             },
-            child: Icon(Icons.close, size: 12, color: Colors.grey[500]),
+            child: Icon(Icons.close, size: 12, color: context.oim.textMuted),
           ),
         ],
       ),
@@ -278,7 +279,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       }
     }
     if (usSession == null) {
-      return Expanded(child: Center(child: Text('Session not found', style: TextStyle(color: Colors.grey[400]))));
+      return Expanded(child: Center(child: Text('Session not found', style: TextStyle(color: context.oim.textMuted))));
     }
     final session = usSession; // promote to non-nullable
 
@@ -302,20 +303,20 @@ mixin ConversationViewMixin on State<EmailModule> {
         }
       },
       child: Container(
-        color: Colors.white,
+        color: context.scheme.surface,
         child: Column(
         children: [
           // Header
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: Colors.grey[50],
-              border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
+              color: context.oim.panel,
+              border: Border(bottom: BorderSide(color: context.oim.border)),
             ),
             child: Row(
               children: [
                 Icon(isGroup ? Icons.group : Icons.person,
-                    color: isGroup ? Colors.green[700] : Colors.blue[700], size: 24),
+                    color: isGroup ? context.oim.avatarGroupFg : context.oim.avatarTheirsFg, size: 24),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -325,12 +326,12 @@ mixin ConversationViewMixin on State<EmailModule> {
                           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                           maxLines: 1, overflow: TextOverflow.ellipsis),
                       Text('${members.length}${AppStrings.isZh ? "人" : " members"}',
-                          style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                          style: TextStyle(fontSize: 12, color: context.oim.textMuted)),
                     ],
                   ),
                 ),
                 IconButton(
-                  icon: Icon(Icons.more_horiz, size: 22, color: Colors.grey[700]),
+                  icon: Icon(Icons.more_horiz, size: 22, color: context.oim.textSecondary),
                   onPressed: () => setState(() => showUnifiedMembers = true),
                 ),
               ],
@@ -339,7 +340,7 @@ mixin ConversationViewMixin on State<EmailModule> {
           // Messages
           Expanded(
             child: messages.isEmpty
-                ? Center(child: Text(AppStrings.sessionCreatedWaiting, style: TextStyle(color: Colors.grey[400])))
+                ? Center(child: Text(AppStrings.sessionCreatedWaiting, style: TextStyle(color: context.oim.textMuted)))
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     itemCount: messages.length,
@@ -357,8 +358,8 @@ mixin ConversationViewMixin on State<EmailModule> {
     final memberPanel = Container(
       width: 240,
       decoration: BoxDecoration(
-        color: const Color(0xFFF7F7F7),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 12, offset: const Offset(-2, 0))],
+        color: context.oim.panel,
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: context.isDark ? 0.5 : 0.15), blurRadius: 12, offset: const Offset(-2, 0))],
       ),
       child: Column(
         children: [
@@ -395,14 +396,14 @@ mixin ConversationViewMixin on State<EmailModule> {
                               title.isEmpty ? AppStrings.noSubject : title,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800]),
+                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: context.oim.textPrimary),
                             ),
                           ),
                         ),
                 ),
-                Text('(${members.length})', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                Text('(${members.length})', style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
                 IconButton(
-                  icon: Icon(Icons.close, size: 20, color: Colors.grey[600]),
+                  icon: Icon(Icons.close, size: 20, color: context.oim.textSecondary),
                   onPressed: () => setState(() {
                     showUnifiedMembers = false;
                     _editingTitle = false;
@@ -425,9 +426,9 @@ mixin ConversationViewMixin on State<EmailModule> {
                     children: [
                       CircleAvatar(
                         radius: 16,
-                        backgroundColor: isMe ? Colors.green[100] : Colors.blue[100],
+                        backgroundColor: isMe ? context.oim.avatarMineBg : context.oim.avatarTheirsBg,
                         child: Text(m.isNotEmpty ? m[0].toUpperCase() : '?',
-                            style: TextStyle(fontSize: 12, color: isMe ? Colors.green[700] : Colors.blue[700])),
+                            style: TextStyle(fontSize: 12, color: isMe ? context.oim.avatarMineFg : context.oim.avatarTheirsFg)),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -435,7 +436,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(displayName, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis),
-                            Text(m, style: TextStyle(fontSize: 11, color: Colors.grey[500]), maxLines: 1, overflow: TextOverflow.ellipsis),
+                            Text(m, style: TextStyle(fontSize: 11, color: context.oim.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis),
                           ],
                         ),
                       ),
@@ -452,8 +453,8 @@ mixin ConversationViewMixin on State<EmailModule> {
               width: double.infinity,
               child: TextButton.icon(
                 onPressed: () => _unifiedAddMember(session),
-                icon: Icon(Icons.person_add, size: 18, color: Colors.green[700]),
-                label: Text(AppStrings.isZh ? '添加成员' : 'Add member', style: TextStyle(fontSize: 13, color: Colors.green[700])),
+                icon: Icon(Icons.person_add, size: 18, color: context.oim.accentGreen),
+                label: Text(AppStrings.isZh ? '添加成员' : 'Add member', style: TextStyle(fontSize: 13, color: context.oim.accentGreen)),
                 style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6))),
               ),
             ),
@@ -554,8 +555,8 @@ mixin ConversationViewMixin on State<EmailModule> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isMe) ...[
-            CircleAvatar(radius: 16, backgroundColor: Colors.blue[100],
-                child: Text(msg.sender.isNotEmpty ? msg.sender[0].toUpperCase() : '?', style: TextStyle(color: Colors.blue[700], fontSize: 11))),
+            CircleAvatar(radius: 16, backgroundColor: context.oim.avatarTheirsBg,
+                child: Text(msg.sender.isNotEmpty ? msg.sender[0].toUpperCase() : '?', style: TextStyle(color: context.oim.avatarTheirsFg, fontSize: 11))),
             const SizedBox(width: 8),
           ],
           Flexible(
@@ -563,13 +564,13 @@ mixin ConversationViewMixin on State<EmailModule> {
               crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 if (!isMe && members.length > 2)
-                  Text(msg.sender.split('@').first, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                  Text(msg.sender.split('@').first, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
-                    color: isMe ? const Color(0xFF95EC69) : Colors.white,
+                    color: isMe ? context.oim.bubbleMine : context.oim.bubbleTheirs,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey[300]!),
+                    border: Border.all(color: context.oim.border),
                   ),
                   child: isHandshake
                       ? const Text('🤝', style: TextStyle(fontSize: 20))
@@ -583,15 +584,15 @@ mixin ConversationViewMixin on State<EmailModule> {
                       ? (AppStrings.isZh ? '发送中…' : 'Sending…')
                       : msg.timestamp,
                   style: TextStyle(fontSize: 11,
-                      color: msg.uuid.startsWith('pending_') ? Colors.orange[400] : Colors.grey[400]),
+                      color: msg.uuid.startsWith('pending_') ? Colors.orange[400] : context.oim.textMuted),
                 ),
               ],
             ),
           ),
           if (isMe) ...[
             const SizedBox(width: 8),
-            CircleAvatar(radius: 16, backgroundColor: Colors.green[100],
-                child: Text(AppStrings.me[0], style: TextStyle(color: Colors.green[700], fontSize: 11))),
+            CircleAvatar(radius: 16, backgroundColor: context.oim.avatarMineBg,
+                child: Text(AppStrings.me[0], style: TextStyle(color: context.oim.avatarMineFg, fontSize: 11))),
           ],
         ],
       ),
@@ -625,22 +626,22 @@ mixin ConversationViewMixin on State<EmailModule> {
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(meta.fileName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                       overflow: TextOverflow.ellipsis),
-                  Text(sizeStr, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                  Text(sizeStr, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
                 ]),
               ),
-              if (done || isMe) Icon(Icons.download, size: 16, color: Colors.grey[600]),
+              if (done || isMe) Icon(Icons.download, size: 16, color: context.oim.textSecondary),
             ]),
             const SizedBox(height: 6),
             LinearProgressIndicator(
               value: progress,
               minHeight: 3,
-              backgroundColor: Colors.grey[300],
-              valueColor: AlwaysStoppedAnimation<Color>(failed ? Colors.red : Colors.blue),
+              backgroundColor: context.oim.border,
+              valueColor: AlwaysStoppedAnimation<Color>(failed ? Colors.red : context.scheme.primary),
             ),
             const SizedBox(height: 2),
             Text(
               failed ? '传输失败' : done ? '已完成 ${meta.receivedChunks}/${meta.totalChunks}' : '${meta.receivedChunks}/${meta.totalChunks}',
-              style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+              style: TextStyle(fontSize: 10, color: context.oim.textMuted),
             ),
             if (caption.isNotEmpty)
               Padding(
@@ -677,8 +678,8 @@ mixin ConversationViewMixin on State<EmailModule> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFFF7F7F7),
-        border: Border(top: BorderSide(color: Colors.grey[300]!, width: 0.5)),
+        color: context.oim.panel,
+        border: Border(top: BorderSide(color: context.oim.border, width: 0.5)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -719,14 +720,14 @@ mixin ConversationViewMixin on State<EmailModule> {
                   child: Container(
                     constraints: const BoxConstraints(maxHeight: 200),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: context.oim.inputField,
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Container(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(4),
                         border: Border.all(
-                          color: _isDragging ? const Color(0xFF07C160) : Colors.grey[300]!,
+                          color: _isDragging ? context.oim.accentGreen : context.oim.border,
                           width: 1,
                         ),
                       ),
@@ -752,7 +753,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                                   },
                                   decoration: InputDecoration(
                                     hintText: AppStrings.sendMessageHint,
-                                    hintStyle: TextStyle(fontSize: 14, color: Colors.grey[400]),
+                                    hintStyle: TextStyle(fontSize: 14, color: context.oim.textMuted),
                                     border: InputBorder.none,
                                     enabledBorder: InputBorder.none,
                                     focusedBorder: InputBorder.none,
@@ -767,7 +768,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                                 child: Row(
                                   children: [
                                     IconButton(
-                                      icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
+                                      icon: Icon(Icons.folder_open, size: 20, color: context.oim.textSecondary),
                                       onPressed: () {},
                                       constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
                                       padding: EdgeInsets.zero,
@@ -776,7 +777,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                                       icon: Icon(
                                         showEmojiPicker ? Icons.emoji_emotions : Icons.emoji_emotions_outlined,
                                         size: 20,
-                                        color: showEmojiPicker ? const Color(0xFF07C160) : Colors.grey[600],
+                                        color: showEmojiPicker ? context.oim.accentGreen : context.oim.textSecondary,
                                       ),
                                       onPressed: () {
                                         setState(() {
@@ -789,7 +790,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                                     const Spacer(),
                                     TextButton(
                                       style: TextButton.styleFrom(
-                                        backgroundColor: _sessionReady ? const Color(0xFF07C160) : Colors.grey[300],
+                                        backgroundColor: _sessionReady ? context.oim.accentGreen : context.oim.border,
                                         foregroundColor: Colors.white,
                                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                                         minimumSize: const Size(0, 28),
@@ -835,16 +836,16 @@ mixin ConversationViewMixin on State<EmailModule> {
                   checkPlatformCompatibility: true,
                   emojiViewConfig: EmojiViewConfig(
                     emojiSizeMax: 28,
-                    backgroundColor: Colors.white,
+                    backgroundColor: context.oim.inputField,
                   ),
                   categoryViewConfig: CategoryViewConfig(
-                    indicatorColor: const Color(0xFF07C160),
-                    iconColorSelected: const Color(0xFF07C160),
-                    backgroundColor: Colors.white,
+                    indicatorColor: context.oim.accentGreen,
+                    iconColorSelected: context.oim.accentGreen,
+                    backgroundColor: context.oim.panel,
                   ),
                   searchViewConfig: SearchViewConfig(
-                    backgroundColor: Colors.white,
-                    buttonIconColor: Colors.grey[600] ?? Colors.grey,
+                    backgroundColor: context.oim.inputField,
+                    buttonIconColor: context.oim.textSecondary,
                   ),
                 ),
               ),
@@ -1037,7 +1038,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('${AppStrings.isZh ? "当前成员" : "Current members"}: ${session.members.length}', style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+                  Text('${AppStrings.isZh ? "当前成员" : "Current members"}: ${session.members.length}', style: TextStyle(fontSize: 12, color: context.oim.textSecondary)),
                   const SizedBox(height: 12),
                   Autocomplete<String>(
                     fieldViewBuilder: (context, ctrl, focusNode, onFieldSubmitted) {
@@ -1080,7 +1081,7 @@ mixin ConversationViewMixin on State<EmailModule> {
             actions: [
               TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: Text(AppStrings.cancel)),
               ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF07C160)),
+                style: ElevatedButton.styleFrom(backgroundColor: context.oim.accentGreen),
                 onPressed: () {
                   final member = controller.text.trim().isNotEmpty ? controller.text.trim() : newMember;
                   if (member.isEmpty) return;

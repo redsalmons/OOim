@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../../i18n/app_strings.dart';
 import '../../native/email_core.dart' as native;
+import '../app_theme.dart';
 
 class ContactsModule extends StatefulWidget {
   const ContactsModule({super.key});
@@ -137,7 +138,7 @@ class ContactsModuleState extends State<ContactsModule> {
   Widget _buildContactList() {
     return Container(
       width: 320,
-      color: const Color(0xFFF5F5F5),
+      color: context.oim.listPane,
       child: Column(
         children: [
           _buildSearchBar(),
@@ -162,7 +163,7 @@ class ContactsModuleState extends State<ContactsModule> {
       child: Container(
         height: 36,
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: context.oim.inputField,
           borderRadius: BorderRadius.circular(10),
         ),
         child: TextField(
@@ -171,7 +172,7 @@ class ContactsModuleState extends State<ContactsModule> {
           decoration: InputDecoration(
             hintText: AppStrings.searchContacts,
             hintStyle: const TextStyle(fontSize: 14),
-            prefixIcon: const Icon(Icons.search, size: 20, color: Colors.grey),
+            prefixIcon: Icon(Icons.search, size: 20, color: context.oim.textMuted),
             border: InputBorder.none,
             contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
@@ -199,17 +200,17 @@ class ContactsModuleState extends State<ContactsModule> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: isSelected ? Theme.of(context).colorScheme.primary : Colors.white,
+                    color: isSelected ? Theme.of(context).colorScheme.primary : context.oim.inputField,
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
-                      color: isSelected ? Theme.of(context).colorScheme.primary : Colors.grey[300]!,
+                      color: isSelected ? Theme.of(context).colorScheme.primary : context.oim.border,
                     ),
                   ),
                   child: Text(
                     group,
                     style: TextStyle(
                       fontSize: 13,
-                      color: isSelected ? Colors.white : Colors.grey[700],
+                      color: isSelected ? Colors.white : context.oim.textSecondary,
                     ),
                   ),
                 ),
@@ -233,7 +234,7 @@ class ContactsModuleState extends State<ContactsModule> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: isSelected ? primary.withValues(alpha: 0.08) : Colors.transparent,
-          border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
+          border: Border(bottom: BorderSide(color: context.oim.border, width: 0.5)),
         ),
         child: Row(
           children: [
@@ -245,11 +246,11 @@ class ContactsModuleState extends State<ContactsModule> {
                 children: [
                   Text(displayName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 4),
-                  Text(contact.email, style: TextStyle(fontSize: 12, color: Colors.grey[600]), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  Text(contact.email, style: TextStyle(fontSize: 12, color: context.oim.textSecondary), maxLines: 1, overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: Colors.grey[400], size: 20),
+            Icon(Icons.chevron_right, color: context.oim.textMuted, size: 20),
           ],
         ),
       ),
@@ -272,7 +273,7 @@ class ContactsModuleState extends State<ContactsModule> {
   Widget _buildContactDetail() {
     return Expanded(
       child: Container(
-        color: Colors.white,
+        color: context.scheme.surface,
         child: _selectedContact == null
           ? Center(
               child: Column(
@@ -281,14 +282,14 @@ class ContactsModuleState extends State<ContactsModule> {
                   Icon(
                     Icons.contacts,
                     size: 80,
-                    color: Colors.grey[300],
+                    color: context.oim.border,
                   ),
                   const SizedBox(height: 16),
                   Text(
                     AppStrings.isZh ? '选择联系人查看详情' : 'Select a contact to view details',
                     style: TextStyle(
                       fontSize: 16,
-                      color: Colors.grey[600],
+                      color: context.oim.textSecondary,
                     ),
                   ),
                 ],
@@ -401,11 +402,11 @@ class _AddressBookEditPanelState extends State<_AddressBookEditPanel> {
       readOnly: readOnly,
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+        hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         filled: readOnly,
-        fillColor: readOnly ? Colors.grey[100] : null,
+        fillColor: readOnly ? context.oim.groupHeader : null,
       ),
     );
   }
@@ -438,7 +439,7 @@ class _AddressBookEditPanelState extends State<_AddressBookEditPanel> {
                       ? _selectedGroup : null,
                     decoration: InputDecoration(
                       hintText: AppStrings.isZh ? '选择分组' : 'Select group',
-                      hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                      hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),
@@ -465,7 +466,7 @@ class _AddressBookEditPanelState extends State<_AddressBookEditPanel> {
                     controller: _groupController,
                     decoration: InputDecoration(
                       hintText: AppStrings.isZh ? '或输入新分组' : 'Or type new group',
-                      hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                      hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),

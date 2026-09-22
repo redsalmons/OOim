@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
 import '../../native/unified_session.dart';
 import '../../i18n/app_strings.dart';
+import '../app_theme.dart';
 
 class CreateSessionDialog extends StatefulWidget {
   final List<String> accounts;
@@ -244,7 +245,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
               controller: _titleController,
               decoration: InputDecoration(
                 hintText: AppStrings.enterSessionTitle,
-                hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               ),
@@ -265,7 +266,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                         focusNode: focusNode,
                         decoration: InputDecoration(
                           hintText: AppStrings.enterEmail,
-                          hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                          hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
                           border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
                           contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         ),
@@ -320,7 +321,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                 const SizedBox(width: 8),
                 IconButton(
                   onPressed: _addMember,
-                  icon: const Icon(Icons.add_circle, color: Colors.blue),
+                  icon: Icon(Icons.add_circle, color: context.scheme.primary),
                 ),
               ],
             ),
@@ -338,7 +339,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                 }).toList(),
               ),
             if (_members.isEmpty)
-              Text(AppStrings.noMembers, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
+              Text(AppStrings.noMembers, style: TextStyle(fontSize: 12, color: context.oim.textMuted)),
             const SizedBox(height: 12),
 
             // 3. 发送邮差池（多邮箱轮流发送，绕过单邮箱频率限制）
@@ -366,7 +367,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                 );
               }).toList(),
             ),
-            Text(AppStrings.mailmanPoolHint, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+            Text(AppStrings.mailmanPoolHint, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
             const SizedBox(height: 8),
 
 

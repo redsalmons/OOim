@@ -132,6 +132,26 @@ class EmailModuleState extends State<EmailModule>
       }
     }
     setState(() => _unifiedSessions = all);
+
+    // Default-select the first visible session (pinned first, hidden last);
+    // clear the selection when there is no session at all.
+    final selectionValid = _selectedUnifiedSessionId != null &&
+        all.any((s) => s.sessionId == _selectedUnifiedSessionId);
+    if (!selectionValid) {
+      if (all.isEmpty) {
+        _selectedUnifiedSessionId = null;
+      } else {
+        final first = all.firstWhere(
+          (s) => s.pinned && !s.hidden,
+          orElse: () => all.firstWhere(
+            (s) => !s.hidden,
+            orElse: () => all.first,
+          ),
+        );
+        _selectedUnifiedSessionId = first.sessionId;
+        loadUnifiedSessionMessages(first.sessionId);
+      }
+    }
   }
 
   void loadUnifiedSessionMessages(String unifiedSessionId) {
@@ -845,7 +865,7 @@ class EmailModuleState extends State<EmailModule>
       children: [
         buildEmailList(),
         buildDraggableDivider(),
-        buildEmailDetail(),
+        const Expanded(child: SizedBox.shrink()),
       ],
     );
   }

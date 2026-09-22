@@ -6,6 +6,7 @@ import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'eml_parser.dart';
 import '../../i18n/app_strings.dart';
+import '../app_theme.dart';
 
 mixin EmailDetailViewMixin on State<EmailModule> {
   List<native.EmailMessage> get emails;
@@ -20,8 +21,8 @@ mixin EmailDetailViewMixin on State<EmailModule> {
     if (emails.isEmpty) {
       return Expanded(
         child: Container(
-          color: Colors.white,
-          child: Center(child: Text(AppStrings.noEmails, style: TextStyle(color: Colors.grey[500]))),
+          color: context.scheme.surface,
+          child: Center(child: Text(AppStrings.noEmails, style: TextStyle(color: context.oim.textMuted))),
         ),
       );
     }
@@ -33,7 +34,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
 
     return Expanded(
       child: Container(
-        color: Colors.white,
+        color: context.scheme.surface,
         child: Column(
           children: [
             buildEmailDetailHeader(email),
@@ -59,7 +60,7 @@ mixin EmailDetailViewMixin on State<EmailModule> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Text(extractName(email.sender), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                                Text(formatTime(email.timestamp), style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+                                Text(formatTime(email.timestamp), style: TextStyle(fontSize: 12, color: context.oim.textSecondary)),
                               ],
                             ),
                           ],
@@ -84,8 +85,8 @@ mixin EmailDetailViewMixin on State<EmailModule> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.grey[50],
-        border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
+        color: context.oim.panel,
+        border: Border(bottom: BorderSide(color: context.oim.border)),
       ),
       child: Row(
         children: [
@@ -105,8 +106,8 @@ mixin EmailDetailViewMixin on State<EmailModule> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
+        color: context.scheme.surface,
+        border: Border(bottom: BorderSide(color: context.oim.border)),
       ),
       child: Row(
         children: [
@@ -123,9 +124,9 @@ mixin EmailDetailViewMixin on State<EmailModule> {
       padding: const EdgeInsets.only(right: 16),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: Colors.grey[700]),
+          Icon(icon, size: 18, color: context.oim.textSecondary),
           const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 13, color: Colors.grey[700])),
+          Text(label, style: TextStyle(fontSize: 13, color: context.oim.textSecondary)),
         ],
       ),
     );
@@ -150,11 +151,11 @@ mixin EmailDetailViewMixin on State<EmailModule> {
                 height: 16,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
-                  color: Colors.grey[400],
+                  color: context.oim.textMuted,
                 ),
               ),
               const SizedBox(width: 10),
-              Text(AppStrings.emailDownloading, style: TextStyle(fontSize: 14, color: Colors.grey[400])),
+              Text(AppStrings.emailDownloading, style: TextStyle(fontSize: 14, color: context.oim.textMuted)),
             ],
           ),
         ),
@@ -191,13 +192,13 @@ mixin EmailDetailViewMixin on State<EmailModule> {
                     padding: const EdgeInsets.only(bottom: 4),
                     child: Row(
                       children: [
-                        Icon(Icons.insert_drive_file, size: 16, color: Colors.grey[600]),
+                        Icon(Icons.insert_drive_file, size: 16, color: context.oim.textSecondary),
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(att.filename, style: TextStyle(fontSize: 13), overflow: TextOverflow.ellipsis),
                         ),
                         if (att.size > 0)
-                          Text('${(att.size / 1024).toStringAsFixed(1)} KB', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                          Text('${(att.size / 1024).toStringAsFixed(1)} KB', style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
                         const SizedBox(width: 8),
                         TextButton.icon(
                           onPressed: () => _saveAttachment(emlPath, i, att.filename),

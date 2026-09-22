@@ -43,7 +43,7 @@ class _DesktopHomeState extends State<DesktopHome> {
   Widget _buildSidebar() {
     return Container(
       width: 84,
-      color: AppTheme.sidebarColor,
+      color: context.oim.sidebar,
       child: Column(
         children: [
           const SizedBox(height: 24),
