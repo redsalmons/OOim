@@ -73,6 +73,7 @@ typedef struct {
     int uid;              // Default 0
     char* phrase;         // Encrypted phrase (base64)
     long long folder_size; // Machine folder size in bytes
+    int is_default;        // 1 = default message-sending account
 } EmailAccountConfig;
 
 // Save account configurations (and local data path) to a config file.
@@ -546,6 +547,11 @@ int us_get_session(const char* sessionId, char* outJson, int outSize);
 // outJson: {status}
 int us_set_session_flags(const char* sessionId, int pinned, int hidden,
                          char* outJson, int outSize);
+
+// Update the subject (title) of a session.
+// outJson: {status}
+int us_set_subject(const char* sessionId, const char* subject,
+                   char* outJson, int outSize);
 
 // Check if a session is ready for sending. Returns 1 if ready, 0 if not, negative on error.
 int us_is_ready(const char* account, const char* sessionId);

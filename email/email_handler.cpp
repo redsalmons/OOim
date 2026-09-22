@@ -331,6 +331,7 @@ int email_config_save(const char* path, const char* local_data_path,
         account_obj["uid"] = acc->uid;
         account_obj["phrase"] = acc->phrase ? acc->phrase : "";
         account_obj["folder_size"] = acc->folder_size;
+        account_obj["is_default"] = acc->is_default;
         root["accounts"].push_back(account_obj);
     }
 
@@ -436,6 +437,8 @@ int email_config_load(const char* path, char** local_data_path,
                 current.phrase = strdup(account_obj["phrase"].get<std::string>().c_str());
             if (account_obj.contains("folder_size") && account_obj["folder_size"].is_number())
                 current.folder_size = account_obj["folder_size"].get<long long>();
+            if (account_obj.contains("is_default") && account_obj["is_default"].is_number())
+                current.is_default = account_obj["is_default"].get<int>();
 
             if (*count >= capacity) {
                 capacity = capacity == 0 ? 4 : capacity * 2;

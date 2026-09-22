@@ -232,6 +232,20 @@ int us_set_session_flags(const char* sessionId, int pinned, int hidden,
     return ok ? 0 : -2;
 }
 
+int us_set_subject(const char* sessionId, const char* subject,
+                   char* outJson, int outSize) {
+    if (!sessionId || !subject || !outJson || outSize <= 0) return -1;
+
+    static UnifiedSessionRepo s_usRepo;
+    bool ok = s_usRepo.updateSubject(sessionId, subject);
+
+    json resp;
+    resp["status"] = ok ? "success" : "error";
+    if (!ok) resp["error"] = "update_failed";
+    snprintf(outJson, outSize, "%s", resp.dump().c_str());
+    return ok ? 0 : -2;
+}
+
 // Check if a session is ready for sending.
 // Returns 1 if ready, 0 if not ready, negative on error.
 int us_is_ready(const char* account, const char* sessionId) {

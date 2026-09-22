@@ -291,9 +291,19 @@ mixin ConversationViewMixin on State<EmailModule> {
     final title = session.subject.isNotEmpty ? session.subject : members.where((m) => m != session.account).take(3).join(', ');
 
     // Build the conversation area
-    final conversation = Container(
-      color: Colors.white,
-      child: Column(
+    final conversation = GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () {
+        if (showUnifiedMembers) {
+          setState(() {
+            showUnifiedMembers = false;
+            _editingTitle = false;
+          });
+        }
+      },
+      child: Container(
+        color: Colors.white,
+        child: Column(
         children: [
           // Header
           Container(
@@ -338,7 +348,8 @@ mixin ConversationViewMixin on State<EmailModule> {
           ),
           // Input bar
           _buildUnifiedInputBar(usSession),
-        ],
+          ],
+        ),
       ),
     );
 
@@ -355,13 +366,49 @@ mixin ConversationViewMixin on State<EmailModule> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
-                Text(AppStrings.conversationMembers, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Colors.grey[600])),
-                const SizedBox(width: 8),
+                Expanded(
+                  child: _editingTitle
+                      ? TextField(
+                          controller: _titleEditController,
+                          focusNode: _titleFocusNode,
+                          autofocus: true,
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            contentPadding: EdgeInsets.symmetric(vertical: 4),
+                            border: InputBorder.none,
+                          ),
+                          onSubmitted: (_) => _commitTitleEdit(session),
+                          onEditingComplete: () => _commitTitleEdit(session),
+                        )
+                      : GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              _titleEditController.text = session.subject;
+                              _titleEditSession = session;
+                              _editingTitle = true;
+                            });
+                          },
+                          child: Tooltip(
+                            message: AppStrings.isZh ? '点击修改会话标题' : 'Tap to rename session',
+                            child: Text(
+                              title.isEmpty ? AppStrings.noSubject : title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800]),
+                            ),
+                          ),
+                        ),
+                ),
                 Text('(${members.length})', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-                const Spacer(),
                 IconButton(
                   icon: Icon(Icons.close, size: 20, color: Colors.grey[600]),
-                  onPressed: () => setState(() => showUnifiedMembers = false),
+                  onPressed: () => setState(() {
+                    showUnifiedMembers = false;
+                    _editingTitle = false;
+                  }),
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  padding: EdgeInsets.zero,
                 ),
               ],
             ),
@@ -413,29 +460,17 @@ mixin ConversationViewMixin on State<EmailModule> {
           ),
           // 置顶 / 隐藏会话 开关（持久化到 DB，切换后刷新列表分组）
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
             child: Column(
               children: [
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                  title: Text(AppStrings.pinSession, style: const TextStyle(fontSize: 13)),
-                  value: session.pinned,
-                  onChanged: (v) {
-                    UnifiedSessionManager.setSessionFlags(session.sessionId, v, session.hidden);
-                    loadUnifiedSessions();
-                  },
-                ),
-                SwitchListTile(
-                  dense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                  title: Text(AppStrings.hideSession, style: const TextStyle(fontSize: 13)),
-                  value: session.hidden,
-                  onChanged: (v) {
-                    UnifiedSessionManager.setSessionFlags(session.sessionId, session.pinned, v);
-                    loadUnifiedSessions();
-                  },
-                ),
+                _compactSwitch(AppStrings.pinSession, session.pinned, (v) {
+                  UnifiedSessionManager.setSessionFlags(session.sessionId, v, session.hidden);
+                  loadUnifiedSessions();
+                }),
+                _compactSwitch(AppStrings.hideSession, session.hidden, (v) {
+                  UnifiedSessionManager.setSessionFlags(session.sessionId, session.pinned, v);
+                  loadUnifiedSessions();
+                }),
               ],
             ),
           ),
@@ -456,6 +491,41 @@ mixin ConversationViewMixin on State<EmailModule> {
             offset: showUnifiedMembers ? Offset.zero : const Offset(1, 0),
             child: memberPanel,
           ),
+        ),
+      ],
+    );
+  }
+
+  bool _editingTitle = false;
+  final TextEditingController _titleEditController = TextEditingController();
+  UnifiedSessionInfo? _titleEditSession;
+  late final FocusNode _titleFocusNode = FocusNode()
+    ..addListener(() {
+      // Blur: non-empty text commits, empty text abandons the edit.
+      if (!_titleFocusNode.hasFocus && _editingTitle && _titleEditSession != null) {
+        _commitTitleEdit(_titleEditSession!);
+      }
+    });
+
+  void _commitTitleEdit(UnifiedSessionInfo session) {
+    if (!_editingTitle) return;
+    final newTitle = _titleEditController.text.trim();
+    setState(() {
+      _editingTitle = false;
+      _titleEditSession = null;
+    });
+    if (newTitle.isEmpty || newTitle == session.subject) return;
+    UnifiedSessionManager.setSessionSubject(session.sessionId, newTitle);
+    loadUnifiedSessions();
+  }
+
+  Widget _compactSwitch(String label, bool value, ValueChanged<bool> onChanged) {
+    return Row(
+      children: [
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+        Transform.scale(
+          scale: 0.67,
+          child: Switch(value: value, onChanged: onChanged),
         ),
       ],
     );
@@ -693,34 +763,47 @@ mixin ConversationViewMixin on State<EmailModule> {
                                 ),
                               ),
                               Padding(
-                                padding: const EdgeInsets.only(left: 4, bottom: 4),
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
-                                        onPressed: () {},
-                                        constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
-                                        padding: EdgeInsets.zero,
+                                padding: const EdgeInsets.only(left: 4, right: 8, bottom: 4),
+                                child: Row(
+                                  children: [
+                                    IconButton(
+                                      icon: Icon(Icons.folder_open, size: 20, color: Colors.grey[600]),
+                                      onPressed: () {},
+                                      constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+                                      padding: EdgeInsets.zero,
+                                    ),
+                                    IconButton(
+                                      icon: Icon(
+                                        showEmojiPicker ? Icons.emoji_emotions : Icons.emoji_emotions_outlined,
+                                        size: 20,
+                                        color: showEmojiPicker ? const Color(0xFF07C160) : Colors.grey[600],
                                       ),
-                                      IconButton(
-                                        icon: Icon(
-                                          showEmojiPicker ? Icons.emoji_emotions : Icons.emoji_emotions_outlined,
-                                          size: 20,
-                                          color: showEmojiPicker ? const Color(0xFF07C160) : Colors.grey[600],
-                                        ),
-                                        onPressed: () {
-                                          setState(() {
-                                            showEmojiPicker = !showEmojiPicker;
-                                          });
-                                        },
-                                        constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
-                                        padding: EdgeInsets.zero,
+                                      onPressed: () {
+                                        setState(() {
+                                          showEmojiPicker = !showEmojiPicker;
+                                        });
+                                      },
+                                      constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+                                      padding: EdgeInsets.zero,
+                                    ),
+                                    const Spacer(),
+                                    TextButton(
+                                      style: TextButton.styleFrom(
+                                        backgroundColor: _sessionReady ? const Color(0xFF07C160) : Colors.grey[300],
+                                        foregroundColor: Colors.white,
+                                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                                        minimumSize: const Size(0, 28),
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                                       ),
-                                    ],
-                                  ),
+                                      onPressed: _sessionReady ? () {
+                                        if (showEmojiPicker) {
+                                          setState(() => showEmojiPicker = false);
+                                        }
+                                        _unifiedSendMessage(session);
+                                      } : null,
+                                      child: Text(AppStrings.send, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -730,22 +813,6 @@ mixin ConversationViewMixin on State<EmailModule> {
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              TextButton(
-                style: TextButton.styleFrom(
-                  backgroundColor: _sessionReady ? const Color(0xFF07C160) : Colors.grey[300],
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                ),
-                onPressed: _sessionReady ? () {
-                  if (showEmojiPicker) {
-                    setState(() => showEmojiPicker = false);
-                  }
-                  _unifiedSendMessage(session);
-                } : null,
-                child: Text(AppStrings.send, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
               ),
             ],
           ),

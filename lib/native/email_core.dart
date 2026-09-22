@@ -129,6 +129,8 @@ final class _NativeEmailAccountConfig extends Struct {
   external Pointer<Utf8> phrase;
   @Int64()
   external int folderSize;
+  @Int32()
+  external int isDefault;
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +649,7 @@ class EmailAccountData {
   int uid;
   String phrase;
   int folderSize;
+  bool isDefault;
 
   EmailAccountData({
     required this.type,
@@ -662,6 +665,7 @@ class EmailAccountData {
     this.uid = 0,
     this.phrase = '',
     this.folderSize = 0,
+    this.isDefault = false,
   });
 }
 
@@ -914,6 +918,7 @@ class EmailCore {
         entry.uid = acc.uid;
         entry.phrase = phrasePtr;
         entry.folderSize = acc.folderSize;
+        entry.isDefault = acc.isDefault ? 1 : 0;
       }
 
       final result = _configSave(pathPtr, localPathPtr, arrayPtr, accounts.length);
@@ -961,6 +966,7 @@ class EmailCore {
           uid: entry.uid,
           phrase: entry.phrase != nullptr ? entry.phrase.toDartString() : '',
           folderSize: entry.folderSize,
+          isDefault: entry.isDefault != 0,
         ));
       }
 

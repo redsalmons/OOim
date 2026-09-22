@@ -31,7 +31,13 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
   @override
   void initState() {
     super.initState();
+    // Default sender: the account flagged is_default in the config; otherwise first.
     _selectedAccount = widget.accounts.isNotEmpty ? widget.accounts.first : '';
+    final config = native.EmailCore.loadConfig(widget.configPath);
+    final def = config?.accounts.where((a) => a.isDefault).firstOrNull;
+    if (def != null && def.email.isNotEmpty && widget.accounts.contains(def.email)) {
+      _selectedAccount = def.email;
+    }
   }
 
   void _addMember() {
@@ -245,25 +251,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
             ),
             const SizedBox(height: 16),
 
-            // 1. 选择账户
-            Text(AppStrings.selectAccount, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-            const SizedBox(height: 6),
-            DropdownButtonFormField<String>(
-              value: _selectedAccount,
-              decoration: InputDecoration(
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
-              items: widget.accounts
-                  .map((acc) => DropdownMenuItem(value: acc, child: Text(acc)))
-                  .toList(),
-              onChanged: (v) {
-                if (v != null) setState(() => _selectedAccount = v);
-              },
-            ),
-            const SizedBox(height: 16),
-
-            // 2. 添加会话成员
+            // 1. 添加会话成员
             Text(AppStrings.sessionMembers, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
             const SizedBox(height: 6),
             Row(

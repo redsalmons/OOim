@@ -26,6 +26,7 @@ struct EmailConfig {
     std::string tenant_id;
     std::string refresh_token;
     std::string account_type; // "personal" or "enterprise" for Outlook accounts
+    bool is_default = false; // default message-sending account
 };
 
 class ConfigLoader {

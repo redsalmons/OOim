@@ -83,18 +83,6 @@ class _SettingsModuleState extends State<SettingsModule> {
               AppStrings.accountManagementDesc,
               () => _showAccountConfigDialog(),
             ),
-            _buildSettingsItem(
-              Icons.security,
-              AppStrings.accountSecurity,
-              AppStrings.accountSecurityDesc,
-              () {},
-            ),
-            _buildSettingsItem(
-              Icons.cloud,
-              AppStrings.dataSync,
-              AppStrings.dataSyncDesc,
-              () {},
-            ),
           ],
         ),
       ),

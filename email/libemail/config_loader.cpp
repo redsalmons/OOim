@@ -223,6 +223,7 @@ nlohmann::json ConfigLoader::email_config_to_json(const EmailConfig& config) con
     if (!config.tenant_id.empty()) json["tenant_id"] = config.tenant_id;
     if (!config.refresh_token.empty()) json["refresh_token"] = config.refresh_token;
     if (!config.account_type.empty()) json["account_type"] = config.account_type;
+    if (config.is_default) json["is_default"] = 1;
     
     return json;
 }
@@ -248,6 +249,7 @@ EmailConfig ConfigLoader::json_to_email_config(const nlohmann::json& json) const
     if (json.contains("tenant_id")) config.tenant_id = json["tenant_id"];
     if (json.contains("refresh_token")) config.refresh_token = json["refresh_token"];
     if (json.contains("account_type")) config.account_type = json["account_type"];
+    if (json.contains("is_default")) config.is_default = json["is_default"].get<int>() != 0;
     
     return config;
 }

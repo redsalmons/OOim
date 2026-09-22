@@ -238,6 +238,26 @@ bool UnifiedSessionRepo::upgradeToMls(const std::string& sessionId,
     return true;
 }
 
+bool UnifiedSessionRepo::updateSubject(const std::string& sessionId,
+                                        const std::string& subject) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE unified_session SET subject=?, "
+                      "updated_at=datetime('now','localtime') "
+                      "WHERE session_id=?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, subject.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
 bool UnifiedSessionRepo::updateMembers(const std::string& sessionId,
                                         const std::vector<std::string>& members) {
     auto& conn = DbConnection::instance();

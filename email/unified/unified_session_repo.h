@@ -41,6 +41,8 @@ public:
                       const std::vector<std::string>& newMembers);
 
     // Update the member list of a session (for MLS addMembers).
+    bool updateSubject(const std::string& sessionId, const std::string& subject);
+
     bool updateMembers(const std::string& sessionId,
                        const std::vector<std::string>& members);
 

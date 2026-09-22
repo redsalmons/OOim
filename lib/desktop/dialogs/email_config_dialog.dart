@@ -36,6 +36,7 @@ class EmailAccountConfig {
   int uid;
   String phrase;
   int folderSize;
+  bool isDefault;
 
   EmailAccountConfig({
     required this.type,
@@ -51,6 +52,7 @@ class EmailAccountConfig {
     this.uid = 0,
     this.phrase = '',
     this.folderSize = 0,
+    this.isDefault = false,
   });
 
   String get displayName {
@@ -223,6 +225,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       uid: data.uid,
       phrase: data.phrase,
       folderSize: data.folderSize,
+      isDefault: data.isDefault,
     );
   }
 
@@ -241,6 +244,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       uid: account.uid,
       phrase: account.phrase,
       folderSize: account.folderSize,
+      isDefault: account.isDefault,
     );
   }
 
@@ -534,6 +538,8 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
           _buildAddAccountRow(),
           const SizedBox(height: 12),
           Expanded(child: _buildBody()),
+          const Divider(height: 16),
+          _buildDefaultSenderHint(),
         ],
       ),
     );
@@ -559,13 +565,38 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
       );
     }
 
+    final screenH = MediaQuery.of(context).size.height;
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       child: SizedBox(
         width: 620,
-        height: 520,
+        // Fit all content without scrolling; cap at screen height minus margins.
+        height: (screenH - 60).clamp(520.0, 900.0),
         child: _buildContent(),
       ),
+    );
+  }
+
+  Widget _buildDefaultSenderHint() {
+    // The flagged account wins; when none is flagged the first tab is the default.
+    final def = _accounts.where((a) => a.isDefault).firstOrNull ?? 
+        (_accounts.isNotEmpty ? _accounts.first : null);
+    final email = def?.email ?? '';
+    return Row(
+      children: [
+        Icon(Icons.info_outline, size: 14, color: Colors.grey[500]),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            email.isEmpty
+                ? (AppStrings.isZh
+                    ? '暂无账号。添加邮箱后可设为默认发送邮箱。'
+                    : 'No accounts. Add a mailbox to set a default sender.')
+                : '$email${AppStrings.defaultSenderHint}',
+            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+          ),
+        ),
+      ],
     );
   }
 
@@ -694,6 +725,20 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
+              if (!account.isDefault)
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      for (final a in _accounts) {
+                        a.isDefault = false;
+                      }
+                      account.isDefault = true;
+                    });
+                    _persistConfig();
+                  },
+                  child: Text(AppStrings.setAsDefaultSender),
+                ),
+              const Spacer(),
               TextButton(
                 onPressed: () => _deleteAccount(index),
                 child: Text(AppStrings.delete, style: const TextStyle(color: Colors.red)),

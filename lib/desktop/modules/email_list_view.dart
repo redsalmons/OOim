@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../native/email_core.dart' as native;
 import '../../native/unified_session.dart';
-import 'email_utils.dart';
 import 'email_module_base.dart';
-import 'conversation_view.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
 import '../../i18n/app_strings.dart';
@@ -51,119 +49,77 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
+  String _sessionTitle(UnifiedSessionInfo session) {
+    String title = session.subject.isNotEmpty ? session.subject : '';
+    if (title.isEmpty) {
+      final names = session.members.where((m) => m != session.account).take(3).toList();
+      title = names.join(', ');
+      if (session.members.length - 1 > 3) title += ' ...';
+    }
+    return title;
+  }
+
   List<Widget> buildGroupedEmailList() {
     final List<Widget> widgets = [];
+    final q = searchQuery.trim().toLowerCase();
+
+    // Sessions whose title or any member matches the query.
+    final filteredSessions = q.isEmpty
+        ? unifiedSessions
+        : unifiedSessions
+            .where((s) =>
+                _sessionTitle(s).toLowerCase().contains(q) ||
+                s.members.any((m) => m.toLowerCase().contains(q)))
+            .toList();
 
     // Section 0: Unified sessions — grouped by account
     {
       final sectionKey = 'unified_sessions';
       final isCollapsed = collapsedSections.contains(sectionKey);
       widgets.add(_buildUnifiedSectionHeader(
-          AppStrings.conversation, unifiedSessions.length, sectionKey, isCollapsed));
+          AppStrings.conversation, filteredSessions.length, sectionKey, isCollapsed));
       if (!isCollapsed) {
-        if (unifiedSessions.isEmpty) {
+        if (filteredSessions.isEmpty) {
           widgets.add(Container(
             padding: const EdgeInsets.fromLTRB(28, 6, 8, 6),
             child: Text(AppStrings.noConversations, style: TextStyle(fontSize: 12, color: Colors.grey[400])),
           ));
         } else {
-          // Group sessions by account
-          final sessionsByAccount = <String, List<UnifiedSessionInfo>>{};
-          for (final s in unifiedSessions) {
-            final acc = s.account.isNotEmpty ? s.account : AppStrings.unknownAccount;
-            sessionsByAccount.putIfAbsent(acc, () => []).add(s);
-          }
-          for (final entry in sessionsByAccount.entries) {
-            final account = entry.key;
-            final sessions = entry.value;
-            final groupKey = 'unified:$account';
-            final isGroupCollapsed = collapsedGroups.contains(groupKey);
-            widgets.add(buildGroupHeader(account, sessions.length, groupKey, isGroupCollapsed));
-            if (!isGroupCollapsed) {
-              // 三个子 section：置顶 / 会话 / 隐藏。隐藏优先于置顶。
-              final hiddenList = sessions.where((s) => s.hidden).toList();
-              final pinnedList = sessions.where((s) => s.pinned && !s.hidden).toList();
-              final normalList = sessions.where((s) => !s.pinned && !s.hidden).toList();
+          // 三个子 section：置顶（上）/ 会话（中）/ 隐藏（下）。隐藏优先于置顶。
+          final pinnedList = filteredSessions.where((s) => s.pinned && !s.hidden).toList();
+          final normalList = filteredSessions.where((s) => !s.pinned && !s.hidden).toList();
+          final hiddenList = filteredSessions.where((s) => s.hidden).toList();
 
-              if (pinnedList.isNotEmpty) {
-                final key = '$groupKey:pinned';
-                final collapsed = collapsedGroups.contains(key);
-                widgets.add(buildGroupHeader(AppStrings.pinnedSection, pinnedList.length, key, collapsed));
-                if (!collapsed) {
-                  for (final session in pinnedList) {
-                    widgets.add(buildUnifiedSessionItem(session));
-                  }
-                }
-              }
-
-              // 正常会话 section（默认打开）
-              {
-                final key = '$groupKey:normal';
-                final collapsed = collapsedGroups.contains(key);
-                widgets.add(buildGroupHeader(AppStrings.conversation, normalList.length, key, collapsed));
-                if (!collapsed) {
-                  for (final session in normalList) {
-                    widgets.add(buildUnifiedSessionItem(session));
-                  }
-                }
-              }
-
-              if (hiddenList.isNotEmpty) {
-                final key = '$groupKey:hidden';
-                final collapsed = collapsedGroups.contains(key);
-                widgets.add(buildGroupHeader(AppStrings.hiddenSection, hiddenList.length, key, collapsed));
-                if (!collapsed) {
-                  for (final session in hiddenList) {
-                    widgets.add(buildUnifiedSessionItem(session));
-                  }
-                }
+          if (pinnedList.isNotEmpty) {
+            const key = 'unified:pinned';
+            final collapsed = collapsedGroups.contains(key);
+            widgets.add(buildGroupHeader(AppStrings.pinnedSection, pinnedList.length, key, collapsed));
+            if (!collapsed) {
+              for (final session in pinnedList) {
+                widgets.add(buildUnifiedSessionItem(session));
               }
             }
           }
-        }
-      }
-    }
 
-    // Group emails by account - 一级分组
-    final accountEmails = <String, List<native.EmailMessage>>{};
-    for (final email in emails) {
-      final account = email.account.isNotEmpty ? email.account : (email.recipient.isNotEmpty ? email.recipient : AppStrings.unknownAccount);
-      accountEmails.putIfAbsent(account, () => []).add(email);
-    }
-
-    for (final accountEntry in accountEmails.entries) {
-      final account = accountEntry.key;
-      final emailsList = accountEntry.value;
-
-      final sectionKey = 'account:$account';
-      final isSectionCollapsed = collapsedSections.contains(sectionKey);
-      widgets.add(buildSectionHeader(account, emailsList.length, sectionKey, isSectionCollapsed));
-
-      if (!isSectionCollapsed) {
-        // 二级分组：收件箱
-        final inboxEmails = emailsList.where((e) => e.folder != 'Sent' && e.folder != 'SENT').toList();
-        if (inboxEmails.isNotEmpty) {
-          final groupKey = '$sectionKey:inbox';
-          final isGroupCollapsed = collapsedGroups.contains(groupKey);
-          widgets.add(buildGroupHeader(AppStrings.inbox, inboxEmails.length, groupKey, isGroupCollapsed));
-          if (!isGroupCollapsed) {
-            for (final email in inboxEmails) {
-              final index = emails.indexWhere((e) => e.uuid == email.uuid);
-              if (index >= 0) widgets.add(buildEmailItem(index));
+          {
+            const key = 'unified:normal';
+            final collapsed = collapsedGroups.contains(key);
+            widgets.add(buildGroupHeader(AppStrings.conversation, normalList.length, key, collapsed));
+            if (!collapsed) {
+              for (final session in normalList) {
+                widgets.add(buildUnifiedSessionItem(session));
+              }
             }
           }
-        }
 
-        // 二级分组：已发送
-        final sentEmails = emailsList.where((e) => e.folder == 'Sent' || e.folder == 'SENT' || e.folder == 'Sent Messages').toList();
-        if (sentEmails.isNotEmpty) {
-          final groupKey = '$sectionKey:sent';
-          final isGroupCollapsed = collapsedGroups.contains(groupKey);
-          widgets.add(buildGroupHeader(AppStrings.sent, sentEmails.length, groupKey, isGroupCollapsed));
-          if (!isGroupCollapsed) {
-            for (final email in sentEmails) {
-              final index = emails.indexWhere((e) => e.uuid == email.uuid);
-              if (index >= 0) widgets.add(buildEmailItem(index));
+          if (hiddenList.isNotEmpty) {
+            const key = 'unified:hidden';
+            final collapsed = collapsedGroups.contains(key);
+            widgets.add(buildGroupHeader(AppStrings.hiddenSection, hiddenList.length, key, collapsed));
+            if (!collapsed) {
+              for (final session in hiddenList) {
+                widgets.add(buildUnifiedSessionItem(session));
+              }
             }
           }
         }
@@ -186,7 +142,7 @@ mixin EmailListViewMixin on State<EmailModule> {
       },
       child: Container(
         padding: const EdgeInsets.fromLTRB(28, 8, 8, 4),
-        color: const Color(0xFFE3F2FD),
+        color: const Color(0xFFF0F0F0),
         child: Row(
           children: [
             Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.grey[700])),
@@ -194,37 +150,6 @@ mixin EmailListViewMixin on State<EmailModule> {
             Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
             const Spacer(),
             Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 16, color: Colors.grey[500]),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget buildSectionHeader(String title, int count, String key, bool isCollapsed) {
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          if (isCollapsed) {
-            collapsedSections.remove(key);
-          } else {
-            collapsedSections.add(key);
-          }
-        });
-      },
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-        color: const Color(0xFFBBDEFB),
-        child: Row(
-          children: [
-            Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[800])),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(8)),
-              child: Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
-            ),
-            const Spacer(),
-            Icon(isCollapsed ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_down, size: 18, color: Colors.grey[600]),
           ],
         ),
       ),
@@ -274,7 +199,7 @@ mixin EmailListViewMixin on State<EmailModule> {
       },
       child: Container(
         padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-        color: const Color(0xFFBBDEFB),
+        color: const Color(0xFFE4E4E4),
         child: Row(
           children: [
             Icon(Icons.chat, size: 16, color: Colors.blue[800]),
@@ -308,12 +233,7 @@ mixin EmailListViewMixin on State<EmailModule> {
     final isGroup = memberCount > 2;
 
     // Title: subject if available, otherwise member names
-    String title = session.subject.isNotEmpty ? session.subject : '';
-    if (title.isEmpty) {
-      final names = session.members.where((m) => m != session.account).take(3).toList();
-      title = names.join(', ');
-      if (memberCount - 1 > 3) title += ' ...';
-    }
+    String title = _sessionTitle(session);
     if (title.isEmpty) title = AppStrings.noSubject;
 
     return GestureDetector(
@@ -382,7 +302,7 @@ mixin EmailListViewMixin on State<EmailModule> {
           controller: searchController,
           onChanged: (value) {
             searchQuery = value;
-            refreshEmails();
+            setState(() {});
           },
           decoration: InputDecoration(
             hintText: AppStrings.search,
@@ -419,84 +339,4 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
-  Widget buildEmailItem(int index) {
-    final email = emails[index];
-    final isSelected = selectedEmail == index;
-    final unread = unreadIndices.contains(index);
-    final displayName = extractName(email.sender);
-
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          selectedEmail = index;
-          selectedUnifiedSessionId = null;
-          unreadIndices.remove(index);
-        });
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE8F0FE) : Colors.transparent,
-          border: Border(bottom: BorderSide(color: Colors.grey[200]!, width: 0.5)),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: SizedBox(
-                width: 8,
-                child: unread
-                    ? Container(width: 8, height: 8, decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, shape: BoxShape.circle))
-                    : null,
-              ),
-            ),
-            const SizedBox(width: 8),
-            buildAvatar(displayName, email: email.sender),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(child: Text(displayName, style: TextStyle(fontSize: 13, fontWeight: unread ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[900]), maxLines: 1, overflow: TextOverflow.ellipsis)),
-                      const SizedBox(width: 8),
-                      Text(formatTimeShort(email.timestamp), style: TextStyle(fontSize: 11, color: unread ? Theme.of(context).colorScheme.primary : Colors.grey[500], fontWeight: unread ? FontWeight.w500 : FontWeight.normal)),
-                    ],
-                  ),
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      Expanded(child: Text(email.subject.isEmpty ? AppStrings.noSubject : email.subject, style: TextStyle(fontSize: 12, fontWeight: unread ? FontWeight.w600 : FontWeight.normal, color: Colors.grey[800]), maxLines: 1, overflow: TextOverflow.ellipsis)),
-                      if (hasAttachment(email.body))
-                        Padding(padding: const EdgeInsets.only(left: 4), child: Icon(Icons.attach_file, size: 12, color: Colors.grey[500])),
-                    ],
-                  ),
-                  const SizedBox(height: 2),
-                  Text(previewFor(email), style: TextStyle(fontSize: 11, color: Colors.grey[500]), maxLines: 1, overflow: TextOverflow.ellipsis),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget buildAvatar(String name, {String? email}) {
-    String displayName = name.isEmpty ? '?' : name[0];
-    if (email != null && email.isNotEmpty) {
-      final abName = ConversationViewMixin.addressbookNameForEmail(email);
-      if (abName.isNotEmpty) {
-        displayName = abName[0];
-      }
-    }
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(color: avatarColor(name), borderRadius: BorderRadius.circular(16)),
-      child: Center(child: Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500))),
-    );
-  }
 }

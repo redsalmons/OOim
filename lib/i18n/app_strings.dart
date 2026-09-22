@@ -7,7 +7,7 @@ class AppStrings {
   }
 
   static String get appTitle => isZh ? 'OIM' : 'OIM';
-  static String get mail => isZh ? '邮件' : 'Mail';
+  static String get mail => isZh ? '消息' : 'Messages';
   static String get settings => isZh ? '设置' : 'Settings';
   static String get me => isZh ? '我' : 'Me';
   static String get contacts => isZh ? '通讯录' : 'Contacts';
@@ -41,10 +41,6 @@ class AppStrings {
   static String get account => isZh ? '账户' : 'Account';
   static String get accountManagement => isZh ? '账户管理' : 'Account Management';
   static String get accountManagementDesc => isZh ? '添加、编辑或删除邮箱账户' : 'Add, edit or remove email accounts';
-  static String get accountSecurity => isZh ? '账户安全' : 'Account Security';
-  static String get accountSecurityDesc => isZh ? '密码、两步验证等' : 'Password, 2FA, etc.';
-  static String get dataSync => isZh ? '数据同步' : 'Data Sync';
-  static String get dataSyncDesc => isZh ? '管理云端数据同步' : 'Manage cloud data sync';
   static String get username => isZh ? '用户名' : 'Username';
   static String get appearance => isZh ? '外观' : 'Appearance';
   static String get darkMode => isZh ? '深色模式' : 'Dark Mode';
@@ -107,6 +103,11 @@ class AppStrings {
   // Email config dialog
   static String get emailConfig => isZh ? '邮箱配置' : 'Email Configuration';
   static String get localDataPath => isZh ? '本地数据存储位置' : 'Local data path';
+  static String get defaultSender => isZh ? '默认发送邮箱' : 'Default sender';
+  static String get setAsDefaultSender => isZh ? '设为默认发送邮箱' : 'Set as default sender';
+  static String get defaultSenderHint =>
+      isZh ? '为默认的消息发送邮箱。切换到其他邮箱标签，点击"设为默认发送邮箱"可更改。'
+           : ' is the default sender. Switch to another account tab and tap "Set as default sender" to change.';
   static String get emailType => isZh ? '邮箱类型' : 'Email type';
   static String get maxAccountsReached => isZh ? '最多支持添加5个邮箱配置' : 'Maximum 5 email accounts supported';
   static String get noEmailConfig => isZh ? '暂无邮箱配置，请选择类型并点击添加' : 'No email config, select type and click Add';

@@ -84,6 +84,13 @@ typedef _UsSetSessionFlagsDart = int Function(
 typedef _UsIsReadyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _UsIsReadyDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
 
+// us_set_subject
+// (sessionId, subject, outJson, outSize)
+typedef _UsSetSubjectNative = Int32 Function(
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _UsSetSubjectDart = int Function(
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+
 // ---------------------------------------------------------------------------
 // Function lookups
 // ---------------------------------------------------------------------------
@@ -96,6 +103,7 @@ final _usListSessions = _lib.lookupFunction<_UsQueryNative, _UsQueryDart>('us_li
 final _usGetSession = _lib.lookupFunction<_UsQueryNative, _UsQueryDart>('us_get_session');
 final _usSetSessionFlags = _lib.lookupFunction<_UsSetSessionFlagsNative, _UsSetSessionFlagsDart>('us_set_session_flags');
 final _usIsReady = _lib.lookupFunction<_UsIsReadyNative, _UsIsReadyDart>('us_is_ready');
+final _usSetSubject = _lib.lookupFunction<_UsSetSubjectNative, _UsSetSubjectDart>('us_set_subject');
 
 // ---------------------------------------------------------------------------
 // Data class for unified session info (used by GUI layer)
@@ -346,6 +354,23 @@ class UnifiedSessionManager {
       return outBuf.toDartString();
     } finally {
       malloc.free(sessionPtr);
+      malloc.free(outBuf);
+    }
+  }
+
+  /// Update the subject (title) of a session.
+  ///
+  /// Returns a JSON string: {status}
+  static String setSessionSubject(String sessionId, String subject) {
+    final sessionPtr = sessionId.toNativeUtf8();
+    final subjectPtr = subject.toNativeUtf8();
+    final outBuf = malloc.allocate<Utf8>(65536);
+    try {
+      _usSetSubject(sessionPtr, subjectPtr, outBuf, 65536);
+      return outBuf.toDartString();
+    } finally {
+      malloc.free(sessionPtr);
+      malloc.free(subjectPtr);
       malloc.free(outBuf);
     }
   }
