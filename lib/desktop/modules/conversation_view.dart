@@ -640,7 +640,7 @@ mixin ConversationViewMixin on State<EmailModule> {
             ),
             const SizedBox(height: 2),
             Text(
-              failed ? '传输失败' : done ? '已完成 ${meta.receivedChunks}/${meta.totalChunks}' : '${meta.receivedChunks}/${meta.totalChunks}',
+              failed ? AppStrings.transferFailed : done ? (AppStrings.isZh ? '已完成 ${meta.receivedChunks}/${meta.totalChunks}' : 'Done ${meta.receivedChunks}/${meta.totalChunks}') : '${meta.receivedChunks}/${meta.totalChunks}',
               style: TextStyle(fontSize: 10, color: context.oim.textMuted),
             ),
             if (caption.isNotEmpty)
@@ -656,7 +656,7 @@ mixin ConversationViewMixin on State<EmailModule> {
 
   Future<void> _saveUnifiedFile(EmlParsedContent meta, bool isMe) async {
     try {
-      final dir = await FilePicker.getDirectoryPath(dialogTitle: '保存文件');
+      final dir = await FilePicker.getDirectoryPath(dialogTitle: AppStrings.saveFile);
       if (dir == null || dir.isEmpty) return;
       final resultJson = isMe
           ? native.EmailCore.fileTransferCopyOriginal(meta.fileId, dir)
@@ -665,12 +665,12 @@ mixin ConversationViewMixin on State<EmailModule> {
       final ok = result['status'] == 'success';
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(ok ? '已保存到 ${result['output_path'] ?? dir}' : '保存失败: ${result['error'] ?? resultJson}'),
+        content: Text(ok ? AppStrings.savedTo('${result['output_path'] ?? dir}') : AppStrings.sendFailedWith('${result['error'] ?? resultJson}')),
         duration: const Duration(seconds: 3),
       ));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(AppStrings.sendFailedWith('$e'))));
     }
   }
 
@@ -865,7 +865,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(AppStrings.isZh
-              ? '密钥交换尚未完成，无法发送消息'
+              ? AppStrings.keyExchangePending
               : 'Key exchange in progress, cannot send yet'),
           duration: const Duration(seconds: 2),
         ),
@@ -908,11 +908,11 @@ mixin ConversationViewMixin on State<EmailModule> {
         droppedFiles.clear();
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('消息已发送'), duration: Duration(seconds: 1)));
+          SnackBar(content: Text(AppStrings.messageSent), duration: const Duration(seconds: 1)));
         loadUnifiedSessionMessages(session.sessionId);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('文件发送失败'), duration: Duration(seconds: 3)));
+          SnackBar(content: Text(AppStrings.fileSendFailed), duration: const Duration(seconds: 3)));
       }
       return;
     }
@@ -957,11 +957,11 @@ mixin ConversationViewMixin on State<EmailModule> {
         droppedFiles.clear();
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('消息已发送'), duration: Duration(seconds: 1)));
+          SnackBar(content: Text(AppStrings.messageSent), duration: const Duration(seconds: 1)));
         loadUnifiedSessionMessages(session.sessionId);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('文件发送失败'), duration: Duration(seconds: 3)));
+          SnackBar(content: Text(AppStrings.fileSendFailed), duration: const Duration(seconds: 3)));
       }
       return;
     }
@@ -981,7 +981,7 @@ mixin ConversationViewMixin on State<EmailModule> {
         final enqueued = taskId is int && taskId > 0;
         if (!enqueued) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('发送失败: 入队失败'), duration: Duration(seconds: 3)));
+            SnackBar(content: Text(AppStrings.sendFailedEnqueue), duration: const Duration(seconds: 3)));
           return;
         }
 
@@ -1008,15 +1008,15 @@ mixin ConversationViewMixin on State<EmailModule> {
         ));
 
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已进入发送队列'), duration: Duration(seconds: 1)));
+          SnackBar(content: Text(AppStrings.queuedForSend), duration: const Duration(seconds: 1)));
         loadUnifiedSessionMessages(session.sessionId);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('发送失败: ${result['error'] ?? 'unknown'}'), duration: const Duration(seconds: 3)));
+          SnackBar(content: Text(AppStrings.sendFailedWith('${result['error'] ?? 'unknown'}')), duration: const Duration(seconds: 3)));
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败: $e'), duration: const Duration(seconds: 3)));
+        SnackBar(content: Text(AppStrings.sendFailedWith('$e')), duration: const Duration(seconds: 3)));
     }
   }
 
@@ -1046,7 +1046,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                       return TextField(
                         controller: ctrl,
                         focusNode: focusNode,
-                        decoration: const InputDecoration(hintText: '输入新成员邮箱', border: OutlineInputBorder(), isDense: true),
+                        decoration: InputDecoration(hintText: AppStrings.addMemberHint, border: const OutlineInputBorder(), isDense: true),
                         onSubmitted: (_) => onFieldSubmitted(),
                       );
                     },
@@ -1140,11 +1140,11 @@ mixin ConversationViewMixin on State<EmailModule> {
         loadUnifiedSessions(); // refresh the list
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('添加失败: ${result['error'] ?? 'unknown'}'), duration: const Duration(seconds: 3)));
+          SnackBar(content: Text(AppStrings.addFailed('${result['error'] ?? 'unknown'}')), duration: const Duration(seconds: 3)));
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('添加失败: $e'), duration: const Duration(seconds: 3)));
+        SnackBar(content: Text(AppStrings.addFailed('$e')), duration: const Duration(seconds: 3)));
     }
   }
 

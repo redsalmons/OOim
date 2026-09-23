@@ -17,6 +17,7 @@ class ContactsModuleState extends State<ContactsModule> {
   late List<String> _groups;
   AddressBookEntry? _selectedContact;
   bool _saving = false;
+  bool _addingContact = false;
   final List<AddressBookEntry> _contacts = [];
 
   @override
@@ -55,6 +56,23 @@ class ContactsModuleState extends State<ContactsModule> {
     } catch (e) {
       print('Failed to load addressbook: $e');
     }
+  }
+
+  void _addContact(String email, String name, String group, String notes) {
+    native.EmailCore.addressbookAddEmail(email, name.isEmpty ? email : name);
+    _loadContactsFromDb();
+    final added = _contacts.where((c) => c.email == email).firstOrNull;
+    if (added != null && (group.isNotEmpty || notes.isNotEmpty)) {
+      native.EmailCore.addressbookUpdate(added.id, added.name, group, notes);
+      _loadContactsFromDb();
+    }
+    setState(() {
+      _addingContact = false;
+      _selectedContact = _contacts.where((c) => c.email == email).firstOrNull;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(AppStrings.contactSaved), duration: const Duration(seconds: 2)),
+    );
   }
 
   void _loadGroups() {
@@ -137,12 +155,29 @@ class ContactsModuleState extends State<ContactsModule> {
 
   Widget _buildContactList() {
     return Container(
-      width: 320,
+      width: 214,
       color: context.oim.listPane,
       child: Column(
         children: [
           _buildSearchBar(),
           _buildGroupSelector(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _addingContact = true;
+                    _selectedContact = null;
+                  });
+                },
+                icon: const Icon(Icons.person_add, size: 16),
+                label: Text(AppStrings.isZh ? '添加联系人' : 'Add Contact'),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
           Expanded(
             child: ListView.builder(
               itemCount: _filteredContacts.length,
@@ -228,7 +263,10 @@ class ContactsModuleState extends State<ContactsModule> {
     final displayName = contact.name.isNotEmpty ? contact.name : contact.email;
     return GestureDetector(
       onTap: () {
-        setState(() { _selectedContact = contact; });
+        setState(() {
+          _selectedContact = contact;
+          _addingContact = false;
+        });
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -250,7 +288,7 @@ class ContactsModuleState extends State<ContactsModule> {
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: context.oim.textMuted, size: 20),
+
           ],
         ),
       ),
@@ -274,7 +312,13 @@ class ContactsModuleState extends State<ContactsModule> {
     return Expanded(
       child: Container(
         color: context.scheme.surface,
-        child: _selectedContact == null
+        child: _addingContact
+          ? _AddressBookAddPanel(
+              existingGroups: _groups.skip(1).toList(),
+              onSave: _addContact,
+              onCancel: () => setState(() => _addingContact = false),
+            )
+          : _selectedContact == null
           ? Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -513,6 +557,197 @@ class _AddressBookEditPanelState extends State<_AddressBookEditPanel> {
                   onPressed: widget.onDelete,
                   style: TextButton.styleFrom(foregroundColor: Colors.red),
                   child: Text(AppStrings.delete),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _save,
+                  child: Text(AppStrings.save),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AddressBookAddPanel extends StatefulWidget {
+  final List<String> existingGroups;
+  final void Function(String email, String name, String group, String notes) onSave;
+  final VoidCallback onCancel;
+
+  const _AddressBookAddPanel({
+    required this.existingGroups,
+    required this.onSave,
+    required this.onCancel,
+  });
+
+  @override
+  State<_AddressBookAddPanel> createState() => _AddressBookAddPanelState();
+}
+
+class _AddressBookAddPanelState extends State<_AddressBookAddPanel> {
+  final _emailController = TextEditingController();
+  final _nameController = TextEditingController();
+  final _notesController = TextEditingController();
+  final _groupController = TextEditingController();
+  String _selectedGroup = '';
+  String _error = '';
+  static final _emailRe = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _nameController.dispose();
+    _notesController.dispose();
+    _groupController.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final email = _emailController.text.trim();
+    if (email.isEmpty || !_emailRe.hasMatch(email)) {
+      setState(() => _error = AppStrings.isZh
+          ? '邮箱地址格式不正确'
+          : 'Invalid email address format');
+      return;
+    }
+    widget.onSave(
+      email,
+      _nameController.text.trim(),
+      _selectedGroup,
+      _notesController.text.trim(),
+    );
+  }
+
+  Widget _buildLabel(String text) {
+    return Text(text, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500));
+  }
+
+  Widget _buildField(TextEditingController controller, String hint,
+      {int maxLines = 1, bool autofocus = false}) {
+    return TextField(
+      controller: controller,
+      maxLines: maxLines,
+      autofocus: autofocus,
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(32),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildLabel(AppStrings.contactEmail),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _emailController,
+              autofocus: true,
+              keyboardType: TextInputType.emailAddress,
+              decoration: InputDecoration(
+                hintText: 'name@example.com',
+                hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                errorText: _error.isEmpty ? null : _error,
+              ),
+              onChanged: (_) {
+                if (_error.isNotEmpty) setState(() => _error = '');
+              },
+            ),
+            const SizedBox(height: 16),
+
+            _buildLabel(AppStrings.contactName),
+            const SizedBox(height: 6),
+            _buildField(_nameController, AppStrings.enterName),
+            const SizedBox(height: 16),
+
+            _buildLabel(AppStrings.isZh ? '分组' : 'Group'),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: _selectedGroup.isNotEmpty && widget.existingGroups.contains(_selectedGroup)
+                      ? _selectedGroup : null,
+                    decoration: InputDecoration(
+                      hintText: AppStrings.isZh ? '选择分组' : 'Select group',
+                      hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    items: widget.existingGroups.map((g) => DropdownMenuItem(
+                      value: g,
+                      child: Text(g, style: const TextStyle(fontSize: 13)),
+                    )).toList(),
+                    onChanged: (value) {
+                      setState(() { _selectedGroup = value ?? ''; });
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 200,
+                  child: TextField(
+                    controller: _groupController,
+                    decoration: InputDecoration(
+                      hintText: AppStrings.isZh ? '或输入新分组' : 'Or type new group',
+                      hintStyle: TextStyle(fontSize: 13, color: context.oim.textMuted),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    onSubmitted: (value) {
+                      final trimmed = value.trim();
+                      if (trimmed.isNotEmpty) {
+                        setState(() { _selectedGroup = trimmed; _groupController.clear(); });
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: () {
+                    final trimmed = _groupController.text.trim();
+                    if (trimmed.isNotEmpty) {
+                      setState(() { _selectedGroup = trimmed; _groupController.clear(); });
+                    }
+                  },
+                  icon: const Icon(Icons.add_circle, size: 22),
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ],
+            ),
+            if (_selectedGroup.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Chip(
+                  label: Text(_selectedGroup, style: const TextStyle(fontSize: 12)),
+                  onDeleted: () { setState(() { _selectedGroup = ''; }); },
+                ),
+              ),
+            const SizedBox(height: 16),
+
+            _buildLabel(AppStrings.contactNotes),
+            const SizedBox(height: 6),
+            _buildField(_notesController, AppStrings.enterNotes, maxLines: 3),
+            const SizedBox(height: 24),
+
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: widget.onCancel,
+                  child: Text(AppStrings.cancel),
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton(

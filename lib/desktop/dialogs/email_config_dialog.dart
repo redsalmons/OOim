@@ -609,7 +609,7 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
           child: Text(
             email.isEmpty
                 ? (AppStrings.isZh
-                    ? '暂无账号。添加邮箱后可设为默认发送邮箱。'
+                    ? AppStrings.noAccountsHint
                     : 'No accounts. Add a mailbox to set a default sender.')
                 : '$email${AppStrings.defaultSenderHint}',
             style: TextStyle(fontSize: 12, color: context.oim.textMuted),

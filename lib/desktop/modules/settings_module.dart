@@ -6,7 +6,9 @@ import 'package:path_provider/path_provider.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../../i18n/app_strings.dart';
 import '../../main.dart' show appThemeMode, appTextScale, kTextScaleSmall, kTextScaleMedium, kTextScaleLarge;
+import '../../i18n/app_strings.dart' show appLocale;
 import '../app_theme.dart';
+import '../user_prefs.dart';
 
 class SettingsModule extends StatefulWidget {
   const SettingsModule({super.key});
@@ -18,7 +20,6 @@ class SettingsModule extends StatefulWidget {
 class _SettingsModuleState extends State<SettingsModule> {
   bool _notifications = true;
   bool _autoUpdate = true;
-  String _language = AppStrings.isZh ? '简体中文' : 'English';
   String _configPath = '';
   String _username = '';
   String _defaultEmail = '';
@@ -46,21 +47,14 @@ class _SettingsModuleState extends State<SettingsModule> {
     _loadProfile();
   }
 
-  String get _prefsPath =>
-      '${File(_configPath).parent.path}/user_prefs.json';
+  void _persistPref(String key, dynamic value) =>
+      writeUserPref(_configPath, key, value);
 
   Future<void> _loadProfile() async {
     final cfg = native.EmailCore.loadConfig(_configPath);
     final def = cfg?.accounts.where((a) => a.isDefault).firstOrNull ??
         (cfg != null && cfg.accounts.isNotEmpty ? cfg.accounts.first : null);
-    String name = '';
-    try {
-      final f = File(_prefsPath);
-      if (f.existsSync()) {
-        final j = jsonDecode(f.readAsStringSync());
-        name = j['username']?.toString() ?? '';
-      }
-    } catch (_) {}
+    var name = readUserPrefs(_configPath)['username']?.toString() ?? '';
     if (name.isEmpty && def != null) name = def.email.split('@').first;
     if (!mounted) return;
     setState(() {
@@ -75,9 +69,7 @@ class _SettingsModuleState extends State<SettingsModule> {
     if (v.isEmpty || v == _username) return;
     _username = v;
     setState(() {});
-    try {
-      File(_prefsPath).writeAsStringSync(jsonEncode({'username': v}));
-    } catch (_) {}
+    _persistPref('username', v);
   }
 
   @override
@@ -214,12 +206,7 @@ class _SettingsModuleState extends State<SettingsModule> {
             const SizedBox(height: 16),
             _buildThemeModeItem(),
             const Divider(),
-            _buildSettingsItem(
-              Icons.language,
-              AppStrings.language,
-              _language,
-              () {},
-            ),
+            _buildLanguageItem(),
             _buildFontSizeItem(),
           ],
         ),
@@ -251,7 +238,46 @@ class _SettingsModuleState extends State<SettingsModule> {
                 ButtonSegment(value: ThemeMode.dark, label: Text(AppStrings.themeDark)),
               ],
               selected: {mode},
-              onSelectionChanged: (sel) => appThemeMode.value = sel.first,
+              onSelectionChanged: (sel) {
+                appThemeMode.value = sel.first;
+                _persistPref('themeMode', sel.first.name);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLanguageItem() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.language, size: 24, color: context.oim.textSecondary),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(AppStrings.language, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+          ),
+          ValueListenableBuilder<Locale?>(
+            valueListenable: appLocale,
+            builder: (context, loc, _) => SegmentedButton<String>(
+              showSelectedIcon: false,
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                textStyle: WidgetStatePropertyAll(TextStyle(fontSize: 12)),
+              ),
+              segments: [
+                ButtonSegment(value: 'system', label: Text(AppStrings.followSystem)),
+                const ButtonSegment(value: 'zh', label: Text('中文')),
+                const ButtonSegment(value: 'en', label: Text('English')),
+              ],
+              selected: {loc?.languageCode ?? 'system'},
+              onSelectionChanged: (sel) {
+                appLocale.value =
+                    sel.first == 'system' ? null : Locale(sel.first);
+                _persistPref('locale', sel.first);
+              },
             ),
           ),
         ],
@@ -283,7 +309,10 @@ class _SettingsModuleState extends State<SettingsModule> {
                 ButtonSegment(value: kTextScaleLarge, label: Text(AppStrings.fontSizeLarge)),
               ],
               selected: {scale},
-              onSelectionChanged: (sel) => appTextScale.value = sel.first,
+              onSelectionChanged: (sel) {
+                appTextScale.value = sel.first;
+                _persistPref('textScale', sel.first);
+              },
             ),
           ),
         ],
@@ -299,15 +328,15 @@ class _SettingsModuleState extends State<SettingsModule> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '通知',
+            Text(
+              AppStrings.notifications,
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
             _buildSwitchItem(
               Icons.notifications,
-              '启用通知',
-              '接收应用通知',
+              AppStrings.enableNotifications,
+              AppStrings.enableNotificationsDesc,
               _notifications,
               (value) {
                 setState(() {
@@ -318,8 +347,8 @@ class _SettingsModuleState extends State<SettingsModule> {
             const Divider(),
             _buildSwitchItem(
               Icons.email,
-              '邮件通知',
-              '新邮件提醒',
+              AppStrings.emailNotification,
+              AppStrings.emailNotificationDesc,
               _notifications,
               (value) {
                 setState(() {
@@ -330,8 +359,8 @@ class _SettingsModuleState extends State<SettingsModule> {
             const Divider(),
             _buildSwitchItem(
               Icons.notifications,
-              '消息通知',
-              '新消息提醒',
+              AppStrings.messageNotification,
+              AppStrings.messageNotificationDesc,
               _notifications,
               (value) {
                 setState(() {
@@ -353,29 +382,29 @@ class _SettingsModuleState extends State<SettingsModule> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '隐私与安全',
+            Text(
+              AppStrings.privacySecurity,
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
             _buildSettingsItem(
               Icons.lock,
-              '隐私设置',
-              '管理您的隐私选项',
+              AppStrings.privacySettings,
+              AppStrings.privacySettingsDesc,
               () {},
             ),
             const Divider(),
             _buildSettingsItem(
               Icons.block,
-              '屏蔽列表',
-              '管理屏蔽的用户',
+              AppStrings.blockedList,
+              AppStrings.blockedListDesc,
               () {},
             ),
             const Divider(),
             _buildSettingsItem(
               Icons.history,
-              '清除数据',
-              '清除本地缓存数据',
+              AppStrings.clearData,
+              AppStrings.clearDataDesc,
               () {},
             ),
           ],
@@ -392,22 +421,22 @@ class _SettingsModuleState extends State<SettingsModule> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '关于',
+            Text(
+              AppStrings.about,
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
             _buildSettingsItem(
               Icons.info,
-              '版本信息',
+              AppStrings.versionInfo,
               'OIM v1.0.0',
               () {},
             ),
             const Divider(),
             _buildSwitchItem(
               Icons.system_update,
-              '自动更新',
-              '自动检查更新',
+              AppStrings.autoUpdate,
+              AppStrings.autoUpdateDesc,
               _autoUpdate,
               (value) {
                 setState(() {
@@ -418,15 +447,15 @@ class _SettingsModuleState extends State<SettingsModule> {
             const Divider(),
             _buildSettingsItem(
               Icons.help,
-              '帮助与反馈',
-              '获取帮助或提供反馈',
+              AppStrings.helpFeedback,
+              AppStrings.helpFeedbackDesc,
               () {},
             ),
             const Divider(),
             _buildSettingsItem(
               Icons.description,
-              '用户协议',
-              '查看用户协议',
+              AppStrings.userAgreement,
+              AppStrings.userAgreementDesc,
               () {},
             ),
           ],

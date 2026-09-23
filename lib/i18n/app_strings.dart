@@ -1,8 +1,12 @@
 import 'dart:ui';
+import 'package:flutter/foundation.dart';
+
+/// null = follow OS locale; otherwise forces zh/en.
+final ValueNotifier<Locale?> appLocale = ValueNotifier(null);
 
 class AppStrings {
   static bool get isZh {
-    final locale = PlatformDispatcher.instance.locale;
+    final locale = appLocale.value ?? PlatformDispatcher.instance.locale;
     return locale.languageCode == 'zh';
   }
 
@@ -52,6 +56,41 @@ class AppStrings {
   static String get fontSizeSmall => isZh ? '小' : 'Small';
   static String get fontSizeMedium => isZh ? '中' : 'Medium';
   static String get fontSizeLarge => isZh ? '大' : 'Large';
+  static String get noAccountsHint => isZh ? '暂无账号。添加邮箱后可设为默认发送邮箱。' : 'No accounts. Add a mailbox to set a default sender.';
+  static String get transferFailed => isZh ? '传输失败' : 'Transfer failed';
+  static String get saveFile => isZh ? '保存文件' : 'Save File';
+  static String savedTo(String p) => isZh ? '已保存到 $p' : 'Saved to $p';
+  static String get keyExchangePending => isZh ? '密钥交换尚未完成，无法发送消息' : 'Key exchange incomplete; cannot send yet';
+  static String get fileSendFailed => isZh ? '文件发送失败' : 'File send failed';
+  static String get sendFailedEnqueue => isZh ? '发送失败: 入队失败' : 'Send failed: enqueue failed';
+  static String get queuedForSend => isZh ? '已进入发送队列' : 'Queued for sending';
+  static String sendFailedWith(String e) => isZh ? '发送失败: $e' : 'Send failed: $e';
+  static String get addMemberHint => isZh ? '输入新成员邮箱' : 'Enter new member email';
+  static String addFailed(String e) => isZh ? '添加失败: $e' : 'Add failed: $e';
+  static String get keyExchanged => isZh ? '🤝 已交换密钥' : '🤝 Keys exchanged';
+  static String get notifications => isZh ? '通知' : 'Notifications';
+  static String get enableNotifications => isZh ? '启用通知' : 'Enable Notifications';
+  static String get enableNotificationsDesc => isZh ? '接收应用通知' : 'Receive app notifications';
+  static String get emailNotification => isZh ? '邮件通知' : 'Email Notifications';
+  static String get emailNotificationDesc => isZh ? '新邮件提醒' : 'New email alerts';
+  static String get messageNotification => isZh ? '消息通知' : 'Message Notifications';
+  static String get messageNotificationDesc => isZh ? '新消息提醒' : 'New message alerts';
+  static String get privacySecurity => isZh ? '隐私与安全' : 'Privacy & Security';
+  static String get privacySettings => isZh ? '隐私设置' : 'Privacy Settings';
+  static String get privacySettingsDesc => isZh ? '管理您的隐私选项' : 'Manage privacy options';
+  static String get blockedList => isZh ? '屏蔽列表' : 'Blocked List';
+  static String get blockedListDesc => isZh ? '管理屏蔽的用户' : 'Manage blocked users';
+  static String get clearData => isZh ? '清除数据' : 'Clear Data';
+  static String get clearDataDesc => isZh ? '清除本地缓存数据' : 'Clear local cached data';
+  static String get about => isZh ? '关于' : 'About';
+  static String get versionInfo => isZh ? '版本信息' : 'Version';
+  static String get autoUpdate => isZh ? '自动更新' : 'Auto Update';
+  static String get autoUpdateDesc => isZh ? '自动检查更新' : 'Check for updates automatically';
+  static String get helpFeedback => isZh ? '帮助与反馈' : 'Help & Feedback';
+  static String get helpFeedbackDesc => isZh ? '获取帮助或提供反馈' : 'Get help or send feedback';
+  static String get userAgreement => isZh ? '用户协议' : 'User Agreement';
+  static String get userAgreementDesc => isZh ? '查看用户协议' : 'View user agreement';
+  static String get followSystem => isZh ? '跟随系统' : 'System';
 
   // Create session dialog
   static String get newSession => isZh ? '新建会话' : 'New Session';

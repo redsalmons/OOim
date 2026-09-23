@@ -394,6 +394,9 @@ typedef _AddressbookDeleteDart = int Function(int);
 typedef _AddressbookMigrateNative = Int32 Function();
 typedef _AddressbookMigrateDart = int Function();
 
+typedef _AddressbookAddEmailNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _AddressbookAddEmailDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
 typedef _EmailLogWriteNative = Void Function(Pointer<Utf8>);
 typedef _EmailLogWriteDart = void Function(Pointer<Utf8>);
 
@@ -594,6 +597,7 @@ final _addressbookQueryGroups = _lib.lookupFunction<_AddressbookQueryGroupsNativ
 final _addressbookUpdate = _lib.lookupFunction<_AddressbookUpdateNative, _AddressbookUpdateDart>('addressbook_update');
 final _addressbookDelete = _lib.lookupFunction<_AddressbookDeleteNative, _AddressbookDeleteDart>('addressbook_delete');
 final _addressbookMigrate = _lib.lookupFunction<_AddressbookMigrateNative, _AddressbookMigrateDart>('addressbook_migrate_from_emails');
+final _addressbookAddEmail = _lib.lookupFunction<_AddressbookAddEmailNative, _AddressbookAddEmailDart>('addressbook_add_email');
 
 final _emailTaskInsert = _lib.lookupFunction<_EmailTaskInsertNative, _EmailTaskInsertDart>('email_task_insert');
 final _emailTaskQueryPending = _lib.lookupFunction<_EmailTaskQueryPendingNative, _EmailTaskQueryPendingDart>('email_task_query_pending');
@@ -1688,6 +1692,18 @@ class EmailCore {
   /// Deletes an addressbook entry by id. Returns 0 on success, negative on error.
   static int addressbookDelete(int id) {
     return _addressbookDelete(id);
+  }
+
+  /// Adds a contact (email + name). Returns 0 on success or if already exists.
+  static int addressbookAddEmail(String email, String name) {
+    final emailPtr = email.toNativeUtf8();
+    final namePtr = name.toNativeUtf8();
+    try {
+      return _addressbookAddEmail(emailPtr, namePtr);
+    } finally {
+      malloc.free(emailPtr);
+      malloc.free(namePtr);
+    }
   }
 
   /// Migrates contacts from existing localemail records into addressbook.

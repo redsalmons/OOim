@@ -8,8 +8,9 @@ import 'package:path_provider/path_provider.dart';
 import 'desktop/desktop_home.dart';
 import 'desktop/dialogs/email_config_dialog.dart';
 import 'desktop/app_theme.dart';
+import 'desktop/user_prefs.dart';
 import 'native/email_core.dart' as native;
-import 'i18n/app_strings.dart';
+import 'i18n/app_strings.dart' show AppStrings, appLocale;
 
 void main(List<String> args) {
   if (args.isNotEmpty && args[0] == 'multi_window') {
@@ -24,6 +25,19 @@ void main(List<String> args) {
   runApp(const OIMApp());
 }
 
+void _applyPrefs(Map<String, dynamic> prefs) {
+  final loc = prefs['locale']?.toString();
+  appLocale.value = (loc == 'zh' || loc == 'en') ? Locale(loc!) : null;
+  final theme = prefs['themeMode']?.toString();
+  appThemeMode.value = theme == 'light'
+      ? ThemeMode.light
+      : theme == 'dark'
+          ? ThemeMode.dark
+          : ThemeMode.system;
+  final scale = (prefs['textScale'] as num?)?.toDouble();
+  if (scale != null && scale > 0) appTextScale.value = scale;
+}
+
 class _ConfigWindowApp extends StatelessWidget {
   final int windowId;
   final String configPath;
@@ -32,6 +46,7 @@ class _ConfigWindowApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    _applyPrefs(readUserPrefs(configPath));
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
@@ -69,7 +84,9 @@ class OIMApp extends StatelessWidget {
       valueListenable: appThemeMode,
       builder: (context, mode, _) => ValueListenableBuilder<double>(
         valueListenable: appTextScale,
-        builder: (context, scale, _) => MaterialApp(
+        builder: (context, scale, _) => ValueListenableBuilder<Locale?>(
+        valueListenable: appLocale,
+        builder: (context, _, __) => MaterialApp(
           title: 'OIM',
           debugShowCheckedModeBanner: false,
           theme: AppTheme.light(),
@@ -80,6 +97,7 @@ class OIMApp extends StatelessWidget {
             child: child!,
           ),
           home: const AppRoot(),
+        ),
         ),
       ),
     );
@@ -115,6 +133,8 @@ class _AppRootState extends State<AppRoot> {
     }
     native.EmailCore.loggerInit(logDir.path);
     native.EmailCore.logWrite('[Dart] Logger initialized');
+
+    _applyPrefs(readUserPrefs('${appDir.path}/config/oim.conf'));
 
     // Initialize libemail system
     native.EmailCore.logWrite('[Dart] Initializing libemail...');

@@ -204,7 +204,7 @@ List<native.EmailMessage> sortByReplyChain(List<native.EmailMessage> messages) {
 
 String previewFor(native.EmailMessage email) {
   if (native.XMailer.isKeyExchange(email.xMailer)) {
-    return '🤝 已交换密钥';
+    return AppStrings.keyExchanged;
   }
   final body = email.body;
   // body currently stores bodystructure JSON, not actual email text
