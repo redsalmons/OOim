@@ -10,7 +10,6 @@ import '../../native/email_background_service.dart';
 import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'email_list_view.dart';
-import 'email_detail_view.dart';
 import 'conversation_view.dart';
 import 'eml_parser.dart';
 import '../../i18n/app_strings.dart';
@@ -18,7 +17,7 @@ import '../../i18n/app_strings.dart';
 export 'email_module_base.dart';
 
 class EmailModuleState extends State<EmailModule>
-    with EmailListViewMixin, EmailDetailViewMixin, ConversationViewMixin {
+    with EmailListViewMixin, ConversationViewMixin {
   static const String _myAddress = 'me@oim.local';
 
   int _selectedEmail = 0;

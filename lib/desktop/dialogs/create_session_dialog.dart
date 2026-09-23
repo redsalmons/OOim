@@ -43,7 +43,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
 
   void _addMember() {
     final text = _membersController.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || text == _selectedAccount) return;
     if (!_members.contains(text)) {
       setState(() {
         _members.add(text);
@@ -277,12 +277,11 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
                       );
                     },
                     optionsBuilder: (TextEditingValue textEditingValue) {
-                      if (textEditingValue.text.isEmpty) {
-                        return widget.accounts.where((a) => !_members.contains(a));
-                      }
+                      final candidates = widget.accounts
+                          .where((a) => !_members.contains(a) && a != _selectedAccount);
+                      if (textEditingValue.text.isEmpty) return candidates;
                       final input = textEditingValue.text.toLowerCase();
-                      return widget.accounts
-                          .where((a) => a.toLowerCase().contains(input) && !_members.contains(a));
+                      return candidates.where((a) => a.toLowerCase().contains(input));
                     },
                     onSelected: (String selection) {
                       setState(() {
