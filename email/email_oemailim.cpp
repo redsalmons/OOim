@@ -64,6 +64,48 @@ int oemailim_go(int configIndex) {
     return Go_c(configIndex);
 }
 
+extern "C" int oemailim_delete_account_data(const char* account, const char* storageDir) {
+    if (!account || !*account) return -1;
+    std::string acc(account);
+
+    // DB cleanup — children/dangling references first, parents last.
+    static const char* kStmts[] = {
+        "DELETE FROM session WHERE email_id IN (SELECT id FROM localemail WHERE account=?)",
+        "DELETE FROM group_session_email WHERE account=?",
+        "DELETE FROM file_chunk WHERE file_id IN (SELECT file_id FROM file_transfer WHERE account=?)",
+        "DELETE FROM file_transfer WHERE account=?",
+        "DELETE FROM signal_skipped_key WHERE session_id IN (SELECT session_id FROM signal_session WHERE account=?)",
+        "DELETE FROM signal_session WHERE account=?",
+        "DELETE FROM signal_identity WHERE account=?",
+        "DELETE FROM signal_prekey WHERE account=?",
+        "DELETE FROM signal_peer_prekey WHERE account=?",
+        "DELETE FROM mls_state WHERE account=?",
+        "DELETE FROM group_session WHERE account=?",
+        "DELETE FROM task WHERE account=?",
+        "DELETE FROM unified_session WHERE account=?",
+        "DELETE FROM localemail WHERE account=?",
+    };
+    auto& conn = DbConnection::instance();
+    if (conn.get()) {
+        std::lock_guard<std::mutex> lock(conn.mutex());
+        for (const char* sql : kStmts) {
+            sqlite3_stmt* st = nullptr;
+            if (sqlite3_prepare_v2(conn.get(), sql, -1, &st, nullptr) != SQLITE_OK) continue;
+            sqlite3_bind_text(st, 1, acc.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+    }
+
+    // Filesystem cleanup — the per-account data directory.
+    if (storageDir && *storageDir) {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(storageDir) / acc, ec);
+    }
+    LOG_INFO("oemailim_delete_account_data: account=%s done\n", acc.c_str());
+    return 0;
+}
+
 extern "C" int oemailim_authority(int configIndex) {
     LOG_INFO("oemailim_authority called with configIndex: %d", configIndex);
     int result = Authority_c(configIndex);

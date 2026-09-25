@@ -299,7 +299,8 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
         _selectedTabIndex = _accounts.length - 1;
       }
     });
-    _writeToFile('删除后账户数量: ${_accounts.length}');
+    final ok = _persistConfig();
+    _writeToFile('删除后账户数量: ${_accounts.length}, persist=$ok');
   }
 
   void _saveAccount(int index) {
