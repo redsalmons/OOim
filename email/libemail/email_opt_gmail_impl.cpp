@@ -925,7 +925,13 @@ std::string EmailOptGmailImpl::fetch_email_headers(const std::string& folder, co
                         os.flush();
                         fValue = generated;
                     }
-                    if (strcasecmp(fName.c_str(), "Received") == 0) {
+                    if (
+                    #ifdef _WIN32
+                                        _stricmp
+                    #else
+                                        strcasecmp
+                    #endif
+                                        (fName.c_str(), "Received") == 0) {
                         receivedHeaders.push_back(fValue);
                     }
                     headerMap[fName] = fValue;

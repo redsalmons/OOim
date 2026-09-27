@@ -6,14 +6,29 @@
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
+
+#ifdef _WIN32
+// Include windows.h first, then undef conflicting macros before vmime
+#include <windows.h>
+#include <shellapi.h>
+// Undef Windows macros that conflict with vmime identifiers
+#undef DELETE
+#undef TEXT
+#undef TO
+#undef OPTIONAL
+#undef STATUS
+#undef min
+#undef max
+#endif
+
 #include <vmime/vmime.hpp>
+#ifdef _WIN32
+#include <vmime/platforms/windows/windowsHandler.hpp>
+#else
 #include <vmime/platforms/posix/posixHandler.hpp>
+#endif
 #include <vmime/security/sasl/XOAuth2SASLMechanism.hpp>
 #include <cstdio>
-#ifdef _WIN32
-    #include <windows.h>
-    #include <shellapi.h>
-#endif
 
 // Forward declaration
 namespace oemailim {
@@ -119,7 +134,11 @@ protected:
     static void init_vmime_platform() {
         static bool platform_initialized = false;
         if (!platform_initialized) {
+#ifdef _WIN32
+            vmime::platform::setHandler<vmime::platforms::windows::windowsHandler>();
+#else
             vmime::platform::setHandler<vmime::platforms::posix::posixHandler>();
+#endif
             
             // Register XOAUTH2 mechanism for OAuth2 authentication
             vmime::security::sasl::SASLMechanismFactory::getInstance()->

@@ -7,7 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Build the Rust MLS FFI crate (staticlib) before linking.
 # Uses the system proxy via CARGO_HTTP_PROXY if set in the environment.
 set(MLS_FFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mls_ffi")
-set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/libmls_ffi.a")
+if(WIN32)
+    set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/mls_ffi.lib")
+else()
+    set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/libmls_ffi.a")
+endif()
 if(DEFINED ENV{CARGO_HTTP_PROXY})
     set(_cargo_proxy "CARGO_HTTP_PROXY=$ENV{CARGO_HTTP_PROXY}")
 else()
@@ -22,35 +26,55 @@ add_custom_command(
 )
 add_custom_target(mls_ffi_build DEPENDS ${MLS_FFI_LIB})
 
-# Find SQLite3
-find_package(SQLite3 REQUIRED)
+# ---------------------------------------------------------------------------
+# Platform-specific dependency resolution
+# ---------------------------------------------------------------------------
+if(WIN32)
+    # Windows: use vcpkg toolchain (pass -DCMAKE_TOOLCHAIN_FILE=.../vcpkg.cmake)
+    find_package(SQLite3 REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    find_package(CURL REQUIRED)
+    find_package(ZLIB REQUIRED)
+    find_package(nlohmann_json REQUIRED)
 
-# Find OpenSSL
-find_package(OpenSSL REQUIRED)
+    # vmime - manually built for Windows, placed in deps/vmime-install
+    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/include")
+    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/lib/vmime.lib")
+    set(VMIME_FOUND TRUE)
 
-# Find libcurl
-find_package(CURL REQUIRED)
-
-# Use static OpenSSL libraries
-set(OPENSSL_SSL_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libssl.a")
-set(OPENSSL_CRYPTO_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libcrypto.a")
-
-# Use locally built vmime with OpenSSL TLS backend
-set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/include")
-set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/lib/libvmime.dylib")
-set(VMIME_FOUND TRUE)
-
-# Find gsasl
-find_package(PkgConfig)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(GSASL libgsasl)
-endif()
-
-# Fallback to Homebrew path if pkg-config fails
-if(NOT GSASL_FOUND)
-    set(GSASL_INCLUDE_DIRS "/opt/homebrew/include")
-    set(GSASL_LIBRARIES "/opt/homebrew/lib/libgsasl.dylib")
+    # gsasl - installed via vcpkg
+    find_path(GSASL_INCLUDE_DIR gsasl.h REQUIRED)
+    find_library(GSASL_LIBRARY gsasl REQUIRED)
+    set(GSASL_INCLUDE_DIRS "${GSASL_INCLUDE_DIR}")
+    set(GSASL_LIBRARIES "${GSASL_LIBRARY}")
     set(GSASL_FOUND TRUE)
+else()
+    # macOS: Find SQLite3, OpenSSL, libcurl via system / Homebrew
+    find_package(SQLite3 REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    find_package(CURL REQUIRED)
+
+    # Use static OpenSSL libraries
+    set(OPENSSL_SSL_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libssl.a")
+    set(OPENSSL_CRYPTO_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libcrypto.a")
+
+    # Use locally built vmime with OpenSSL TLS backend
+    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/include")
+    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/lib/libvmime.dylib")
+    set(VMIME_FOUND TRUE)
+
+    # Find gsasl
+    find_package(PkgConfig)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(GSASL libgsasl)
+    endif()
+
+    # Fallback to Homebrew path if pkg-config fails
+    if(NOT GSASL_FOUND)
+        set(GSASL_INCLUDE_DIRS "/opt/homebrew/include")
+        set(GSASL_LIBRARIES "/opt/homebrew/lib/libgsasl.dylib")
+        set(GSASL_FOUND TRUE)
+    endif()
 endif()
 
 # Build libemail
@@ -71,14 +95,35 @@ target_include_directories(EmailComm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/libemail
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/cppasyncworker-src
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
 )
+if(WIN32)
+    target_compile_definitions(EmailComm PUBLIC
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        VMIME_STATIC
+        _WIN32_WINNT=0x0A00
+        _CRT_SECURE_NO_WARNINGS
+    )
+    target_compile_options(EmailComm PUBLIC /utf-8)
+endif()
+if(WIN32)
+    target_link_libraries(EmailComm PUBLIC nlohmann_json::nlohmann_json)
+else()
+    target_include_directories(EmailComm PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
+    )
+endif()
 
-target_link_libraries(EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
+if(WIN32)
+    target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} ${GSASL_LIBRARIES}
+        OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
+else()
+    target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
+endif()
 
 # Email core library (static, used by example executable)
 add_library(email_core STATIC
@@ -155,6 +200,7 @@ set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
 # Include directories
@@ -163,7 +209,6 @@ target_include_directories(email_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
     ${CMAKE_CURRENT_SOURCE_DIR}/unified
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
@@ -173,24 +218,49 @@ target_include_directories(email_core_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
     ${CMAKE_CURRENT_SOURCE_DIR}/unified
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
 )
+if(WIN32)
+    target_link_libraries(email_core PUBLIC nlohmann_json::nlohmann_json)
+    target_link_libraries(email_core_shared PUBLIC nlohmann_json::nlohmann_json)
+else()
+    target_include_directories(email_core PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
+    )
+    target_include_directories(email_core_shared PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
+    )
+endif()
 
 # Link SQLite3, EmailComm, vmime, and the Rust MLS static library
-target_link_libraries(email_core SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib iconv)
-target_link_libraries(email_core_shared SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib z iconv)
+if(WIN32)
+    find_package(Iconv REQUIRED)
+    target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv)
+    target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv)
+else()
+    target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib iconv)
+    target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib z iconv)
+endif()
 
 # Link the Rust MLS static library into the shared lib (Flutter-facing).
-# macOS system libs that the Rust staticlib depends on are pulled in here.
 add_dependencies(email_core_shared mls_ffi_build)
-target_link_libraries(email_core_shared
-    ${MLS_FFI_LIB}
-    "-framework Security" "-framework Foundation" "-framework CoreFoundation"
-    -lpthread -ldl -lm
-)
+if(WIN32)
+    # Windows system libs that the Rust staticlib depends on
+    target_link_libraries(email_core_shared PUBLIC
+        ${MLS_FFI_LIB}
+        ws2_32 crypt32 ncrypt userenv secur32
+        bcrypt advapi32 ntdll
+    )
+else()
+    # macOS system libs that the Rust staticlib depends on
+    target_link_libraries(email_core_shared PUBLIC
+        ${MLS_FFI_LIB}
+        "-framework Security" "-framework Foundation" "-framework CoreFoundation"
+        -lpthread -ldl -lm
+    )
+endif()
 
 # Sign the shared library on macOS to prevent code signing crashes
 if(APPLE)

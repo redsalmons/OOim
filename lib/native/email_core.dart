@@ -495,10 +495,17 @@ typedef _GroupAfterSentDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer
 
 DynamicLibrary _loadLibrary() {
   final candidates = <String>[
-    'libemail_core.dylib',
-    '${Directory.current.path}/email/build/libemail_core.dylib',
-    '${File(Platform.resolvedExecutable).parent.path}/libemail_core.dylib',
-    '${File(Platform.resolvedExecutable).parent.parent.path}/Frameworks/libemail_core.dylib',
+    if (Platform.isMacOS) ...[
+      'libemail_core.dylib',
+      '${Directory.current.path}/email/build/libemail_core.dylib',
+      '${File(Platform.resolvedExecutable).parent.path}/libemail_core.dylib',
+      '${File(Platform.resolvedExecutable).parent.parent.path}/Frameworks/libemail_core.dylib',
+    ],
+    if (Platform.isWindows) ...[
+      'email_core.dll',
+      '${Directory.current.path}\\email\\build\\email_core.dll',
+      '${File(Platform.resolvedExecutable).parent.path}\\email_core.dll',
+    ],
   ];
   Object? lastError;
   for (final path in candidates) {
@@ -508,7 +515,7 @@ DynamicLibrary _loadLibrary() {
       lastError = e;
     }
   }
-  throw Exception('Failed to load libemail_core.dylib. Last error: $lastError');
+  throw Exception('Failed to load native email_core library. Last error: $lastError');
 }
 
 final DynamicLibrary _lib = _loadLibrary();

@@ -21,10 +21,17 @@ import 'package:ffi/ffi.dart';
 
 DynamicLibrary _loadLibrary() {
   final candidates = <String>[
-    'libemail_core.dylib',
-    '${Directory.current.path}/email/build/libemail_core.dylib',
-    '${File(Platform.resolvedExecutable).parent.path}/libemail_core.dylib',
-    '${File(Platform.resolvedExecutable).parent.parent.path}/Frameworks/libemail_core.dylib',
+    if (Platform.isMacOS) ...[
+      'libemail_core.dylib',
+      '${Directory.current.path}/email/build/libemail_core.dylib',
+      '${File(Platform.resolvedExecutable).parent.path}/libemail_core.dylib',
+      '${File(Platform.resolvedExecutable).parent.parent.path}/Frameworks/libemail_core.dylib',
+    ],
+    if (Platform.isWindows) ...[
+      'email_core.dll',
+      '${Directory.current.path}\\email\\build\\email_core.dll',
+      '${File(Platform.resolvedExecutable).parent.path}\\email_core.dll',
+    ],
   ];
   for (final path in candidates) {
     try {
@@ -33,7 +40,7 @@ DynamicLibrary _loadLibrary() {
       // try next
     }
   }
-  throw Exception('Failed to load libemail_core.dylib for UnifiedSessionManager');
+  throw Exception('Failed to load native email_core library for UnifiedSessionManager');
 }
 
 final DynamicLibrary _lib = _loadLibrary();

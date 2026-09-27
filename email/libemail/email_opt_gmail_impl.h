@@ -5,6 +5,7 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <functional>
 #include <vmime/vmime.hpp>
 

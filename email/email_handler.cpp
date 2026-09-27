@@ -8,8 +8,23 @@
 #include <time.h>
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#undef DELETE
+#undef TEXT
+#undef TO
+#undef OPTIONAL
+#undef STATUS
+#undef min
+#undef max
+#endif
 #include <vmime/vmime.hpp>
+#ifdef _WIN32
+#include <vmime/platforms/windows/windowsHandler.hpp>
+#else
 #include <vmime/platforms/posix/posixHandler.hpp>
+#endif
 #include <vmime/security/cert/defaultCertificateVerifier.hpp>
 #include <vmime/net/smtp/SMTPTransport.hpp>
 #include <vmime/contentDispositionField.hpp>
@@ -170,7 +185,11 @@ int email_send_via_smtp(const char* smtp_server, int smtp_port,
     try {
         static bool vmime_initialized = false;
         if (!vmime_initialized) {
+#ifdef _WIN32
+            vmime::platform::setHandler<vmime::platforms::windows::windowsHandler>();
+#else
             vmime::platform::setHandler<vmime::platforms::posix::posixHandler>();
+#endif
             vmime_initialized = true;
         }
 

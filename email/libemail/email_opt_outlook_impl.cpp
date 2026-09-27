@@ -10,7 +10,11 @@
 #include "email_handler.h"
 #include "logger.h"
 #include <vmime/vmime.hpp>
+#ifdef _WIN32
+#include <vmime/platforms/windows/windowsHandler.hpp>
+#else
 #include <vmime/platforms/posix/posixHandler.hpp>
+#endif
 #include <vmime/security/sasl/XOAuth2SASLMechanism.hpp>
 #include <vmime/net/imap/IMAPStore.hpp>
 #include <vmime/net/imap/IMAPConnection.hpp>
@@ -32,7 +36,12 @@
 #include <cctype>
 #include <cstring>
 #include <cstdlib>
+#ifdef _WIN32
+#include <io.h>
+#include <direct.h>
+#else
 #include <unistd.h>
+#endif
 #include <iconv.h>
 #include <fcntl.h>
 #include <algorithm>
@@ -497,7 +506,13 @@ bool EmailOptOutlookImpl::refresh_token() {
                              "-H \"Content-Type: application/x-www-form-urlencoded\" " +
                              "-d \"" + post_data + "\"";
 
-        FILE* pipe = popen(command.c_str(), "r");
+        FILE* pipe = 
+        #ifdef _WIN32
+                            _popen
+        #else
+                            popen
+        #endif
+                            (command.c_str(), "r");
         if (!pipe) {
             last_error_ = "Failed to execute curl command";
             LOG_INFO("Outlook refresh_token: Failed to execute curl command\n");
@@ -509,7 +524,13 @@ bool EmailOptOutlookImpl::refresh_token() {
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             response += buffer;
         }
-        pclose(pipe);
+        
+        #ifdef _WIN32
+                            _pclose
+        #else
+                            pclose
+        #endif
+                            (pipe);
 
         LOG_INFO("Outlook refresh_token: Token response body received (length: %zu)\n", response.length());
 
@@ -582,7 +603,13 @@ bool EmailOptOutlookImpl::refresh_graph_token() {
                              "-H \"Content-Type: application/x-www-form-urlencoded\" " +
                              "-d \"" + post_data + "\"";
 
-        FILE* pipe = popen(command.c_str(), "r");
+        FILE* pipe = 
+        #ifdef _WIN32
+                            _popen
+        #else
+                            popen
+        #endif
+                            (command.c_str(), "r");
         if (!pipe) {
             last_error_ = "Failed to execute curl command";
             LOG_INFO("Outlook refresh_graph_token: Failed to execute curl command\n");
@@ -594,7 +621,13 @@ bool EmailOptOutlookImpl::refresh_graph_token() {
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             response += buffer;
         }
-        pclose(pipe);
+        
+        #ifdef _WIN32
+                            _pclose
+        #else
+                            pclose
+        #endif
+                            (pipe);
 
         LOG_INFO("Outlook refresh_graph_token: Token response body received (length: %zu)\n", response.length());
 
@@ -1224,7 +1257,13 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     
     LOG_INFO("Outlook send_email_via_graph_api: sending via Graph API sendMail (injected msg_id=%s)\n", msg_id.c_str());
     
-    FILE* pipe = popen(command.c_str(), "r");
+    FILE* pipe = 
+    #ifdef _WIN32
+                        _popen
+    #else
+                        popen
+    #endif
+                        (command.c_str(), "r");
     if (!pipe) {
         last_error_ = "send_email_via_graph_api: failed to execute curl command";
         LOG_INFO("Outlook send_email_via_graph_api: %s\n", last_error_.c_str());
@@ -1236,7 +1275,13 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         response += buffer;
     }
-    int exit_code = pclose(pipe);
+    int exit_code = 
+    #ifdef _WIN32
+                            _pclose
+    #else
+                            pclose
+    #endif
+                            (pipe);
     
     if (exit_code != 0) {
         last_error_ = "send_email_via_graph_api: curl command failed with exit code " + std::to_string(exit_code);
@@ -1389,7 +1434,13 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         // Initialize vmime platform if not already done
         static bool vmime_initialized = false;
         if (!vmime_initialized) {
-            vmime::platform::setHandler<vmime::platforms::posix::posixHandler>();
+            vmime::platform::setHandler<
+            #ifdef _WIN32
+                            vmime::platforms::windows::windowsHandler
+            #else
+                            vmime::platforms::posix::posixHandler
+            #endif
+                        >();
             vmime_initialized = true;
         }
         
@@ -1783,7 +1834,13 @@ bool EmailOptOutlookImpl::exchange_code_for_token(const std::string& code,
                              "-d \"" + post_data + "\"";
 
         LOG_INFO("Outlook authority: Executing curl command...\n");
-        FILE* pipe = popen(command.c_str(), "r");
+        FILE* pipe = 
+        #ifdef _WIN32
+                            _popen
+        #else
+                            popen
+        #endif
+                            (command.c_str(), "r");
         if (!pipe) {
             last_error_ = "Failed to execute curl command";
             LOG_INFO("Outlook authority: Failed to execute curl command\n");
@@ -1795,7 +1852,13 @@ bool EmailOptOutlookImpl::exchange_code_for_token(const std::string& code,
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             response += buffer;
         }
-        pclose(pipe);
+        
+        #ifdef _WIN32
+                            _pclose
+        #else
+                            pclose
+        #endif
+                            (pipe);
 
         LOG_INFO("Outlook authority: Token response body: %s\n", response.c_str());
 
@@ -1956,7 +2019,13 @@ std::string EmailOptOutlookImpl::graph_request(const std::string& url, const std
         cmd += " -H \"Content-Type: application/json\" -d '\"" + body + "\"'";
     }
 
-    FILE* pipe = popen(cmd.c_str(), "r");
+    FILE* pipe = 
+    #ifdef _WIN32
+                        _popen
+    #else
+                        popen
+    #endif
+                        (cmd.c_str(), "r");
     if (!pipe) {
         LOG_INFO("Outlook graph_request: failed to run curl\n");
         return "";
@@ -1966,7 +2035,13 @@ std::string EmailOptOutlookImpl::graph_request(const std::string& url, const std
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         response += buffer;
     }
-    pclose(pipe);
+    
+    #ifdef _WIN32
+                        _pclose
+    #else
+                        pclose
+    #endif
+                        (pipe);
     LOG_INFO("Outlook graph_request: response length=%zu\n", response.length());
     return response;
 }
@@ -2396,7 +2471,13 @@ std::string EmailOptOutlookImpl::graph_get_message_mime(const std::string& id) {
                       "-H \"" + header + "\" " +
                       "-H \"Accept: text/plain\"";
 
-    FILE* pipe = popen(cmd.c_str(), "r");
+    FILE* pipe = 
+    #ifdef _WIN32
+                        _popen
+    #else
+                        popen
+    #endif
+                        (cmd.c_str(), "r");
     if (!pipe) {
         LOG_INFO("Outlook graph_get_message_mime: failed to run curl\n");
         return "";
@@ -2406,7 +2487,13 @@ std::string EmailOptOutlookImpl::graph_get_message_mime(const std::string& id) {
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         mime += buffer;
     }
-    pclose(pipe);
+    
+    #ifdef _WIN32
+                        _pclose
+    #else
+                        pclose
+    #endif
+                        (pipe);
     return mime;
 }
 

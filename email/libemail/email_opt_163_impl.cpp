@@ -11,11 +11,21 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <vector>
+#ifdef _WIN32
+#include <io.h>
+#include <direct.h>
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 #include <ctime>
 #include <chrono>
 #include <vmime/vmime.hpp>
+#ifdef _WIN32
+#include <vmime/platforms/windows/windowsHandler.hpp>
+#else
 #include <vmime/platforms/posix/posixHandler.hpp>
+#endif
 #include <vmime/security/cert/defaultCertificateVerifier.hpp>
 #include <vmime/net/imap/IMAPStore.hpp>
 #include <vmime/net/imap/IMAPConnection.hpp>
@@ -90,7 +100,11 @@ bool EmailOpt163Impl::connect_() {
         store_.reset();
         // Wait 5s before reconnecting to avoid server rejection due to concurrent connections
         LOG_INFO("163 connect_ - waiting 5s before reconnect...\n");
+#ifdef _WIN32
+        Sleep(5000);
+#else
         usleep(5000000);
+#endif
     }
 
     LOG_INFO("163 connect_ - checking auth code...\n");
@@ -621,7 +635,11 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <vmime/vmime.hpp>
+#ifdef _WIN32
+#include <vmime/platforms/windows/windowsHandler.hpp>
+#else
 #include <vmime/platforms/posix/posixHandler.hpp>
+#endif
 
 // ==========================================
 // 1. 自定义 Authenticator 类
@@ -709,7 +727,11 @@ public:
 static void init_vmime_platform() {
     static std::once_flag flag;
     std::call_once(flag, []() {
+#ifdef _WIN32
+        vmime::platform::setHandler<vmime::platforms::windows::windowsHandler>();
+#else
         vmime::platform::setHandler<vmime::platforms::posix::posixHandler>();
+#endif
     });
 }
 
@@ -1603,7 +1625,13 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
                         fValue = generated;
                     }
                     // Collect Received headers separately (there can be multiple)
-                    if (strcasecmp(fName.c_str(), "Received") == 0) {
+                    if (
+                    #ifdef _WIN32
+                                            _stricmp
+                    #else
+                                            strcasecmp
+                    #endif
+                                            (fName.c_str(), "Received") == 0) {
                         receivedHeaders.push_back(fValue);
                     }
                     headerMap[fName] = fValue;
