@@ -277,7 +277,14 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             int getResult = GetEmailToFile_c(configIndex, pe.folder.c_str(), pe.uuid.c_str(), filePath.c_str());
             if (getResult != 0) {
                 LOG_INFO("[DB] download_pending: failed to fetch uid=%s folder=%s: %d\n", pe.uuid.c_str(), pe.folder.c_str(), getResult);
-                if (getResult != -10) {
+                if (getResult == -8) {
+                    // Local write failure (e.g. disk full). Stop retrying this message —
+                    // re-downloading multi-MB bodies every round only burns bandwidth.
+                    // islocal=3 removes it from the pending queue (islocal IN (0,1));
+                    // to recover, reset islocal=0 after the disk problem is fixed.
+                    s_emailRepo.setIslocal(pe.uuid, accountStr, 3);
+                    LOG_INFO("[DB] download_pending: uid=%s marked islocal=3 (write failed, download paused)\n", pe.uuid.c_str());
+                } else if (getResult != -10) {
                     s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
                 }
                 continue;

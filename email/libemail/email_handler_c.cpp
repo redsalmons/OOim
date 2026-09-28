@@ -694,12 +694,25 @@ int GetEmailToFile_c(int configIndex, const char* folder, const char* uid, const
             return isNetwork ? -10 : -4;
         }
 
-        std::ofstream outFile(filePathStr, std::ios::binary);
+        std::ofstream outFile(filePathStr, std::ios::binary | std::ios::trunc);
         if (!outFile.is_open()) {
             return -7;
         }
         outFile << content;
         outFile.close();
+
+        // Detect silent write failure (e.g. disk full): ofstream sets failbit
+        // instead of throwing, so verify both the stream state and the size on disk.
+        std::error_code fsErr;
+        auto onDisk = std::filesystem::file_size(filePathStr, fsErr);
+        if (outFile.fail() || fsErr || onDisk != content.size()) {
+            LOG_INFO("GetEmailToFile_c: write failed for uid=%s to %s (expected %zu, on-disk %llu)%s\n",
+                     uidStr.c_str(), filePathStr.c_str(), content.size(),
+                     (unsigned long long)(fsErr ? 0 : onDisk),
+                     fsErr ? " [stat failed]" : "");
+            std::filesystem::remove(filePathStr, fsErr);  // drop the truncated stub
+            return -8;
+        }
 
         LOG_INFO("GetEmailToFile_c: saved uid=%s to %s (%zu bytes)\n", uidStr.c_str(), filePathStr.c_str(), content.size());
         return 0;
