@@ -196,6 +196,8 @@ int IdleWait_c(int configIndex, const char* folder, int timeoutSeconds);
 
 int FindSentFolder_c(int configIndex, char* outFolder, int outSize);
 
+int EmailGetMaxUid_c(const char* account, const char* folder, char* outUid, int outSize);
+
 int SendEmail_c(int configIndex, const char* content);
 
 int GetLastError_c(int configIndex, char* outBuf, int outSize);

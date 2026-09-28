@@ -1088,16 +1088,6 @@ extern "C" int EmailQueryThreadRoots_c(const char* account, char* outJson, int o
     return email_query_thread_roots(account, outJson, outSize);
 }
 
-// C wrapper for EmailGetMaxUid_c
-extern "C" int EmailGetMaxUid_c_wrapper(const char* account, const char* folder, char* outUid, int outSize) {
-    return EmailGetMaxUid_c(account, folder, outUid, outSize);
-}
-
-// C wrapper for email_get_max_uid
-extern "C" int email_get_max_uid(const char* account, const char* folder, char* outUid, int outSize) {
-    return EmailGetMaxUid_c(account, folder, outUid, outSize);
-}
-
 int IdleWait_c(int configIndex, const char* folder, int timeoutSeconds) {
     try {
         if (configIndex < 0 || configIndex >= static_cast<int>(oemailim::EmailHandler::g_EmailConfigIndices.size())) {

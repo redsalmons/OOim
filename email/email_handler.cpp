@@ -383,7 +383,7 @@ int email_config_load(const char* path, char** local_data_path,
         return -1;
     }
 
-    FILE* f = fopen(path, "r");
+    FILE* f = fopen(path, "rb");
     if (!f) {
         return -2;
     }

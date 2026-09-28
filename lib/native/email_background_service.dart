@@ -67,17 +67,42 @@ void supervisorEntryPoint(SendPort mainSendPort) {
     }
 
     final childReceivePort = ReceivePort();
+    final exitPort = ReceivePort();
+    final errorPort = ReceivePort();
     final isolate = Isolate.spawn(
       (SendPort supervisorPort) => childEntryPoint(supervisorPort),
       childReceivePort.sendPort,
-      onExit: mainSendPort,
-      onError: mainSendPort,
+      onExit: exitPort.sendPort,
+      onError: errorPort.sendPort,
     );
+
+    errorPort.listen((e) {
+      log('Child $childKey uncaught error: $e');
+    });
 
     isolate.then((iso) {
       childIsolates[childKey] = iso;
       childAlive[childKey] = true;
       log('Child isolate started for $childKey with configIndex: $configIndex');
+
+      exitPort.listen((_) {
+        exitPort.close();
+        errorPort.close();
+        childReceivePort.close();
+        // stopChild() removes the map entry before killing; a different isolate
+        // under the same key means this one was already superseded.
+        final unexpected = identical(childIsolates[childKey], iso);
+        if (!unexpected) return;
+        childIsolates.remove(childKey);
+        childSendPorts.remove(childKey);
+        childAlive.remove(childKey);
+        if (!running) return;
+        log('Child $childKey exited unexpectedly, respawning in 5s');
+        Timer(const Duration(seconds: 5), () {
+          if (!running || childAlive[childKey] == true) return;
+          startChild(email, authCode, accountType, folder, configIndex, storageDir: storageDir);
+        });
+      });
 
       childReceivePort.listen((message) {
         if (message is SendPort) {

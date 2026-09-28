@@ -164,6 +164,10 @@ extern "C" int email_find_sent_folder(int configIndex, char* outFolder, int outS
     return FindSentFolder_c(configIndex, outFolder, outSize);
 }
 
+extern "C" int email_get_max_uid(const char* account, const char* folder, char* outUid, int outSize) {
+    return EmailGetMaxUid_c(account, folder, outUid, outSize);
+}
+
 extern "C" int email_send_via_config(int configIndex, const char* content) {
     return SendEmail_c(configIndex, content);
 }

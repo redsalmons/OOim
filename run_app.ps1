@@ -6,6 +6,19 @@ $ErrorActionPreference = "Stop"
 # Ensure Flutter is in PATH
 $env:PATH = "C:\flutter\bin;" + $env:PATH
 
+# Load MSVC ARM64 environment (E:\vsc is a copied install not registered
+# with vswhere, so the toolchain must be activated manually).
+$VcvarsAll = "E:\vsc\VC\Auxiliary\Build\vcvarsall.bat"
+if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+    cmd /c "`"$VcvarsAll`" arm64 && set" | ForEach-Object {
+        if ($_ -match "^([^=]+)=(.*)$") {
+            Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+        }
+    }
+}
+# CMake needs ninja on PATH for the Ninja generator
+$env:PATH = "E:\vsc\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;" + $env:PATH
+
 # ---------------------------------------------------------------------------
 # Configuration - adjust these paths to match your environment
 # ---------------------------------------------------------------------------
@@ -15,10 +28,14 @@ $MlsFfiDir = Join-Path $EmailDir "mls_ffi"
 $BuildDir = Join-Path $EmailDir "build"
 
 # vcpkg toolchain file (required for CMake to find dependencies)
-$VcpkgToolchain = "C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+$VcpkgToolchain = "K:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+$VcpkgTriplet = "arm64-windows"
 
-# Flutter Windows build output
-$FlutterBuildDir = Join-Path $ProjectRoot "build\windows\x64\runner\Debug"
+# Flutter Windows build output (Ninja: single-config, bundle lands in runner\ directly)
+$FlutterBuildDir = Join-Path $ProjectRoot "build\windows\arm64\runner"
+$FlutterCmakeBuildDir = Join-Path $ProjectRoot "build\windows\arm64"
+$EphemeralDir = Join-Path $ProjectRoot "windows\flutter\ephemeral"
+$FlutterEngineArtifacts = "C:\flutter\bin\cache\artifacts\engine\windows-arm64"
 
 # ---------------------------------------------------------------------------
 # Step 1: Build Rust MLS FFI
@@ -43,8 +60,9 @@ if (-not (Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
     Write-Host "  Configuring CMake..."
     if (-not (Test-Path $BuildDir)) { New-Item -ItemType Directory -Path $BuildDir | Out-Null }
     cmake -S $EmailDir -B $BuildDir `
-        -G "Visual Studio 17 2022" -A x64 `
+        -G Ninja `
         -DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain `
+        -DVCPKG_TARGET_TRIPLET=$VcpkgTriplet `
         -DCMAKE_BUILD_TYPE=Release
     if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
 }
@@ -56,15 +74,48 @@ Write-Host "  email_core built successfully" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Step 3: Build Flutter Windows app
+# NOTE: `flutter build windows` hardcodes the "Visual Studio 17 2022" generator,
+# which enumerates VS via COM and cannot see the unregistered E:\vsc copy.
+# We run the equivalent pipeline manually with Ninja instead.
 # ---------------------------------------------------------------------------
 Write-Host "=== Building Flutter Windows app ===" -ForegroundColor Cyan
-Push-Location $ProjectRoot
-try {
-    flutter build windows --debug
-    if ($LASTEXITCODE -ne 0) { throw "Flutter Windows build failed" }
-} finally {
-    Pop-Location
+
+# 3a. Ensure flutter engine artifacts are in windows/flutter/ephemeral
+# (flutter_windows.dll.lib etc. are inputs to the wrapper/plugin targets).
+$ephemeralInputs = @(
+    "flutter_windows.dll", "flutter_windows.dll.lib", "flutter_windows.dll.exp",
+    "icudtl.dat",
+    "flutter_export.h", "flutter_windows.h", "flutter_messenger.h",
+    "flutter_plugin_registrar.h", "flutter_texture_registrar.h"
+)
+foreach ($f in $ephemeralInputs) {
+    $src = Join-Path $FlutterEngineArtifacts $f
+    $dst = Join-Path $EphemeralDir $f
+    if ((Test-Path $src) -and (-not (Test-Path $dst))) {
+        Copy-Item $src $dst -Force
+    }
 }
+if (-not (Test-Path (Join-Path $EphemeralDir "cpp_client_wrapper"))) {
+    Copy-Item (Join-Path $FlutterEngineArtifacts "cpp_client_wrapper") $EphemeralDir -Recurse -Force
+}
+
+# 3b. Configure + build the windows runner with Ninja
+if (-not (Test-Path (Join-Path $FlutterCmakeBuildDir "CMakeCache.txt"))) {
+    cmake -S (Join-Path $ProjectRoot "windows") -B $FlutterCmakeBuildDir `
+        -G Ninja `
+        -DFLUTTER_TARGET_PLATFORM=windows-arm64 `
+        -DCMAKE_BUILD_TYPE=Release
+    if ($LASTEXITCODE -ne 0) { throw "Flutter CMake configuration failed" }
+}
+cmake --build $FlutterCmakeBuildDir --config Release
+if ($LASTEXITCODE -ne 0) { throw "Flutter Windows build failed" }
+
+# 3c. Run flutter_assemble (dart compile + asset bundle via tool_backend.bat)
+# then install to assemble the runnable bundle next to oim.exe.
+ninja -C $FlutterCmakeBuildDir flutter/flutter_assemble
+if ($LASTEXITCODE -ne 0) { throw "flutter_assemble failed" }
+cmake --install $FlutterCmakeBuildDir --config Release
+if ($LASTEXITCODE -ne 0) { throw "Flutter bundle install failed" }
 Write-Host "  Flutter Windows app built successfully" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
@@ -93,25 +144,19 @@ if (Test-Path $emailCoreDll) {
 }
 
 # Copy vcpkg dependency DLLs
-$vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+$vcpkgBin = "K:\vcpkg\installed\$VcpkgTriplet\bin"
 $depDlls = @(
-    "libcrypto-3-x64.dll",
-    "libssl-3-x64.dll",
+    "libcrypto-3-arm64.dll",
+    "libssl-3-arm64.dll",
     "libcurl.dll",
     "z.dll",
     "iconv-2.dll",
+    "charset-1.dll",
     "sqlite3.dll",
     "gsasl-18.dll",
-    "glib-2.0-0.dll",
-    "gobject-2.0-0.dll",
-    "gio-2.0-0.dll",
-    "gmodule-2.0-0.dll",
-    "gthread-2.0-0.dll",
-    "intl-8.dll",
-    "charset-1.dll",
-    "pcre2-8.dll",
-    "ffi-8.dll",
-    "liblzma.dll"
+    "libssh2.dll",
+    "liblzma.dll",
+    "pcre2-8.dll"
 )
 
 foreach ($dll in $depDlls) {
@@ -124,11 +169,20 @@ foreach ($dll in $depDlls) {
     }
 }
 
-# Copy vmime DLL if dynamically linked
-$vmimeDll = Join-Path $EmailDir "deps\vmime-install\bin\vmime.dll"
+# Copy vmime DLL if dynamically linked (static build: no-op)
+$vmimeDll = "E:\vmime-install\bin\vmime.dll"
 if (Test-Path $vmimeDll) {
     Copy-Item $vmimeDll $FlutterBuildDir -Force
     Write-Host "  Copied vmime.dll"
+}
+
+# Copy CA bundle for TLS verification (expected next to oim.exe)
+$caBundle = "K:\vcpkg\downloads\tools\perl\5.42.2.1\perl\vendor\lib\Mozilla\CA\cacert.pem"
+if (Test-Path $caBundle) {
+    Copy-Item $caBundle (Join-Path $FlutterBuildDir "ca-bundle.crt") -Force
+    Write-Host "  Copied ca-bundle.crt"
+} else {
+    Write-Host "  WARNING: cacert.pem not found - TLS verification may fail" -ForegroundColor Yellow
 }
 
 # gsasl is now from vcpkg, already included in the depDlls list above

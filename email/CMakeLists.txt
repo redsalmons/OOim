@@ -37,9 +37,15 @@ if(WIN32)
     find_package(ZLIB REQUIRED)
     find_package(nlohmann_json REQUIRED)
 
-    # vmime - manually built for Windows, placed in deps/vmime-install
-    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/include")
-    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/lib/vmime.lib")
+    # vmime - manually built for Windows ARM64.
+    # Default location on this machine; override via VMIME_ROOT env var.
+    if(DEFINED ENV{VMIME_ROOT})
+        set(_vmime_root "$ENV{VMIME_ROOT}")
+    else()
+        set(_vmime_root "E:/vmime-install")
+    endif()
+    set(VMIME_INCLUDE_DIRS "${_vmime_root}/include")
+    set(VMIME_LIBRARIES "${_vmime_root}/lib/vmime.lib")
     set(VMIME_FOUND TRUE)
 
     # gsasl - installed via vcpkg
@@ -77,6 +83,16 @@ else()
     endif()
 endif()
 
+# cppasyncworker - header-only worker pool used by libemail.
+# Default location on this machine; override via CPPASYNCWORKER_SRC env var.
+if(DEFINED ENV{CPPASYNCWORKER_SRC})
+    set(CPPASYNCWORKER_SRC_DIR "$ENV{CPPASYNCWORKER_SRC}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/cppasyncworker-src")
+    set(CPPASYNCWORKER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/cppasyncworker-src")
+else()
+    set(CPPASYNCWORKER_SRC_DIR "C:/cppasyncworker-src")
+endif()
+
 # Build libemail
 add_library(EmailComm STATIC
     libemail/email_handler.cpp
@@ -95,7 +111,7 @@ target_include_directories(EmailComm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/libemail
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/cppasyncworker-src
+    ${CPPASYNCWORKER_SRC_DIR}
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
@@ -198,6 +214,7 @@ add_library(email_core_shared SHARED
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
+    ARCHIVE_OUTPUT_NAME email_core_shared
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build
     WINDOWS_EXPORT_ALL_SYMBOLS ON

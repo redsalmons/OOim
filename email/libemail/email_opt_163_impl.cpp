@@ -47,6 +47,33 @@
 // #include "imap_opt_163.h"  // Requires gmime - commented out
 // #include "imap_auth_163.h"  // Requires gmime - commented out
 
+// Exception text from the CRT/Winsock is in the process ANSI code page on Windows.
+// FFI consumers decode the JSON as UTF-8, so convert before embedding.
+static std::string errorTextToUtf8(const char* what) {
+    std::string s = what ? what : "";
+#ifdef _WIN32
+    if (s.empty()) return s;
+    int wlen = MultiByteToWideChar(CP_ACP, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (wlen <= 0) return s;
+    std::wstring w((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.c_str(), (int)s.size(), &w[0], wlen);
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), wlen, nullptr, 0, nullptr, nullptr);
+    if (ulen <= 0) return s;
+    std::string u((size_t)ulen, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), wlen, &u[0], ulen, nullptr, nullptr);
+    return u;
+#else
+    return s;
+#endif
+}
+
+static std::string failedJson(const std::string& error) {
+    nlohmann::json j;
+    j["status"] = "failed";
+    j["error"] = error;
+    return j.dump();
+}
+
 // Custom certificate verifier that accepts all certificates
 class TrustAllCertificateVerifier : public vmime::security::cert::defaultCertificateVerifier {
 public:
@@ -1734,64 +1761,28 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
 
         return response.dump();
     } catch (const vmime::exception& e) {
-        last_error_ = std::string("Failed to fetch email headers: ") + e.what();
-        LOG_INFO("163 fetch_email_headers - vmime exception: %s\n", e.what());
-        std::cerr << "163 fetch_email_headers - vmime exception: " << e.what() << std::endl;
+        const std::string what = errorTextToUtf8(e.what());
+        last_error_ = "Failed to fetch email headers: " + what;
+        LOG_INFO("163 fetch_email_headers - vmime exception: %s\n", what.c_str());
 
-        // If connection was reset, disconnect and retry once
-        std::string what = e.what();
-        if (what.find("ECONNRESET") != std::string::npos ||
-            what.find("connection reset") != std::string::npos ||
-            what.find("broken pipe") != std::string::npos) {
-            std::cerr << "163 fetch_email_headers - connection lost, reconnecting..." << std::endl;
-            // Guard disconnect(): on a broken-pipe socket it sends LOGOUT and throws another
-            // EPIPE, which would escape this handler and skip connect_() below, leaving the
-            // account permanently stuck. Mirror connect_() (L88): swallow the error, then reset
-            // store_/session_ so connect_() rebuilds a fresh connection.
-            try { if (store_) store_->disconnect(); } catch (...) {}
-            session_.reset();
-            store_.reset();
-            if (connect_()) {
-                // Retry fetch by recursing once (connect_ re-establishes connection)
-                // Avoid infinite recursion by not retrying on second failure
-                try {
-                    vmime::shared_ptr<vmime::net::imap::IMAPStore> imapStore2 =
-                        vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
-                    if (!imapStore2) return R"({"status":"failed","error":"not_imap_store"})";
-
-                    vmime::shared_ptr<vmime::net::imap::IMAPConnection> conn2 = imapStore2->getConnection();
-                    if (!conn2) return R"({"status":"failed","error":"no_connection"})";
-
-                    // Re-select INBOX
-                    vmime::shared_ptr<vmime::net::imap::IMAPCommand> selCmd2 =
-                        vmime::net::imap::IMAPCommand::createCommand("SELECT INBOX");
-                    conn2->sendCommand(selCmd2);
-                    auto selResp2 = conn2->readResponse();
-                    if (!selResp2 || selResp2->isBad()) {
-                        return R"({"status":"failed","error":"select_failed"})";
-                    }
-
-                    // Re-send FETCH — but we need the same message set.
-                    // For simplicity, just return success with empty list and let
-                    // the next polling cycle handle it.
-                    nlohmann::json retryResp;
-                    retryResp["status"] = "success";
-                    retryResp["count"] = 0;
-                    retryResp["emails"] = nlohmann::json::array();
-                    retryResp["stored"] = 0;
-                    return retryResp.dump();
-                } catch (const std::exception& e2) {
-                    last_error_ = std::string("Failed to fetch after reconnect: ") + e2.what();
-                    return std::string(R"({"status":"failed","error":"reconnect_fetch_failed"})");
-                }
-            }
-        }
-        return std::string(R"({"status":"failed","error":"vmime_exception:})") + e.what() + "\"}";
+        // Any transport-level failure leaves the IMAP connection in an unknown state.
+        // Drop it so the next connect_() (called at the start of every fetch cycle)
+        // rebuilds a fresh connection. Guard disconnect(): on a dead socket it sends
+        // LOGOUT and throws again, which must not escape this handler.
+        try { if (store_) store_->disconnect(); } catch (...) {}
+        session_.reset();
+        store_.reset();
+        is_valid_ = false;
+        return failedJson("vmime_exception: " + what);
     } catch (const std::exception& e) {
-        last_error_ = std::string("Failed to fetch email headers: ") + e.what();
-        LOG_INFO("163 fetch_email_headers - std exception: %s\n", e.what());
-        std::cerr << "163 fetch_email_headers - std exception: " << e.what() << std::endl;
-        return std::string(R"({"status":"failed","error":"std_exception: )") + std::string(e.what()) + R"("})";
+        const std::string what = errorTextToUtf8(e.what());
+        last_error_ = "Failed to fetch email headers: " + what;
+        LOG_INFO("163 fetch_email_headers - std exception: %s\n", what.c_str());
+        try { if (store_) store_->disconnect(); } catch (...) {}
+        session_.reset();
+        store_.reset();
+        is_valid_ = false;
+        return failedJson("std_exception: " + what);
     }
 }
 
