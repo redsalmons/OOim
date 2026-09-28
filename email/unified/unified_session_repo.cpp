@@ -181,6 +181,31 @@ bool UnifiedSessionRepo::loadByRootMessageId(const std::string& account,
     return found;
 }
 
+bool UnifiedSessionRepo::loadByMlsGroupId(const std::string& account,
+                                          const std::string& mlsGroupId,
+                                          UnifiedSession& out) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "SELECT session_id, account, subject, mode, members, "
+                      "signal_session_id, mls_group_id, root_message_id, status, "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
+                      "FROM unified_session WHERE account=? AND mls_group_id=? AND status=0 "
+                      "LIMIT 1;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, mlsGroupId.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        fillRecord(stmt, out);
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
 bool UnifiedSessionRepo::loadBySignalSessionId(const std::string& account,
                                                const std::string& signalSessionId,
                                                UnifiedSession& out) {

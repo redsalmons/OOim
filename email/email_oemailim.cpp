@@ -27,6 +27,8 @@
 #include <filesystem>
 #include <sstream>
 #include <map>
+#include <deque>
+#include <mutex>
 #include <vector>
 #include <random>
 #include <chrono>
@@ -1724,17 +1726,38 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
         return -2;
     }
 
-    // Per-account throttle: SMTP providers (163 etc.) limit send frequency per
-    // mailbox. Space sends at least MIN_SEND_INTERVAL_SEC apart per account and
-    // send at most one task per poll, so the 5s background loop becomes a
-    // gentle paced sender instead of a burst that trips rate limiting.
-    static std::map<std::string, std::chrono::steady_clock::time_point> s_lastSend;
-    static const int MIN_SEND_INTERVAL_SEC = 30;
-    {
+    // ---- Per-account send-rate budget + mailman overflow ----------------------
+    // Each account may send at most RATE_PER_SEC per second and RATE_PER_MIN per
+    // minute (attempts count, success or not). A normal task whose account is
+    // over budget is handed to the first under-budget mailman in the session's
+    // pool; if the whole pool is over budget this account backs off 5s and the
+    // task waits. Handshake/control tasks always go out from the owner: the
+    // peer answers to the From address, so it must be the identity account.
+    static std::mutex s_rateMu;
+    static std::map<std::string, std::deque<std::chrono::steady_clock::time_point>> s_sendLog;
+    static std::map<std::string, std::chrono::steady_clock::time_point> s_backoffUntil;
+    static const int RATE_PER_SEC = 1;
+    static const int RATE_PER_MIN = 30;
+    static const int POOL_EXHAUSTED_BACKOFF_SEC = 5;
+
+    auto rateOk = [&](const std::string& acc) {
         auto now = std::chrono::steady_clock::now();
-        auto it = s_lastSend.find(account);
-        if (it != s_lastSend.end() &&
-            std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count() < MIN_SEND_INTERVAL_SEC) {
+        auto& log = s_sendLog[acc];
+        while (!log.empty() && now - log.front() > std::chrono::seconds(60)) log.pop_front();
+        if ((int)log.size() >= RATE_PER_MIN) return false;
+        int lastSec = 0;
+        for (auto it = log.rbegin(); it != log.rend() && now - *it < std::chrono::seconds(1); ++it) lastSec++;
+        return lastSec < RATE_PER_SEC;
+    };
+    auto recordSend = [&](const std::string& acc) {
+        std::lock_guard<std::mutex> lk(s_rateMu);
+        s_sendLog[acc].push_back(std::chrono::steady_clock::now());
+    };
+
+    {
+        std::lock_guard<std::mutex> lk(s_rateMu);
+        auto bo = s_backoffUntil.find(account);
+        if (bo != s_backoffUntil.end() && std::chrono::steady_clock::now() < bo->second) {
             snprintf(outJson, outSize, R"({"status":"throttled","sent":0})");
             return 0;
         }
@@ -1745,6 +1768,56 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
     if (tasks.empty()) {
         snprintf(outJson, outSize, R"({"status":"success","sent":0})");
         return 0;
+    }
+
+    const std::string& headChart = tasks.front().xSessionChart;
+    const bool isHandshake =
+        headChart == XMailer::PREKEY_BUNDLE || headChart == XMailer::SESSION_INIT ||
+        headChart == XMailer::MLS_KEY_PACKAGE || headChart == XMailer::MLS_WELCOME ||
+        headChart == XMailer::MLS_COMMIT;
+
+    if (!isHandshake) {
+        std::lock_guard<std::mutex> lk(s_rateMu);
+        if (!rateOk(account)) {
+            // Resolve the session's mailman pool.
+            const auto& t0 = tasks.front();
+            std::vector<std::string> pool;
+            static UnifiedSessionRepo s_usPoolRepo;
+            UnifiedSession us;
+            if (t0.sessionId.rfind("us_", 0) == 0) {
+                if (s_usPoolRepo.load(t0.sessionId, us)) pool = us.mailmen;
+            } else if (XMailer::isMls(t0.xSessionChart)) {
+                try {
+                    auto env = json::parse(t0.body);
+                    std::string xsid = env.value("x_session_id", "");
+                    static GroupSessionRepo s_grpPoolRepo;
+                    GroupSessionRecord grp;
+                    if (!xsid.empty() && s_grpPoolRepo.loadBySessionId(xsid, account, grp) &&
+                        s_usPoolRepo.loadByMlsGroupId(account, grp.groupId, us)) {
+                        pool = us.mailmen;
+                    }
+                } catch (...) {}
+            }
+
+            std::string next;
+            for (const auto& m : pool) {
+                if (m == account || m.empty()) continue;
+                if (rateOk(m)) { next = m; break; }
+            }
+            if (!next.empty() && s_taskRepo.reassignAccount(t0.id, next)) {
+                LOG_INFO("[Task] rate budget exceeded for %s; task id=%lld handed to mailman %s\n",
+                         account, (long long)t0.id, next.c_str());
+                snprintf(outJson, outSize, R"({"status":"reassigned","sent":0,"to":"%s"})", next.c_str());
+                return 0;
+            }
+            // Whole pool over budget (or no pool): back off and retry later.
+            s_backoffUntil[account] = std::chrono::steady_clock::now() +
+                                      std::chrono::seconds(POOL_EXHAUSTED_BACKOFF_SEC);
+            LOG_INFO("[Task] rate budget exceeded for %s and no mailman available; backing off %ds\n",
+                     account, POOL_EXHAUSTED_BACKOFF_SEC);
+            snprintf(outJson, outSize, R"({"status":"throttled","sent":0})");
+            return 0;
+        }
     }
 
     int sentCount = 0;
@@ -1879,9 +1952,10 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
 
         std::string emailStr = emailContent.dump();
         int sendRc = SendEmail_c(configIndex, emailStr.c_str());
-        // A send attempt counts against the account throttle whether it succeeded
-        // or failed: hammering a rate-limited server only extends the cooldown.
-        s_lastSend[account] = std::chrono::steady_clock::now();
+        // A send attempt counts against the account's rate budget whether it
+        // succeeded or failed: hammering a rate-limited server only extends the
+        // cooldown.
+        recordSend(account);
         if (sendRc == 0) {
             s_taskRepo.deleteTask(t.id);
             sentCount++;

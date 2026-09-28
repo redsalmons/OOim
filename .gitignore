@@ -55,6 +55,9 @@ app.*.map.json
 *.exe
 build/
 
+# Rust build artifacts (mls_ffi)
+email/mls_ffi/target/
+
 # Xcode related
 *.xcodeproj/
 *.xcworkspace/

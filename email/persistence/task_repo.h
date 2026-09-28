@@ -55,6 +55,9 @@ public:
 
     // Delete task by id
     bool deleteTask(int64_t id);
+
+    // Hand a pending task to another mailman account (rate-limit overflow).
+    bool reassignAccount(int64_t id, const std::string& newAccount);
 };
 
 #endif // PERSISTENCE_TASK_REPO_H

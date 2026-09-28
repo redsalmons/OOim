@@ -60,7 +60,7 @@ std::vector<TaskRecord> TaskRepo::queryPending(const std::string& account, int l
         "SELECT id, account, recipient, subject, body, in_reply_to, message_id, x_message_id, session_id, x_session_chart, status, pre_encrypted, local_body, retry_count, next_retry_at, last_error, created_at FROM task "
         "WHERE account = ? AND status = 0 "
         "AND (next_retry_at IS NULL OR next_retry_at = '' OR next_retry_at <= datetime('now','localtime')) "
-        "ORDER BY id ASC LIMIT ?;";
+        "ORDER BY CASE WHEN x_session_chart IN ('1.0.0','1.0.1','2.0.0','2.0.1','2.0.2') THEN 0 ELSE 1 END, id ASC LIMIT ?;";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
@@ -225,4 +225,19 @@ bool TaskRepo::deleteTask(int64_t id) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
+}
+
+bool TaskRepo::reassignAccount(int64_t id, const std::string& newAccount) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE task SET account = ? WHERE id = ? AND status = 0;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, newAccount.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
 }

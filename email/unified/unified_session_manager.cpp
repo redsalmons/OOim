@@ -300,13 +300,10 @@ SendResult UnifiedSessionManager::sendMessage(const std::string& account,
             return result;
         }
 
-        // 邮差轮换：密文永远用主会话加密，物理发送账户在邮差池中轮换
-        std::string mailman = account;
-        if (!session.mailmen.empty()) {
-            int n = (int)session.mailmen.size();
-            mailman = session.mailmen[session.mailmanCursor % n];
-            repo_.updateMailmanCursor(sessionId, (session.mailmanCursor + 1) % n);
-        }
+        // Enqueue on the owner account. If the owner exceeds its send-rate
+        // budget the task processor hands the task to the next mailman in
+        // session.mailmen at send time (see email_task_process_pending).
+        const std::string& mailman = account;
 
         // Outbox: persist before sending. The task body holds the ciphertext
         // (pre_encrypted=1), local_body holds the plaintext for the local archive,

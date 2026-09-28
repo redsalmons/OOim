@@ -30,6 +30,12 @@ public:
 
     // Find an active session by its signal_session_id (sig_xxx).
     // Used after PREKEY_BUNDLE exchange to locate the unified session for auto-initiation.
+    // Find the session bound to an MLS group (mode=mls). Used to resolve the
+    // mailman pool for MLS tasks, which only carry the group's x_session_id.
+    bool loadByMlsGroupId(const std::string& account,
+                          const std::string& mlsGroupId,
+                          UnifiedSession& out);
+
     bool loadBySignalSessionId(const std::string& account,
                                const std::string& signalSessionId,
                                UnifiedSession& out);
