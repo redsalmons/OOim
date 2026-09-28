@@ -4,6 +4,7 @@
 #include "email_core.h"
 #include "email_core_common.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "db_connection.h"
 #include "session_repo.h"
 #include "logger.h"
@@ -569,7 +570,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
             msg_id = message_id;
             if (msg_id.front() != '<') msg_id = "<" + msg_id + ">";
         } else {
-            msg_id = "<" + generate_random_string(24) + "@gmail.com>";
+            msg_id = generate_x_message_id(email_);
         }
 
         // Legacy encryption disabled — all encryption handled by Signal protocol

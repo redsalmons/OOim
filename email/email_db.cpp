@@ -85,6 +85,7 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN sent_chunks INTEGER DEFAULT 0;", NULL, NULL, NULL);
 
         // File transfer tables
         const char* sql_file_transfer = "CREATE TABLE IF NOT EXISTS file_transfer ("
@@ -100,12 +101,14 @@ int email_db_init(const char* path) {
                                         "chunk_size INTEGER NOT NULL,"
                                         "status INTEGER DEFAULT 0,"
                                         "message_id TEXT,"
+                                        "sent_chunks INTEGER DEFAULT 0,"
                                         "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                         "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                         ");";
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN sent_chunks INTEGER DEFAULT 0;", NULL, NULL, NULL);
         sqlite3_exec(g_db, sql_file_transfer, NULL, NULL, &err);
         if (err) sqlite3_free(err);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err);
@@ -394,6 +397,7 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN sent_chunks INTEGER DEFAULT 0;", NULL, NULL, NULL);
     }
 
     // Task table for queued email sending
@@ -451,6 +455,7 @@ int email_db_init(const char* path) {
                                     "original_path TEXT,"
                                     "compression TEXT,"
                                     "compressed_md5 TEXT,"
+                                    "sent_chunks INTEGER DEFAULT 0,"
                                     "created_at TEXT DEFAULT (datetime('now','localtime')),"
                                     "updated_at TEXT DEFAULT (datetime('now','localtime'))"
                                     ");";
@@ -462,6 +467,7 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN original_path TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compression TEXT;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN compressed_md5 TEXT;", NULL, NULL, NULL);
+        sqlite3_exec(g_db, "ALTER TABLE file_transfer ADD COLUMN sent_chunks INTEGER DEFAULT 0;", NULL, NULL, NULL);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_account ON file_transfer(account);", NULL, NULL, &err_msg);
         if (err_msg) sqlite3_free(err_msg);
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_transfer_session ON file_transfer(session_id);", NULL, NULL, &err_msg);

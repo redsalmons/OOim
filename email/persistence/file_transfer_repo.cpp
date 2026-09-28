@@ -42,7 +42,7 @@ bool FileTransferRepo::queryByFileId(const std::string& fileId, FileTransferReco
     sqlite3* db = conn.get();
     if (!db || fileId.empty()) return false;
 
-    const char* sql = "SELECT id, file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, created_at, updated_at, original_path, compression, compressed_md5 "
+    const char* sql = "SELECT id, file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, created_at, updated_at, original_path, compression, compressed_md5, sent_chunks "
                       "FROM file_transfer WHERE file_id = ?;";
     sqlite3_stmt* stmt;
     bool found = false;
@@ -66,6 +66,7 @@ bool FileTransferRepo::queryByFileId(const std::string& fileId, FileTransferReco
             out.originalPath = sqlite3_column_text(stmt, 14) ? (const char*)sqlite3_column_text(stmt, 14) : "";
             out.compression = sqlite3_column_text(stmt, 15) ? (const char*)sqlite3_column_text(stmt, 15) : "";
             out.compressedMd5 = sqlite3_column_text(stmt, 16) ? (const char*)sqlite3_column_text(stmt, 16) : "";
+            out.sentChunks = sqlite3_column_int(stmt, 17);
             found = true;
         }
         sqlite3_finalize(stmt);
@@ -79,7 +80,7 @@ std::vector<FileTransferRecord> FileTransferRepo::queryPendingByAccount(const st
     sqlite3* db = conn.get();
     if (!db) return result;
 
-    const char* sql = "SELECT id, file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, created_at, updated_at "
+    const char* sql = "SELECT id, file_id, session_id, account, sender, file_name, file_size, file_md5, total_chunks, chunk_size, status, message_id, created_at, updated_at, sent_chunks "
                       "FROM file_transfer WHERE account = ? AND status = 0 ORDER BY id ASC;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
@@ -100,6 +101,7 @@ std::vector<FileTransferRecord> FileTransferRepo::queryPendingByAccount(const st
             r.messageId = sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
             r.createdAt = sqlite3_column_text(stmt, 12) ? (const char*)sqlite3_column_text(stmt, 12) : "";
             r.updatedAt = sqlite3_column_text(stmt, 13) ? (const char*)sqlite3_column_text(stmt, 13) : "";
+            r.sentChunks = sqlite3_column_int(stmt, 14);
             result.push_back(r);
         }
         sqlite3_finalize(stmt);
@@ -120,6 +122,22 @@ bool FileTransferRepo::updateStatus(const std::string& fileId, int status) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
+}
+
+int FileTransferRepo::incrementSentChunks(const std::string& fileId) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || fileId.empty()) return -1;
+
+    const char* sql = "UPDATE file_transfer SET sent_chunks = sent_chunks + 1, updated_at = datetime('now','localtime') "
+                      "WHERE file_id = ? RETURNING sent_chunks;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, fileId.c_str(), -1, SQLITE_TRANSIENT);
+    int value = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) value = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
 }
 
 bool FileTransferRepo::updateMessageId(const std::string& fileId, const std::string& messageId) {

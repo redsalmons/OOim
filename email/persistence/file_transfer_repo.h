@@ -21,6 +21,7 @@ struct FileTransferRecord {
     std::string originalPath;
     std::string compression;    // "zlib" / "none"
     std::string compressedMd5;  // MD5 of the chunked stream
+    int sentChunks = 0;         // sender side: chunk tasks delivered so far
     std::string createdAt;
     std::string updatedAt;
 };
@@ -51,6 +52,9 @@ public:
 
     // Update file_transfer status.
     bool updateStatus(const std::string& fileId, int status);
+
+    // Sender side: sent_chunks += 1. Returns the new value, or -1 on error.
+    int incrementSentChunks(const std::string& fileId);
 
     // Insert or replace a file_chunk. Returns true on success.
     bool upsertChunk(const std::string& fileId, int chunkIndex,

@@ -2,6 +2,7 @@
 #include "email_core.h"
 #include "email_core_common.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "db_connection.h"
 #include "session_repo.h"
 #include "group_session_repo.h"
@@ -947,13 +948,7 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             msg_id = message_id;
             if (msg_id.front() != '<') msg_id = "<" + msg_id + ">";
         } else {
-            std::string domain = "163.com";
-            size_t atPos = email_.find('@');
-            if (atPos != std::string::npos) {
-                domain = email_.substr(atPos + 1);
-            }
-            msg_id = "<" + std::to_string(std::time(nullptr)) + "." + 
-                                std::to_string(rand()) + "@" + domain + ">";
+            msg_id = generate_x_message_id(email_);
         }
 
         // For group messages, ensure all members' Sender Keys are ready before sending

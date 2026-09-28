@@ -2,6 +2,7 @@
 #include "email_core.h"
 #include "logger.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "db_connection.h"
 #include "persistence/file_transfer_repo.h"
 #include "persistence/task_repo.h"
@@ -100,7 +101,6 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
     std::string sessionIdStr(sessionId ? sessionId : "");
     std::string inReplyToStr(inReplyTo ? inReplyTo : "");
     std::string subjectStr(subject ? subject : "");
-    std::string domain = accountStr.substr(accountStr.find('@') + 1);
 
     filechunk::PreparedFile pf;
     if (!filechunk::prepareFileForSend(filePath, fileName, pf)) return fail(-2, "file_not_found");
@@ -130,7 +130,7 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
     }
 
     // "file" metadata task (1.0.4). x_reply_to = last message of the conversation.
-    std::string fileMsgId = "<file_" + fileId + "@" + domain + ">";
+    std::string fileMsgId = generate_x_message_id(accountStr);
     {
         json meta = {
             {"msg_type", "file"}, {"file_id", fileId}, {"file_name", pf.fileName},
@@ -155,7 +155,7 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
             LOG_INFO("email_file_split_and_send: failed to read chunk %d\n", i);
             continue;
         }
-        std::string truckMsgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" + domain + ">";
+        std::string truckMsgId = generate_x_message_id(accountStr);
         json truck = {
             {"msg_type", "truck"}, {"file_id", fileId}, {"chunk_index", i},
             {"chunk_data", base64_encode(chunk.data(), chunk.size())},
@@ -209,16 +209,6 @@ extern "C" int email_file_transfer_receive_file(const char* fileId, const char* 
             s_fileTransferRepo.updateMessageId(fileIdStr, messageIdStr);
             LOG_INFO("email_file_transfer_receive_file: updated message_id=%s for file_id=%s\n",
                      messageIdStr.c_str(), fileIdStr.c_str());
-        }
-
-        // If this is the sender downloading their own sent file message, mark as complete
-        std::string accountStr(account ? account : "");
-        std::string senderStr(sender ? sender : "");
-        if (!accountStr.empty() &&
-            existing.sender == accountStr &&
-            senderStr == accountStr) {
-            LOG_INFO("email_file_transfer_receive_file: sender %s downloading own sent message, updating status to complete\n", accountStr.c_str());
-            s_fileTransferRepo.updateStatus(fileIdStr, 1);
         }
 
         if (outJson && outSize > 0) {
@@ -358,6 +348,41 @@ extern "C" int email_file_transfer_receive_truck(const char* fileId, int chunkIn
     return 0;
 }
 
+// Sender side: one chunk task (1.0.5 / 2.0.5) was delivered. taskBody is the task's
+// stored body: the truck JSON itself (Signal) or an MLS envelope whose "plaintext"
+// field holds the truck JSON. Marks the transfer complete once every chunk is out.
+extern "C" int email_file_transfer_mark_chunk_sent(const char* taskBody) {
+    if (!taskBody || !*taskBody) return -1;
+
+    std::string fileId;
+    try {
+        auto body = json::parse(taskBody);
+        if (body.contains("file_id")) {
+            fileId = body.value("file_id", "");
+        } else if (body.contains("plaintext") && body["plaintext"].is_string()) {
+            auto inner = json::parse(body["plaintext"].get<std::string>());
+            fileId = inner.value("file_id", "");
+        }
+    } catch (const std::exception& e) {
+        LOG_INFO("email_file_transfer_mark_chunk_sent: body parse error: %s\n", e.what());
+        return -2;
+    }
+    if (fileId.empty()) return -3;
+
+    int sent = s_fileTransferRepo.incrementSentChunks(fileId);
+    if (sent < 0) {
+        LOG_INFO("email_file_transfer_mark_chunk_sent: no file_transfer row for file_id=%s\n", fileId.c_str());
+        return -4;
+    }
+
+    FileTransferRecord rec;
+    if (s_fileTransferRepo.queryByFileId(fileId, rec) && sent >= rec.totalChunks) {
+        s_fileTransferRepo.updateStatus(fileId, 1);
+    }
+    LOG_INFO("email_file_transfer_mark_chunk_sent: file_id=%s sent=%d/%d\n", fileId.c_str(), sent, rec.totalChunks);
+    return 0;
+}
+
 // Query file transfer status by file_id
 extern "C" int email_file_transfer_query(const char* fileId, char* outJson, int outSize) {
     if (!fileId || !outJson || outSize <= 0) return -1;
@@ -368,7 +393,9 @@ extern "C" int email_file_transfer_query(const char* fileId, char* outJson, int 
         return -2;
     }
 
-    int receivedCount = s_fileTransferRepo.countReceivedChunks(fileId);
+    // Sender rows progress by delivered chunk tasks; receiver rows by stored chunks.
+    bool isSender = !rec.sender.empty() && rec.sender == rec.account;
+    int receivedCount = isSender ? rec.sentChunks : s_fileTransferRepo.countReceivedChunks(fileId);
 
     json resp;
     resp["status"] = "success";
@@ -400,7 +427,8 @@ extern "C" int email_file_transfer_query_pending(const char* account, char* outJ
 
     json arr = json::array();
     for (const auto& rec : records) {
-        int receivedCount = s_fileTransferRepo.countReceivedChunks(rec.fileId);
+        bool isSender = !rec.sender.empty() && rec.sender == rec.account;
+        int receivedCount = isSender ? rec.sentChunks : s_fileTransferRepo.countReceivedChunks(rec.fileId);
         json item;
         item["file_id"] = rec.fileId;
         item["session_id"] = rec.sessionId;

@@ -4,6 +4,7 @@
 #include "email_handler_c.h"
 #include "email_handler.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "email_opt_163_impl.h"
 #include "email_opt_outlook_impl.h"
 #include "email_opt_gmail_impl.h"
@@ -166,6 +167,14 @@ extern "C" int email_find_sent_folder(int configIndex, char* outFolder, int outS
 
 extern "C" int email_get_max_uid(const char* account, const char* folder, char* outUid, int outSize) {
     return EmailGetMaxUid_c(account, folder, outUid, outSize);
+}
+
+extern "C" int email_generate_x_message_id(const char* account, char* out, int outSize) {
+    if (!account || !out || outSize <= 0) return -1;
+    std::string id = generate_x_message_id(account);
+    if ((int)id.size() >= outSize) return -2;
+    memcpy(out, id.c_str(), id.size() + 1);
+    return 0;
 }
 
 extern "C" int email_send_via_config(int configIndex, const char* content) {
@@ -572,9 +581,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                     } catch (...) {}
 
                                     std::string replySubject = "Re: " + eml_subject;
-                                    char replyMsgId[256];
-                                    snprintf(replyMsgId, sizeof(replyMsgId), "<%lld.%s@oim>",
-                                             (long long)time(nullptr), accountStr.c_str());
+                                    std::string replyMsgId = generate_x_message_id(accountStr);
 
                                     int64_t taskId = s_taskRepo.insert(
                                         accountStr, eml_from, replySubject, replyBody,
@@ -610,9 +617,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                         // 用 sigA + B 的 prekey 做 X3DH + 双棘轮 + 加密首条消息
                                         std::string startMsg = us.subject;
                                         char initBuf[65536];
-                                        char initMsgId[256];
-                                        snprintf(initMsgId, sizeof(initMsgId), "<%lld.%s@oim>",
-                                                 (long long)time(nullptr), accountStr.c_str());
+                                        std::string initMsgId = generate_x_message_id(accountStr);
 
                                         // Chain: INIT replies to the LAST message — B's bundle
                                         // reply (its body x_message_id).
@@ -620,7 +625,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                         int initRc = signal_session_initiate_with_id(
                                             accountStr.c_str(), peer.c_str(), prekeySessionId.c_str(),
                                             startMsg.c_str(), initBuf, sizeof(initBuf),
-                                            initMsgId, initParent.c_str());
+                                            initMsgId.c_str(), initParent.c_str());
                                         if (initRc == 0) {
                                             try {
                                                 auto initResp = json::parse(initBuf);
@@ -1965,6 +1970,10 @@ extern "C" int email_task_process_pending(int configIndex, const char* account, 
             sentCount++;
             sentTasks.push_back({{"id", t.id}, {"message_id", t.messageId}});
             LOG_INFO("[Task] sent successfully and deleted id=%lld\n", (long long)t.id);
+
+            if (t.xSessionChart == XMailer::ATTACH_CHUNK || t.xSessionChart == XMailer::MLS_FILE_CHUNK) {
+                email_file_transfer_mark_chunk_sent(t.body.c_str());
+            }
 
             if (XMailer::isMls(t.xSessionChart)) {
                 // Resolve group + (for app messages) store the plaintext in the local .eml

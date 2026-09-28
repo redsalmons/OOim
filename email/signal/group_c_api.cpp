@@ -24,6 +24,7 @@
 #include "persistence/file_transfer_repo.h"
 #include "file_chunk_util.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "logger.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -43,9 +44,7 @@ EmailRepo g_emailRepo;
 TaskRepo g_taskRepo;
 
 std::string newMessageId(const std::string& account) {
-    static std::mt19937_64 rng{std::random_device{}()};
-    std::string domain = account.substr(account.find('@') + 1);
-    return "<" + std::to_string(std::time(nullptr)) + "." + std::to_string(rng() % 100000000) + "@" + domain + ">";
+    return generate_x_message_id(account);
 }
 
 std::string joinRecipients(const std::vector<std::string>& v, const std::string& exclude) {
@@ -348,7 +347,7 @@ extern "C" int group_send_file(const char* account, const char* unifiedSessionId
         return fail(outJson, outSize, -6, "file not found");
     }
 
-    std::string acc(account), domain = acc.substr(acc.find('@') + 1);
+    std::string acc(account);
     std::string fileId = "file_" + std::to_string(std::time(nullptr) * 1000) + "_" + std::to_string(rand() % 100000);
     std::string parent = inReplyTo ? inReplyTo : "";
     if (parent.empty()) parent = rec.xReplyId;
@@ -366,7 +365,7 @@ extern "C" int group_send_file(const char* account, const char* unifiedSessionId
         return fail(outJson, outSize, -7, "db_insert_failed");
     }
 
-    std::string fileMsgId = "<file_" + fileId + "@" + domain + ">";
+    std::string fileMsgId = newMessageId(acc);
     json meta = {{"msg_type", "file"}, {"file_id", fileId}, {"file_name", pf.fileName},
                  {"file_size", pf.fileSize}, {"file_md5", pf.fileMd5},
                  {"compression", pf.compression}, {"compressed_size", pf.compressedSize},
@@ -391,7 +390,7 @@ extern "C" int group_send_file(const char* account, const char* unifiedSessionId
             LOG_INFO("[MLS] group_send_file: failed to read chunk %d\n", i);
             continue;
         }
-        std::string truckMsgId = "<truck_" + fileId + "_" + std::to_string(i) + "@" + domain + ">";
+        std::string truckMsgId = newMessageId(acc);
         json truck = {{"msg_type", "truck"}, {"file_id", fileId}, {"chunk_index", i},
                       {"chunk_data", base64_encode(chunk.data(), chunk.size())},
                       {"chunk_md5", compute_md5(std::string(chunk.begin(), chunk.end()))},

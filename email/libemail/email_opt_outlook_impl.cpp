@@ -3,6 +3,7 @@
 #include "email_core.h"
 #include "email_core_common.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "db_connection.h"
 #include "session_repo.h"
 #include <nlohmann/json.hpp>
@@ -1177,7 +1178,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         msg_id = message_id;
         if (msg_id.front() != '<') msg_id = "<" + msg_id + ">";
     } else {
-        msg_id = "<" + generate_random_string(24) + "@outlook.com>";
+        msg_id = generate_x_message_id(email_);
     }
     
     std::string irt = in_reply_to;
@@ -1516,7 +1517,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
             msg_id = message_id;
             if (msg_id.front() != '<') msg_id = "<" + msg_id + ">";
         } else {
-            msg_id = "<" + generate_random_string(24) + "@outlook.com>";
+            msg_id = generate_x_message_id(email_);
         }
         msg->getHeader()->MessageId()->setValue(msg_id);
         

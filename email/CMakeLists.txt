@@ -105,6 +105,7 @@ add_library(EmailComm STATIC
     libemail/compress_zlib.cpp
     libemail/crypto_aes.cpp
     libemail/crypto_utils.cpp
+    libemail/message_id.cpp
 )
 
 target_include_directories(EmailComm PUBLIC

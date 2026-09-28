@@ -3,6 +3,7 @@
 #include "email_core_common.h"
 #include "logger.h"
 #include "x_mailer.h"
+#include "message_id.h"
 #include "task_repo.h"
 #include "mls_group.h"
 #include "persistence/signal_session_repo.h"
@@ -25,11 +26,7 @@ std::string UnifiedSessionManager::generateSessionId() {
 }
 
 std::string UnifiedSessionManager::generateMessageId(const std::string& account) {
-    static std::mt19937_64 rng{std::random_device{}()};
-    std::string domain = account.substr(account.find('@') + 1);
-    if (domain.empty()) domain = "oim";
-    return "<" + std::to_string(std::time(nullptr)) + "." +
-           std::to_string(rng() % 100000000) + "@" + domain + ">";
+    return generate_x_message_id(account);
 }
 
 static std::string joinRecipients(const std::vector<std::string>& v,

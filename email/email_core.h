@@ -334,6 +334,10 @@ int email_file_transfer_receive_truck(const char* fileId, int chunkIndex,
                                        const char* outputDir,
                                        char* outJson, int outSize);
 
+// Sender side: record that one chunk task (1.0.5 / 2.0.5) was delivered.
+// taskBody is the task's stored body (truck JSON or MLS envelope with "plaintext").
+int email_file_transfer_mark_chunk_sent(const char* taskBody);
+
 // Query file transfer status by file_id.
 int email_file_transfer_query(const char* fileId, char* outJson, int outSize);
 
