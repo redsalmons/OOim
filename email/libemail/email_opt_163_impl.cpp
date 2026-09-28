@@ -100,13 +100,22 @@ bool EmailOpt163Impl::connect() {
     return connect_();
 }
 
-bool EmailOpt163Impl::connect_() {
-    LOG_INFO("163 connect_ - starting connection process\n");
+void EmailOpt163Impl::dropStore_(vmime::shared_ptr<vmime::net::session>& session,
+                                 vmime::shared_ptr<vmime::net::store>& store) {
+    try { if (store) store->disconnect(); } catch (...) {}
+    session.reset();
+    store.reset();
+}
+
+bool EmailOpt163Impl::connectStore_(vmime::shared_ptr<vmime::net::session>& session,
+                                    vmime::shared_ptr<vmime::net::store>& store,
+                                    const char* who) {
+    LOG_INFO("163 %s - starting connection process\n", who);
     // Check if already connected — verify with NOOP to detect dead connections
-    if (store_ && store_->isConnected()) {
+    if (store && store->isConnected()) {
         // Send NOOP to check if connection is truly alive
         try {
-            auto imapStore = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
+            auto imapStore = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store);
             if (imapStore) {
                 auto conn = imapStore->getConnection();
                 if (conn) {
@@ -114,20 +123,18 @@ bool EmailOpt163Impl::connect_() {
                     conn->sendCommand(noopCmd);
                     auto resp = conn->readResponse();
                     if (resp && !resp->isBad()) {
-                        LOG_INFO("163 connect_ - already connected (NOOP OK)\n");
+                        LOG_INFO("163 %s - already connected (NOOP OK)\n", who);
                         return true;
                     }
                 }
             }
         } catch (const std::exception& e) {
-            LOG_INFO("163 connect_ - NOOP failed, reconnecting: %s\n", e.what());
+            LOG_INFO("163 %s - NOOP failed, reconnecting: %s\n", who, e.what());
         }
         // NOOP failed — disconnect and fall through to reconnect
-        try { store_->disconnect(); } catch (...) {}
-        session_.reset();
-        store_.reset();
+        dropStore_(session, store);
         // Wait 5s before reconnecting to avoid server rejection due to concurrent connections
-        LOG_INFO("163 connect_ - waiting 5s before reconnect...\n");
+        LOG_INFO("163 %s - waiting 5s before reconnect...\n", who);
 #ifdef _WIN32
         Sleep(5000);
 #else
@@ -135,14 +142,14 @@ bool EmailOpt163Impl::connect_() {
 #endif
     }
 
-    LOG_INFO("163 connect_ - checking auth code...\n");
+    LOG_INFO("163 %s - checking auth code...\n", who);
     is_valid_ = !auth_code_.empty();
     if (!is_valid_) {
-        LOG_INFO("163 connect_ - no auth code, connection failed\n");
+        LOG_INFO("163 %s - no auth code, connection failed\n", who);
         return false;
     }
 
-    LOG_INFO("163 connect_ - establishing TCP connection to %s:%d...\n", 
+    LOG_INFO("163 %s - establishing TCP connection to %s:%d...\n", who, 
              imap_server_.empty() ? "imap.163.com" : imap_server_.c_str(), 
              imap_port_ > 0 ? imap_port_ : 993);
 
@@ -151,60 +158,60 @@ bool EmailOpt163Impl::connect_() {
         init_vmime_platform();
 
         // Create session using static method and save to member variable
-        session_ = vmime::net::session::create();
+        session = vmime::net::session::create();
 
         // Set connection timeout
-        session_->getProperties()["connection.timeout"] = "30";
-        session_->getProperties()["imap.timeout"] = "30";
+        session->getProperties()["connection.timeout"] = "30";
+        session->getProperties()["imap.timeout"] = "30";
 
         // Set client ID to simulate Apple Mail (required by 163 IMAP)
         // Must set both imap and imaps prefixes, and explicitly enable ID extension
         const std::vector<std::string> idPrefixes = {"net.imap.", "net.imaps."};
         for (const auto& prefix : idPrefixes) {
-            session_->getProperties()[prefix + "client.id.enable"] = "true";
-            session_->getProperties()[prefix + "client.id.name"] = "iOS Mail";
-            session_->getProperties()[prefix + "client.id.version"] = "17.0";
-            session_->getProperties()[prefix + "client.id.os"] = "iOS";
-            session_->getProperties()[prefix + "client.id.os-version"] = "17.0";
-            session_->getProperties()[prefix + "client.id.vendor"] = "Apple Inc.";
+            session->getProperties()[prefix + "client.id.enable"] = "true";
+            session->getProperties()[prefix + "client.id.name"] = "iOS Mail";
+            session->getProperties()[prefix + "client.id.version"] = "17.0";
+            session->getProperties()[prefix + "client.id.os"] = "iOS";
+            session->getProperties()[prefix + "client.id.os-version"] = "17.0";
+            session->getProperties()[prefix + "client.id.vendor"] = "Apple Inc.";
         }
 
         // Set authentication properties for plain auth
-        session_->getProperties()["auth.username"] = email_;
-        session_->getProperties()["auth.password"] = auth_code_;
+        session->getProperties()["auth.username"] = email_;
+        session->getProperties()["auth.password"] = auth_code_;
 
         // Disable SSL certificate validation at session level
-        session_->getProperties()["ssl.validate-certificates"] = "false";
-        session_->getProperties()["ssl.check-server-identity"] = "false";
-        session_->getProperties()["ssl.ca-file"] = "";
-        session_->getProperties()["ssl.ca-path"] = "";
+        session->getProperties()["ssl.validate-certificates"] = "false";
+        session->getProperties()["ssl.check-server-identity"] = "false";
+        session->getProperties()["ssl.ca-file"] = "";
+        session->getProperties()["ssl.ca-path"] = "";
 
         // Create IMAP store with imaps:// protocol for SSL/TLS
         std::string imap_host = imap_server_.empty() ? "imap.163.com" : imap_server_;
         int imap_p = imap_port_ > 0 ? imap_port_ : 993;
-        vmime::utility::url store_url("imaps", imap_host, imap_p);
-        store_ = session_->getStore(store_url);
+        vmime::utility::url storeurl("imaps", imap_host, imap_p);
+        store = session->getStore(storeurl);
 
         // Set authentication properties on the store
-        store_->setProperty("options.need-authentication", true);
-        store_->setProperty("auth.username", email_);
-        store_->setProperty("auth.password", auth_code_);
+        store->setProperty("options.need-authentication", true);
+        store->setProperty("auth.username", email_);
+        store->setProperty("auth.password", auth_code_);
 
         // Set custom certificate verifier that accepts all certificates
         vmime::shared_ptr<TrustAllCertificateVerifier> verifier = vmime::make_shared<TrustAllCertificateVerifier>();
-        store_->setCertificateVerifier(verifier);
+        store->setCertificateVerifier(verifier);
 
         // Connect to the server
-        store_->connect();
+        store->connect();
 
-        LOG_INFO("163 connect_ - TCP connection established and login successful\n");
+        LOG_INFO("163 %s - TCP connection established and login successful\n", who);
 
         // Send ID command immediately after login (required by 163 IMAP to avoid Unsafe Login)
         // Use sendCommand for proper tagging, then read raw socket to consume response
         // (vmime's parser can't parse * ID (...) untagged response, leaves parser state corrupted)
         try {
             vmime::shared_ptr<vmime::net::imap::IMAPStore> imapStore =
-                vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
+                vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store);
             if (imapStore) {
                 vmime::shared_ptr<vmime::net::imap::IMAPConnection> conn = imapStore->getConnection();
                 if (conn) {
@@ -216,7 +223,7 @@ bool EmailOpt163Impl::connect_() {
                     // Get tag AFTER sendCommand increments it
                     vmime::shared_ptr<vmime::net::imap::IMAPTag> tag = conn->getTag();
                     std::string tagStr = *tag;
-                    LOG_INFO("163 connect_ - ID tagStr=[%s]\n", tagStr.c_str());
+                    LOG_INFO("163 %s - ID tagStr=[%s]\n", who, tagStr.c_str());
 
                     // Read raw socket to consume ID response without using vmime parser
                     // This avoids corrupting the parser's internal state
@@ -229,7 +236,7 @@ bool EmailOpt163Impl::connect_() {
                             if (!nonConstSock->waitForRead(10000)) break;
                             std::string data;
                             nonConstSock->receive(data);
-                            LOG_INFO("163 connect_ - ID raw read: %s\n", data.c_str());
+                            LOG_INFO("163 %s - ID raw read: %s\n", who, data.c_str());
                             // Check for tagged response (tagStr + " OK" or tagStr + " BAD")
                             if (data.find(tagStr + " OK") != std::string::npos ||
                                 data.find(tagStr + " BAD") != std::string::npos ||
@@ -237,32 +244,38 @@ bool EmailOpt163Impl::connect_() {
                                 gotTagged = true;
                             }
                         }
-                        LOG_INFO("163 connect_ - ID command done, gotTagged=%d\n", gotTagged);
+                        LOG_INFO("163 %s - ID command done, gotTagged=%d\n", who, gotTagged);
                     }
                 }
             }
         } catch (const vmime::exception& e) {
-            LOG_INFO("163 connect_ - ID command failed: %s\n", e.what());
+            LOG_INFO("163 %s - ID command failed: %s\n", who, e.what());
         }
 
         is_valid_ = true;
         return true;
 
     } catch (const vmime::exception& e) {
-        LOG_INFO("163 connect_ - vmime exception: %s\n", e.what());
+        LOG_INFO("163 %s - vmime exception: %s\n", who, e.what());
         last_error_ = std::string("vmime exception: ") + e.what();
         is_valid_ = false;
-        session_.reset();
-        store_.reset();
+        dropStore_(session, store);
         return false;
     } catch (const std::exception& e) {
-        LOG_INFO("163 connect_ - std exception: %s\n", e.what());
+        LOG_INFO("163 %s - std exception: %s\n", who, e.what());
         last_error_ = std::string("std exception: ") + e.what();
         is_valid_ = false;
-        session_.reset();
-        store_.reset();
+        dropStore_(session, store);
         return false;
     }
+}
+
+bool EmailOpt163Impl::connect_() {
+    return connectStore_(session_, store_, "connect_");
+}
+
+bool EmailOpt163Impl::connect_download_() {
+    return connectStore_(dl_session_, dl_store_, "connect_download_");
 }
 
 bool EmailOpt163Impl::authority(int timeout_seconds) {
@@ -358,13 +371,12 @@ std::vector<std::string> EmailOpt163Impl::fetch_emails_since_uid(const std::stri
 std::string EmailOpt163Impl::get_email(const std::string& folder, const std::string& uid) {
     LOG_INFO("163 get_email - folder=%s, uid=%s, email_=%s, auth_code_set=%d\n", folder.c_str(), uid.c_str(), email_.c_str(), !auth_code_.empty());
     
-    // Ensure connection is established
-    if (!store_ || !store_->isConnected()) {
-        LOG_INFO("163 get_email - not connected, attempting to reconnect\n");
-        if (!connect_()) {
-            LOG_INFO("163 get_email - reconnect failed\n");
-            return "";
-        }
+    // Body downloads use their own IMAP connection (dl_store_), never the
+    // poll/IDLE connection: the two run on different isolates concurrently.
+    // connect_download_() probes with NOOP, so a dead socket is rebuilt here.
+    if (!connect_download_()) {
+        LOG_INFO("163 get_email - connect_download_ failed\n");
+        return "";
     }
 
     try {
@@ -372,7 +384,7 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
         LOG_INFO("163 get_email - using shared connection\n");
 
         vmime::shared_ptr<vmime::net::imap::IMAPStore> imapStore =
-            vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
+            vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(dl_store_);
         if (!imapStore) {
             last_error_ = "Failed to cast to IMAPStore";
             LOG_INFO("163 get_email - failed to cast to IMAPStore\n");
@@ -389,7 +401,7 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
         // First ensure the correct folder is SELECTed, then FETCH
         try {
             vmime::shared_ptr<vmime::net::imap::IMAPStore> imapStore =
-                vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
+                vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(dl_store_);
             if (!imapStore) {
                 last_error_ = "Failed to cast to IMAPStore";
                 LOG_INFO("163 get_email - failed to cast to IMAPStore\n");
@@ -416,7 +428,6 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
                 LOG_INFO("163 get_email - SELECT command failed\n");
                 return "";
             }
-            current_selected_folder_ = folder;
             LOG_INFO("163 get_email - SELECT successful\n");
 
             // Send FETCH command directly using UID
@@ -443,6 +454,7 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
                 if (!nonConstSock->waitForRead(30000)) {
                     last_error_ = "Failed to get email: timeout waiting for FETCH response header";
                     LOG_INFO("163 get_email - timeout waiting for response header\n");
+                    dropStore_(dl_session_, dl_store_);
                     return "";
                 }
                 std::string data;
@@ -506,6 +518,7 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
             if (!gotComplete && (fullResponse.size() - contentStart) < literalSize) {
                 last_error_ = "Failed to get email: incomplete response, got " + std::to_string(fullResponse.size() - contentStart) + " of " + std::to_string(literalSize) + " bytes";
                 LOG_INFO("163 get_email - incomplete response: got %zu of %zu bytes\n", fullResponse.size() - contentStart, literalSize);
+                dropStore_(dl_session_, dl_store_);
                 return "";
             }
 
@@ -536,11 +549,13 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
         } catch (const vmime::exception& e) {
             last_error_ = std::string("Failed to get email: ") + e.what();
             LOG_INFO("163 get_email - vmime exception: %s\n", e.what());
+            dropStore_(dl_session_, dl_store_);
             return "";
         }
     } catch (const std::exception& e) {
         last_error_ = std::string("Failed to get email: ") + e.what();
         LOG_INFO("163 get_email - std exception: %s\n", e.what());
+        dropStore_(dl_session_, dl_store_);
         return "";
     }
 }

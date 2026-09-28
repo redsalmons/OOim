@@ -98,6 +98,18 @@ private:
     // vmime connection objects (each instance has its own connection)
     vmime::shared_ptr<vmime::net::session> session_;
     vmime::shared_ptr<vmime::net::store> store_;
+
+    // Dedicated IMAP connection for body downloads (get_email). The Download
+    // isolate and the INBOX poll isolate run concurrently and vmime's
+    // IMAPConnection is not thread-safe, so they must not share a socket.
+    vmime::shared_ptr<vmime::net::session> dl_session_;
+    vmime::shared_ptr<vmime::net::store> dl_store_;
+    bool connect_download_();
+    bool connectStore_(vmime::shared_ptr<vmime::net::session>& session,
+                       vmime::shared_ptr<vmime::net::store>& store,
+                       const char* who);
+    void dropStore_(vmime::shared_ptr<vmime::net::session>& session,
+                    vmime::shared_ptr<vmime::net::store>& store);
     vmime::shared_ptr<vmime::net::folder> folder_;
 
     // Instance-specific tracking of currently selected folder
