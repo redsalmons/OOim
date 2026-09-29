@@ -734,14 +734,6 @@ class EmailModuleState extends State<EmailModule>
       }
     }
 
-    // Migrate legacy encrypted sessions to unified_session table
-    try {
-      final migResult = native.EmailCore.migrateEncryptedSessions();
-      _logToFile('_loadEmailsFromDb: migrateEncryptedSessions result: $migResult');
-    } catch (e) {
-      _logToFile('_loadEmailsFromDb: migrateEncryptedSessions error: $e');
-    }
-
     List<native.EmailMessage> allEmails = [];
 
     for (final account in config.accounts) {

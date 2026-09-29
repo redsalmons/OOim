@@ -19,12 +19,13 @@ bool verify_with_ecc_public_key(const std::string& pubPem, const std::string& da
 std::string base64_encode(const unsigned char* data, size_t len);
 std::vector<uint8_t> base64_decode(const std::string& encoded);
 
-// Wire-format body wrapping (PGP-inline style): notice text + base64 armor so
-// protocol JSON is not readable as JSON in external mail clients. For bodies
-// containing a large already-base64 string field (e.g. chunk ciphertext), that
-// field is split into a second "OIM DATA" block to avoid double base64 encoding.
-std::string oim_wrap_body(const std::string& body);
-std::string oim_unwrap_body(const std::string& text); // passthrough when no markers
+// Wire format for protocol mail: the text part is a fixed human-readable notice
+// and the real protocol JSON travels as a zip-packed "message.oim" attachment,
+// so external mail clients never see the JSON. Zip also deflates the base64
+// redundancy of chunk ciphertext, shrinking wire size versus plain bodies.
+const char* oim_notice_text();
+std::vector<uint8_t> oim_zip_pack(const std::string& text);
+std::string oim_zip_unpack(const std::vector<uint8_t>& zipData); // empty on failure
 std::string compute_md5(const std::string& input);
 std::string ecc_encrypt_with_public_key(const std::string& pubPem, const std::string& plaintext);
 std::string ecc_decrypt_with_private_key(const std::string& privPem, const std::string& keyPassword, const std::string& ciphertext);

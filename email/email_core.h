@@ -293,9 +293,6 @@ int email_task_status(const char* account, const char* messageId, char* outJson,
 // Migration: Update islocal for existing emails
 int email_migrate_islocal();
 
-// Migration: Create unified sessions for legacy encrypted sessions (encrypt_method=1)
-int email_migrate_encrypted_sessions(char* outJson, int outSize);
-
 // --- File Transfer Protocol ---
 
 // Prepare file metadata message JSON (plaintext for encryption).

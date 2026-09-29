@@ -1409,6 +1409,25 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
         body->getContents()->extract(osa);
         osa.flush();
 
+        // Protocol payload: zip-packed JSON in a ".oim" attachment becomes the
+        // text body instead of a visible attachment.
+        bool isOimPayload = filename.size() >= 4;
+        if (isOimPayload) {
+            std::string suffix = filename.substr(filename.size() - 4);
+            for (auto& c : suffix) c = (char)std::tolower((unsigned char)c);
+            isOimPayload = suffix == ".oim";
+        }
+        if (isOimPayload) {
+            std::string inner = oim_zip_unpack(
+                std::vector<uint8_t>(data.begin(), data.end()));
+            if (!inner.empty()) {
+                // The zip JSON is the real body; it replaces the notice text
+                // that the text/plain part already put in textBody.
+                textBody = inner;
+                return;
+            }
+        }
+
         json att;
         att["filename"] = filename;
         att["content_type"] = ct.generate();
@@ -1468,11 +1487,6 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
             } catch (...) {
             }
         }
-
-        // Unwrap OIM-armored bodies (notice + -----BEGIN OIM MESSAGE----- base64
-        // block) back to the original protocol JSON. Bodies without markers pass
-        // through unchanged.
-        content = oim_unwrap_body(content);
 
         if (subType == vmime::mediaTypes::TEXT_PLAIN && textBody.empty()) {
             textBody = content;

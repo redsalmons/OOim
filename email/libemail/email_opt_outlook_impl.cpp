@@ -1186,8 +1186,20 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         irt = "<" + irt + ">";
     }
 
-    // Wrap protocol bodies (notice + base64 armor) when X-Mailer is set.
-    const std::string wireBody = x_session_chart.empty() ? body : oim_wrap_body(body);
+    // Protocol bodies travel as a zip-packed message.oim attachment when
+    // X-Mailer is set; the body shows only the notice text.
+    std::string wireBody = body;
+    nlohmann::json jAttachments = nlohmann::json::array();
+    if (!x_session_chart.empty()) {
+        wireBody = oim_notice_text();
+        std::vector<uint8_t> zipped = oim_zip_pack(body);
+        jAttachments.push_back({
+            {"@odata.type", "#microsoft.graph.fileAttachment"},
+            {"name", "message.oim"},
+            {"contentType", "application/octet-stream"},
+            {"contentBytes", base64_encode_bytes(zipped)}
+        });
+    }
 
     std::string email_msg;
     email_msg += "From: " + email_ + "\r\n";
@@ -1247,6 +1259,9 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         {"toRecipients", jRecipients},
         {"internetMessageHeaders", jHeaders}
     };
+    if (!jAttachments.empty()) {
+        jBody["message"]["attachments"] = jAttachments;
+    }
 
     std::string json_body = jBody.dump();
     LOG_INFO("Outlook send_email_via_graph_api: JSON body: %s\n", json_body.c_str());
@@ -1507,11 +1522,23 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         // Set subject
         builder.setSubject(vmime::text(subject, vmime::charset("UTF-8")));
         
-        // Set body — protocol bodies are wrapped (notice + base64 armor) so
-        // external clients never see raw JSON; plain mail is sent verbatim.
+        // Set body — protocol bodies travel as a zip-packed message.oim
+        // attachment so external clients only see the notice text; plain mail
+        // is sent verbatim.
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
-        const std::string wireBody = x_session_chart.empty() ? body : oim_wrap_body(body);
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(wireBody));
+        if (x_session_chart.empty()) {
+            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(body));
+        } else {
+            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(oim_notice_text()));
+            std::vector<uint8_t> zipped = oim_zip_pack(body);
+            builder.attach(vmime::make_shared<vmime::defaultAttachment>(
+                vmime::make_shared<vmime::stringContentHandler>(
+                    std::string(reinterpret_cast<const char*>(zipped.data()), zipped.size())),
+                vmime::encoding(vmime::encodingTypes::BASE64),
+                vmime::mediaType("application/octet-stream"),
+                vmime::NULL_TEXT,
+                vmime::word("message.oim")));
+        }
         
         // Build the message
         vmime::shared_ptr<vmime::message> msg = builder.construct();

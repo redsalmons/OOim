@@ -264,8 +264,7 @@ typedef _EmailQueryThreadDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 typedef _EmailGenerateSessionsNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailGenerateSessionsDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
 
-typedef _EmailMigrateEncryptedSessionsNative = Int32 Function(Pointer<Utf8>, Int32);
-typedef _EmailMigrateEncryptedSessionsDart = int Function(Pointer<Utf8>, int);
+
 
 typedef _EmailCreateSessionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int64, Pointer<Utf8>, Int32);
 typedef _EmailCreateSessionDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, int, Pointer<Utf8>, int);
@@ -580,7 +579,7 @@ final _emailQueryLocalemail = _lib.lookupFunction<_EmailQueryLocalemailNative, _
 final _emailQueryThreadRoots = _lib.lookupFunction<_EmailQueryThreadRootsNative, _EmailQueryThreadRootsDart>('email_query_thread_roots');
 final _emailQueryThread = _lib.lookupFunction<_EmailQueryThreadNative, _EmailQueryThreadDart>('email_query_thread');
 final _emailGenerateSessions = _lib.lookupFunction<_EmailGenerateSessionsNative, _EmailGenerateSessionsDart>('email_generate_sessions');
-  final _emailMigrateEncryptedSessions = _lib.lookupFunction<_EmailMigrateEncryptedSessionsNative, _EmailMigrateEncryptedSessionsDart>('email_migrate_encrypted_sessions');
+
 final _emailCreateSession = _lib.lookupFunction<_EmailCreateSessionNative, _EmailCreateSessionDart>('email_create_session');
 final _emailCodeQueryByAccount = _lib.lookupFunction<_EmailCodeQueryByAccountNative, _EmailCodeQueryByAccountDart>('email_code_query_by_account');
 final _emailQuerySessionIndexUuid = _lib.lookupFunction<_EmailQuerySessionIndexUuidNative, _EmailQuerySessionIndexUuidDart>('email_query_session_index_uuid');
@@ -1363,16 +1362,6 @@ class EmailCore {
       return outJson.toDartString();
     } finally {
       malloc.free(accountPtr);
-      malloc.free(outJson);
-    }
-  }
-
-  static String migrateEncryptedSessions() {
-    final outJson = malloc.allocate<Utf8>(4096);
-    try {
-      _emailMigrateEncryptedSessions(outJson, 4096);
-      return outJson.toDartString();
-    } finally {
       malloc.free(outJson);
     }
   }

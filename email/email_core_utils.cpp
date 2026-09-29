@@ -250,117 +250,97 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-format body wrapping: notice text + base64 armor block.
-//   <notice>
-//   -----BEGIN OIM MESSAGE-----
-//   <base64(json-meta)>
-//   -----BEGIN OIM DATA-----        <- only when a big string field was split
-//   <field value verbatim (already base64)>
-//   -----END OIM MESSAGE-----
+// Wire format: notice text part + single-entry zip attachment ("message.oim")
+// carrying the protocol JSON. The zip entry uses raw deflate.
 // ---------------------------------------------------------------------------
 
-static const char* OIM_NOTICE =
-    "这是一条私密消息，请在OceanTalk客户端中查看。\n"
-    "This is an OceanTalk-encrypted message — open it in the OceanTalk client.\n\n";
-static const char* OIM_BEGIN = "-----BEGIN OIM MESSAGE-----";
-static const char* OIM_DATA  = "-----BEGIN OIM DATA-----";
-static const char* OIM_END   = "-----END OIM MESSAGE-----";
-
-// A string field larger than this is moved into the DATA block so an already
-// base64-encoded payload (chunk ciphertext etc.) is not encoded twice.
-static const size_t OIM_DATA_FIELD_MIN = 64 * 1024;
-
-static std::string b64_wrap76(const std::string& b64) {
-    std::string out;
-    out.reserve(b64.size() + b64.size() / 76 + 1);
-    for (size_t i = 0; i < b64.size(); i += 76) {
-        out.append(b64, i, std::min<size_t>(76, b64.size() - i));
-        out.push_back('\n');
-    }
-    return out;
+const char* oim_notice_text() {
+    return "这是一条私密消息，请在OceanTalk客户端中查看。\n"
+           "This is an OceanTalk-encrypted message — open it in the OceanTalk client.\n";
 }
 
-std::string oim_wrap_body(const std::string& body) {
-    std::string meta = body;
-    std::string dataField, dataValue;
-    try {
-        nlohmann::json j = nlohmann::json::parse(body);
-        if (j.is_object()) {
-            std::string bestKey;
-            size_t bestLen = OIM_DATA_FIELD_MIN;
-            for (auto it = j.begin(); it != j.end(); ++it) {
-                if (it.value().is_string()) {
-                    const std::string& v = it.value().get_ref<const std::string&>();
-                    if (v.size() > bestLen) { bestLen = v.size(); bestKey = it.key(); }
-                }
-            }
-            if (!bestKey.empty()) {
-                dataField = bestKey;
-                dataValue = j[bestKey].get<std::string>();
-                j[bestKey] = "";
-                j["_oim_data"] = bestKey;
-                meta = j.dump();
-            }
-        }
-    } catch (...) {
-        // Non-JSON body: wrap it whole.
-    }
-
-    std::string out;
-    out.reserve(OIM_DATA_FIELD_MIN + meta.size() + dataValue.size() + 256);
-    out += OIM_NOTICE;
-    out += OIM_BEGIN;
-    out += '\n';
-    out += b64_wrap76(base64_encode(reinterpret_cast<const unsigned char*>(meta.data()), meta.size()));
-    if (!dataField.empty()) {
-        out += OIM_DATA;
-        out += '\n';
-        out += dataValue;
-        out += '\n';
-    }
-    out += OIM_END;
-    out += '\n';
-    return out;
+static void oim_put16(std::vector<uint8_t>& v, uint16_t x) {
+    v.push_back((uint8_t)(x & 0xff));
+    v.push_back((uint8_t)((x >> 8) & 0xff));
+}
+static void oim_put32(std::vector<uint8_t>& v, uint32_t x) {
+    for (int i = 0; i < 4; i++) v.push_back((uint8_t)((x >> (8 * i)) & 0xff));
 }
 
-std::string oim_unwrap_body(const std::string& text) {
-    size_t b = text.find(OIM_BEGIN);
-    if (b == std::string::npos) return text;
-    size_t e = text.find(OIM_END, b);
-    if (e == std::string::npos) return text;
-
-    std::string region = text.substr(b + strlen(OIM_BEGIN), e - (b + strlen(OIM_BEGIN)));
-    std::string payload = region, data;
-    size_t dm = region.find(OIM_DATA);
-    if (dm != std::string::npos) {
-        payload = region.substr(0, dm);
-        data = region.substr(dm + strlen(OIM_DATA));
+std::vector<uint8_t> oim_zip_pack(const std::string& text) {
+    std::vector<uint8_t> def(compressBound((uLong)text.size()));
+    z_stream zs = {};
+    if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return {};
     }
+    zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(text.data()));
+    zs.avail_in = (uInt)text.size();
+    zs.next_out = def.data();
+    zs.avail_out = (uInt)def.size();
+    int rc = deflate(&zs, Z_FINISH);
+    if (rc != Z_STREAM_END) { deflateEnd(&zs); return {}; }
+    def.resize(zs.total_out);
+    deflateEnd(&zs);
 
-    auto strip = [](const std::string& s) {
-        std::string r;
-        r.reserve(s.size());
-        for (char c : s)
-            if (!std::isspace((unsigned char)c)) r.push_back(c);
-        return r;
+    static const char name[] = "message.json";
+    const uint16_t nameLen = (uint16_t)(sizeof(name) - 1);
+    const uint32_t crc = (uint32_t)crc32(0, reinterpret_cast<const Bytef*>(text.data()), (uInt)text.size());
+    const uint32_t compSize = (uint32_t)def.size();
+    const uint32_t rawSize = (uint32_t)text.size();
+
+    std::vector<uint8_t> z;
+    z.reserve(def.size() + 128);
+    // Local file header
+    oim_put32(z, 0x04034b50); oim_put16(z, 20); oim_put16(z, 0); oim_put16(z, 8);
+    oim_put16(z, 0); oim_put16(z, 0);
+    oim_put32(z, crc); oim_put32(z, compSize); oim_put32(z, rawSize);
+    oim_put16(z, nameLen); oim_put16(z, 0);
+    z.insert(z.end(), name, name + nameLen);
+    z.insert(z.end(), def.begin(), def.end());
+    // Central directory entry
+    const uint32_t cdOff = (uint32_t)z.size();
+    oim_put32(z, 0x02014b50); oim_put16(z, 20); oim_put16(z, 20); oim_put16(z, 0); oim_put16(z, 8);
+    oim_put16(z, 0); oim_put16(z, 0);
+    oim_put32(z, crc); oim_put32(z, compSize); oim_put32(z, rawSize);
+    oim_put16(z, nameLen); oim_put16(z, 0); oim_put16(z, 0); oim_put16(z, 0); oim_put16(z, 0);
+    oim_put32(z, 0); oim_put32(z, 0);
+    z.insert(z.end(), name, name + nameLen);
+    const uint32_t cdSize = (uint32_t)z.size() - cdOff;
+    // End of central directory
+    oim_put32(z, 0x06054b50); oim_put16(z, 0); oim_put16(z, 0); oim_put16(z, 1); oim_put16(z, 1);
+    oim_put32(z, cdSize); oim_put32(z, cdOff); oim_put16(z, 0);
+    return z;
+}
+
+std::string oim_zip_unpack(const std::vector<uint8_t>& zipData) {
+    if (zipData.size() < 30) return {};
+    auto le16 = [&](size_t o) { return (uint16_t)(zipData[o] | (zipData[o + 1] << 8)); };
+    auto le32 = [&](size_t o) {
+        return (uint32_t)zipData[o] | ((uint32_t)zipData[o + 1] << 8) |
+               ((uint32_t)zipData[o + 2] << 16) | ((uint32_t)zipData[o + 3] << 24);
     };
-
-    std::vector<uint8_t> decoded = base64_decode(strip(payload));
-    if (decoded.empty()) return text;
-    std::string meta(decoded.begin(), decoded.end());
-
-    if (!data.empty()) {
-        try {
-            nlohmann::json j = nlohmann::json::parse(meta);
-            std::string key = j.value("_oim_data", "");
-            if (!key.empty()) {
-                j[key] = strip(data);
-                j.erase("_oim_data");
-                return j.dump();
-            }
-        } catch (...) {}
+    if (le32(0) != 0x04034b50) return {};
+    const uint16_t method = le16(8);
+    const uint32_t compSize = le32(18);
+    const uint32_t rawSize = le32(22);
+    const size_t dataOff = 30 + le16(26) + le16(28);
+    if (dataOff + compSize > zipData.size()) return {};
+    if (method == 0) {
+        return std::string(reinterpret_cast<const char*>(zipData.data() + dataOff), compSize);
     }
-    return meta;
+    if (method != 8 || rawSize == 0 || rawSize > 256u * 1024 * 1024) return {};
+    std::string out(rawSize, '\0');
+    z_stream zs = {};
+    if (inflateInit2(&zs, -15) != Z_OK) return {};
+    zs.next_in = const_cast<Bytef*>(zipData.data() + dataOff);
+    zs.avail_in = compSize;
+    zs.next_out = reinterpret_cast<Bytef*>(&out[0]);
+    zs.avail_out = rawSize;
+    int rc = inflate(&zs, Z_FINISH);
+    inflateEnd(&zs);
+    if (rc != Z_STREAM_END) return {};
+    out.resize(zs.total_out);
+    return out;
 }
 
 // Verify signature with ECC public key

@@ -1139,11 +1139,22 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             x_session_chart.clear();
         }
 
-        // Protocol bodies are wrapped (notice text + base64 armor) so external
-        // mail clients never see raw protocol JSON. Non-protocol mail (no
-        // X-Mailer) is sent verbatim.
-        const std::string wireBody = x_session_chart.empty() ? bodyToSend : oim_wrap_body(bodyToSend);
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(wireBody));
+        // Protocol bodies travel as a zip-packed message.oim attachment so
+        // external mail clients only see the notice text. Non-protocol mail
+        // (no X-Mailer) is sent verbatim.
+        if (x_session_chart.empty()) {
+            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
+        } else {
+            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(oim_notice_text()));
+            std::vector<uint8_t> zipped = oim_zip_pack(bodyToSend);
+            builder.attach(vmime::make_shared<vmime::defaultAttachment>(
+                vmime::make_shared<vmime::stringContentHandler>(
+                    std::string(reinterpret_cast<const char*>(zipped.data()), zipped.size())),
+                vmime::encoding(vmime::encodingTypes::BASE64),
+                vmime::mediaType("application/octet-stream"),
+                vmime::NULL_TEXT,
+                vmime::word("message.oim")));
+        }
 
         vmime::shared_ptr<vmime::message> msg = builder.construct();
 
