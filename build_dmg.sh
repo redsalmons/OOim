@@ -1,48 +1,27 @@
 #!/bin/bash
-
-# Kill existing app and lingering processes first
-echo "Killing existing app and processes..."
-pkill -9 -f oceantalk.app 2>/dev/null
-pkill -9 -f "flutter" 2>/dev/null
-pkill -9 -f "dart" 2>/dev/null
-sleep 2
-# Remove Flutter startup lock files
-rm -f /Users/steven/Cascade/OIM/.dart_tool/hooks_runner/*/.lock 2>/dev/null
-rm -f /Users/steven/Cascade/OIM/.dart_tool/hooks_runner/shared/objective_c/.lock 2>/dev/null
-rm -f /Users/steven/Cascade/OIM/build/macos/CompilationCache.noindex/generic/lock 2>/dev/null
+set -e
 
 # Build email_core library
 echo "Building email_core library..."
 cd /Users/steven/Cascade/OIM/email
 cmake --build build -j8
-if [ $? -ne 0 ]; then
-    echo "Build failed: email_core library"
-    exit 1
-fi
 
-# Build Flutter app
-echo "Building Flutter app..."
+# Build Flutter app (release)
+echo "Building Flutter app (release)..."
 cd /Users/steven/Cascade/OIM
-flutter build macos --debug
-if [ $? -ne 0 ]; then
-    echo "Build failed: Flutter app"
-    exit 1
-fi
+flutter build macos --release
 
 # Copy dependent libraries
 echo "Copying dependent libraries..."
-APP_PATH="build/macos/Build/Products/Debug/oceantalk.app"
+APP_PATH="build/macos/Build/Products/Release/oceantalk.app"
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 
-# Remove all previously copied dylibs
 echo "Cleaning old libraries..."
 find "$FRAMEWORKS_DIR" -name "*.dylib" -maxdepth 1 -delete
 
-# Copy libemail_core.dylib
 echo "Copying libemail_core.dylib..."
 cp /Users/steven/Cascade/OIM/email/build/libemail_core.dylib "$FRAMEWORKS_DIR/"
 
-# Copy homebrew dependencies
 echo "Copying homebrew dependencies..."
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
 for pair in "gnutls:libgnutls.30" "gettext:libintl.8" "p11-kit:libp11-kit.0" "libidn2:libidn2.0" "libunistring:libunistring.5" "libtasn1:libtasn1.6" "nettle:libhogweed.7" "nettle:libnettle.9" "gmp:libgmp.10" "gsasl:libgsasl.18"; do
@@ -80,14 +59,28 @@ done
 # Re-sign all libraries
 echo "Re-signing libraries..."
 for f in "$FRAMEWORKS_DIR"/*.dylib; do
-    codesign --force --sign - "$f" 2>&1
+    codesign --force --sign - "$f"
 done
 
-# Re-sign the app bundle with sandbox entitlements so it uses the container path
+# Re-sign the app bundle with release entitlements (sandbox)
 echo "Re-signing app bundle..."
-codesign --force --deep --sign - --entitlements /Users/steven/Cascade/OIM/macos/Runner/DebugProfile.entitlements "$APP_PATH" 2>&1
+codesign --force --deep --sign - --entitlements /Users/steven/Cascade/OIM/macos/Runner/Release.entitlements "$APP_PATH"
 
-# Launch app
-echo "Launching app..."
-open "$APP_PATH"
-echo "App launched. Check sandbox logs at: ~/Library/Containers/com.redsalmon.oim/Data/Library/Application Support/com.redsalmon.oim/log/oim.log"
+# Stage DMG contents: the app plus an Applications symlink for drag-install
+echo "Staging DMG contents..."
+DMG_STAGE="build/dmg_stage"
+DMG_PATH="build/OceanTalk.dmg"
+rm -rf "$DMG_STAGE"
+mkdir -p "$DMG_STAGE"
+cp -R "$APP_PATH" "$DMG_STAGE/"
+ln -s /Applications "$DMG_STAGE/Applications"
+
+# Create compressed DMG
+echo "Creating DMG..."
+rm -f "$DMG_PATH"
+hdiutil create -volname "零海 OceanTalk" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG_PATH"
+rm -rf "$DMG_STAGE"
+
+echo "Done: $DMG_PATH"
+hdiutil verify "$DMG_PATH" >/dev/null && echo "DMG verified."
+ls -lh "$DMG_PATH"
