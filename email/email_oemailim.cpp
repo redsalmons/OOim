@@ -587,7 +587,35 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             }
 
                             if (bodyReplyTo.empty()) {
-                                // === 我是应答方（B）：对称回复 PREKEY_BUNDLE ===
+                                // === 我是应答方（B）：这是会话根，立刻建 unified session，
+                                // 不等 SESSION_INIT——否则先到的数据消息会让会话一直不显示 ===
+                                {
+                                    static UnifiedSessionRepo s_usRepo;
+                                    UnifiedSession existingUs;
+                                    bool usFound = s_usRepo.loadBySignalSessionId(accountStr, prekeySessionId, existingUs);
+                                    if (!usFound && !bodyMsgId.empty())
+                                        usFound = s_usRepo.loadByRootMessageId(accountStr, bodyMsgId, existingUs);
+                                    if (!usFound) {
+                                        UnifiedSession usRec;
+                                        static std::mt19937_64 rng{std::random_device{}()};
+                                        auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                                            std::chrono::system_clock::now().time_since_epoch()).count();
+                                        usRec.sessionId = "us_" + std::to_string(secs) + "." + std::to_string(rng() % 100000000);
+                                        usRec.account = accountStr;
+                                        usRec.subject = eml_subject;
+                                        usRec.mode = SessionMode::Signal;
+                                        usRec.members = {accountStr, eml_from};
+                                        usRec.signalSessionId = prekeySessionId;
+                                        usRec.rootMessageId = bodyMsgId;
+                                        usRec.status = 0;
+                                        if (s_usRepo.create(usRec)) {
+                                            LOG_INFO("[DB] download_pending: created unified session=%s for received PREKEY_BUNDLE (root)\n",
+                                                     usRec.sessionId.c_str());
+                                        }
+                                    }
+                                }
+
+                                // 对称回复 PREKEY_BUNDLE
                                 // 用发起方的 session_id 生成我的 per-session 密钥（每个 session 密钥隔离）
                                 char replyPrekeyBuf[65536];
                                 int replyRc = signal_get_prekey_bundle_for_session(
