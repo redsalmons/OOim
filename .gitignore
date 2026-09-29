@@ -89,3 +89,11 @@ compile_commands.json
 
 # Application data
 ~/Library/Containers/com.redsalmon.oim/
+
+
+tools/test_vcvars.cmd
+tools/vc_dbg.txt
+tools/vc_err.txt
+tools/vc_out.txt
+tools/vcvars_err.txt
+tools/vcvars_out.txt
