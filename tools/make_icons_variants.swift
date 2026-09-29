@@ -1,11 +1,9 @@
 import AppKit
 
-// 零海 OceanTalk icon: outlined padlock body with a speech-bubble tail and
-// hollow keyhole on a midnight -> deep blue gradient (encrypted chat).
-// Draws into an NSBitmapImageRep with explicit pixel dimensions so the
-// output is exact regardless of the display backing scale factor.
+// Refined A: thinner strokes, larger glyph, clean hollow keyhole.
+// Preview at 512.
 
-func drawIcon(pixels size: Int) -> NSBitmapImageRep {
+func makeRep(pixels size: Int) -> (NSBitmapImageRep, CGFloat) {
     let rep = NSBitmapImageRep(
         bitmapDataPlanes: nil,
         pixelsWide: size,
@@ -19,21 +17,21 @@ func drawIcon(pixels size: Int) -> NSBitmapImageRep {
         bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    return (rep, CGFloat(size))
+}
 
-    let s = CGFloat(size)
-
-    // Background: midnight -> deep blue gradient, full-bleed square
-    // (macOS applies the squircle mask itself).
+func bg(s: CGFloat) {
     NSGradient(colors: [
         NSColor(calibratedRed: 0.03, green: 0.08, blue: 0.18, alpha: 1),
         NSColor(calibratedRed: 0.08, green: 0.24, blue: 0.50, alpha: 1),
     ], atLocations: [0, 1], colorSpace: .deviceRGB)!
         .draw(in: NSRect(x: 0, y: 0, width: s, height: s), angle: 90)
+}
 
+func drawGlyph(s: CGFloat) {
     let strokeW = s * 0.032
     let w = s * 0.60, h = w * 0.78
     let rect = NSRect(x: (s - w) / 2 - s * 0.02, y: s * 0.22, width: w, height: h)
-    NSColor.white.setStroke()
 
     // shackle
     let sr = w * 0.24
@@ -41,16 +39,18 @@ func drawIcon(pixels size: Int) -> NSBitmapImageRep {
     shackle.appendArc(withCenter: NSPoint(x: rect.midX, y: rect.maxY + sr * 0.1),
                       radius: sr, startAngle: -25, endAngle: 205, clockwise: false)
     shackle.lineWidth = strokeW
+    NSColor.white.setStroke()
     shackle.stroke()
 
     // body outline
+    let r = h * 0.18
     let body = NSBezierPath(roundedRect: rect.insetBy(dx: strokeW / 2, dy: strokeW / 2),
-                            xRadius: h * 0.18, yRadius: h * 0.18)
+                            xRadius: r, yRadius: r)
     body.lineWidth = strokeW
     body.lineJoinStyle = .round
     body.stroke()
 
-    // bubble tail at bottom-left
+    // tail
     let tx = rect.minX + w * 0.25
     let tailLen = w * 0.09
     let tail = NSBezierPath()
@@ -74,23 +74,12 @@ func drawIcon(pixels size: Int) -> NSBitmapImageRep {
     stem.lineWidth = strokeW
     stem.lineCapStyle = .round
     stem.stroke()
-
-    NSGraphicsContext.restoreGraphicsState()
-    return rep
 }
 
-let outDir = CommandLine.arguments.count > 1
-    ? CommandLine.arguments[1]
-    : "macos/Runner/Assets.xcassets/AppIcon.appiconset"
-
-for side in [16, 32, 64, 128, 256, 512, 1024] {
-    let rep = drawIcon(pixels: side)
-    let path = "\(outDir)/app_icon_\(side).png"
-    do {
-        try rep.representation(using: .png, properties: [:])!
-            .write(to: URL(fileURLWithPath: path))
-        print("wrote \(path)")
-    } catch {
-        fputs("failed \(path): \(error)\n", stderr)
-    }
-}
+let (rep, s) = makeRep(pixels: 512)
+bg(s: s)
+drawGlyph(s: s)
+try? rep.representation(using: .png, properties: [:])!
+    .write(to: URL(fileURLWithPath: "/tmp/oim_icons_v7/A_refined.png"))
+NSGraphicsContext.restoreGraphicsState()
+print("wrote /tmp/oim_icons_v7/A_refined.png")
