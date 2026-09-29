@@ -344,7 +344,30 @@ mixin ConversationViewMixin on State<EmailModule> {
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     itemCount: messages.length,
-                    itemBuilder: (context, index) => _buildUnifiedMessageBubble(messages[index], members, usSession!.account),
+                    itemBuilder: (context, index) {
+                      // Merge adjacent file messages of the same batch into one bubble
+                      final cur = _fileMetaOf(messages[index]);
+                      if (index > 0 && cur != null && cur.batchId.isNotEmpty) {
+                        final prev = _fileMetaOf(messages[index - 1]);
+                        if (prev != null && prev.batchId == cur.batchId &&
+                            messages[index - 1].sender == messages[index].sender &&
+                            messages[index - 1].isSent == messages[index].isSent) {
+                          return const SizedBox.shrink(); // rendered inside the batch's first bubble
+                        }
+                      }
+                      List<EmlParsedContent>? batch;
+                      if (cur != null && cur.batchId.isNotEmpty) {
+                        batch = [cur];
+                        for (var j = index + 1; j < messages.length; j++) {
+                          final m = _fileMetaOf(messages[j]);
+                          if (m == null || m.batchId != cur.batchId ||
+                              messages[j].sender != messages[index].sender ||
+                              messages[j].isSent != messages[index].isSent) break;
+                          batch.add(m);
+                        }
+                      }
+                      return _buildUnifiedMessageBubble(messages[index], members, usSession!.account, batch);
+                    },
                   ),
           ),
           // Input bar
@@ -532,7 +555,32 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
-  Widget _buildUnifiedMessageBubble(native.EmailMessage msg, List<String> members, String myAccount) {
+  EmlParsedContent? _fileMetaOf(native.EmailMessage msg) {
+    final pf = msg.pendingFile;
+    if (pf != null) {
+      int received = 0, status = 0;
+      if (pf.fileId.isNotEmpty) {
+        try {
+          final st = jsonDecode(native.EmailCore.fileTransferQuery(pf.fileId));
+          if (st['status'] == 'success') {
+            received = st['received_chunks'] as int? ?? 0;
+            status = st['transfer_status'] as int? ?? 0;
+          }
+        } catch (_) {}
+      }
+      return EmlParsedContent(isFileMessage: true, fileName: pf.fileName, fileSize: pf.fileSize,
+          fileId: pf.fileId, batchId: pf.batchId, totalChunks: pf.totalChunks,
+          receivedChunks: received, transferStatus: status);
+    }
+    if (msg.file.isEmpty) return null;
+    final emlPath = '$emailDataPath/${msg.account}/${msg.file}.eml';
+    final parsed = parseEmlFile(emlPath, account: msg.account, sessionId: msg.sessionId,
+        fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
+    return parsed.isFileMessage ? parsed : null;
+  }
+
+  Widget _buildUnifiedMessageBubble(native.EmailMessage msg, List<String> members, String myAccount,
+      [List<EmlParsedContent>? fileBatch]) {
     final isMe = msg.isSent == 1;
     bool isHandshake = native.XMailer.isKeyExchange(msg.xMailer);
     String displayBody = '';
@@ -543,6 +591,9 @@ mixin ConversationViewMixin on State<EmailModule> {
       isHandshake = isHandshake || parsed.isHandshakeMessage;
       if (parsed.isFileMessage) fileMeta = parsed;
       displayBody = parsed.textBody;
+    } else if (msg.pendingFile != null) {
+      fileMeta = _fileMetaOf(msg);
+      displayBody = msg.body;
     } else if (msg.body.isNotEmpty) {
       // Message body is directly available from localemail table (no EML file needed)
       displayBody = msg.body;
@@ -575,7 +626,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                   child: isHandshake
                       ? const Text('🤝', style: TextStyle(fontSize: 20))
                       : (fileMeta != null
-                          ? _buildFileCard(fileMeta, isMe, displayBody)
+                          ? _buildFileCard(fileBatch ?? [fileMeta], isMe, displayBody)
                           : SelectableText(displayBody, style: const TextStyle(fontSize: 14))),
                 ),
                 const SizedBox(height: 2),
@@ -606,64 +657,71 @@ mixin ConversationViewMixin on State<EmailModule> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
-  Widget _buildFileCard(EmlParsedContent meta, bool isMe, String caption) {
+  Widget _buildFileCard(List<EmlParsedContent> metas, bool isMe, String caption) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 220, maxWidth: 320),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (caption.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SelectableText(caption, style: const TextStyle(fontSize: 14)),
+            ),
+          // One file per row: icon | name | size | progress
+          for (var i = 0; i < metas.length; i++) ...[
+            if (i > 0) const SizedBox(height: 6),
+            _buildFileRow(metas[i], isMe),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFileRow(EmlParsedContent meta, bool isMe) {
     final sizeStr = _formatBytes(meta.fileSize);
     final progress = meta.totalChunks > 0 ? meta.receivedChunks / meta.totalChunks : 0.0;
     final done = meta.transferStatus == 1;
     final failed = meta.transferStatus == 2;
     return GestureDetector(
       onTap: done || isMe ? () => _saveUnifiedFile(meta, isMe) : null,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 220, maxWidth: 320),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (caption.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: SelectableText(caption, style: const TextStyle(fontSize: 14)),
-              ),
-            // One file per row: icon | name | size | progress
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(failed ? Icons.error_outline : Icons.insert_drive_file,
+              size: 22, color: failed ? Colors.red : Colors.blueGrey),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(meta.fileName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                overflow: TextOverflow.ellipsis),
+          ),
+          const SizedBox(width: 8),
+          Text(sizeStr, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 60,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Icon(failed ? Icons.error_outline : Icons.insert_drive_file,
-                    size: 22, color: failed ? Colors.red : Colors.blueGrey),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(meta.fileName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-                      overflow: TextOverflow.ellipsis),
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 3,
+                  backgroundColor: context.oim.border,
+                  valueColor: AlwaysStoppedAnimation<Color>(failed ? Colors.red : context.scheme.primary),
                 ),
-                const SizedBox(width: 8),
-                Text(sizeStr, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: 60,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      LinearProgressIndicator(
-                        value: progress,
-                        minHeight: 3,
-                        backgroundColor: context.oim.border,
-                        valueColor: AlwaysStoppedAnimation<Color>(failed ? Colors.red : context.scheme.primary),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        failed ? AppStrings.transferFailed : '${meta.receivedChunks}/${meta.totalChunks}',
-                        style: TextStyle(fontSize: 9, color: context.oim.textMuted),
-                      ),
-                    ],
-                  ),
+                const SizedBox(height: 2),
+                Text(
+                  failed ? AppStrings.transferFailed : '${meta.receivedChunks}/${meta.totalChunks}',
+                  style: TextStyle(fontSize: 9, color: context.oim.textMuted),
                 ),
-                if (done || isMe) ...[
-                  const SizedBox(width: 6),
-                  Icon(Icons.download, size: 16, color: context.oim.textSecondary),
-                ],
               ],
             ),
+          ),
+          if (done || isMe) ...[
+            const SizedBox(width: 6),
+            Icon(Icons.download, size: 16, color: context.oim.textSecondary),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -784,7 +842,31 @@ mixin ConversationViewMixin on State<EmailModule> {
                                   children: [
                                     IconButton(
                                       icon: Icon(Icons.folder_open, size: 20, color: context.oim.textSecondary),
-                                      onPressed: () {},
+                                      onPressed: () async {
+                                        final picked = await FilePicker.pickFiles();
+                                        if (picked.isEmpty) return;
+                                        setState(() {
+                                          for (final f in picked) {
+                                            final path = f.path;
+                                            if (path == null || path.isEmpty) continue;
+                                            final name = f.name.isNotEmpty
+                                                ? f.name
+                                                : (path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).lastOrNull ?? path);
+                                            int size = 0;
+                                            try { size = File(path).lengthSync(); } catch (_) {}
+                                            droppedFiles.add(DroppedFile(name: name, path: path, size: size));
+                                            final cursor = replyController.selection.baseOffset;
+                                            final text = replyController.text;
+                                            final newText = text.substring(0, cursor.clamp(0, text.length)) +
+                                                '￼' +
+                                                text.substring(cursor.clamp(0, text.length));
+                                            replyController.value = TextEditingValue(
+                                              text: newText,
+                                              selection: TextSelection.collapsed(offset: cursor + 1),
+                                            );
+                                          }
+                                        });
+                                      },
                                       constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
                                       padding: EdgeInsets.zero,
                                     ),
@@ -913,7 +995,30 @@ mixin ConversationViewMixin on State<EmailModule> {
         native.EmailCore.logWrite('[Unified] groupSendFile result: $resultJson');
         try {
           final r = jsonDecode(resultJson);
-          if (r['status'] != 'success') allOk = false;
+          if (r['status'] != 'success') {
+            allOk = false;
+          } else {
+            addPendingUnifiedMessage(native.EmailMessage(
+              sender: session.account,
+              recipient: session.members.where((m) => m.toLowerCase() != session.account.toLowerCase()).join(', '),
+              subject: session.subject,
+              body: textForThisFile,
+              timestamp: DateTime.now().toString().substring(0, 19),
+              uuid: 'pending_${r['message_id'] ?? file.path}',
+              messageId: r['message_id']?.toString() ?? '',
+              sessionId: session.sessionId,
+              account: session.account,
+              isSent: 1,
+              xMailer: native.XMailer.attachMeta,
+              pendingFile: native.PendingFileInfo(
+                fileName: file.name,
+                fileSize: file.size,
+                fileId: r['file_id']?.toString() ?? '',
+                batchId: batchId,
+                totalChunks: r['total_chunks'] is int ? r['total_chunks'] as int : 0,
+              ),
+            ));
+          }
         } catch (_) {
           allOk = false;
         }
@@ -962,7 +1067,30 @@ mixin ConversationViewMixin on State<EmailModule> {
         native.EmailCore.logWrite('[Unified] fileSplitAndSend result: $resultJson');
         try {
           final r = jsonDecode(resultJson);
-          if (r['status'] != 'success') allOk = false;
+          if (r['status'] != 'success') {
+            allOk = false;
+          } else {
+            addPendingUnifiedMessage(native.EmailMessage(
+              sender: session.account,
+              recipient: recipients,
+              subject: session.subject,
+              body: textForThisFile,
+              timestamp: DateTime.now().toString().substring(0, 19),
+              uuid: 'pending_${r['message_id'] ?? file.path}',
+              messageId: r['message_id']?.toString() ?? '',
+              sessionId: session.sessionId,
+              account: session.account,
+              isSent: 1,
+              xMailer: native.XMailer.attachMeta,
+              pendingFile: native.PendingFileInfo(
+                fileName: file.name,
+                fileSize: file.size,
+                fileId: r['file_id']?.toString() ?? '',
+                batchId: batchId,
+                totalChunks: r['total_chunks'] is int ? r['total_chunks'] as int : 0,
+              ),
+            ));
+          }
         } catch (_) {
           allOk = false;
         }

@@ -687,6 +687,21 @@ class EmailConfigData {
   EmailConfigData(this.localDataPath, this.accounts);
 }
 
+class PendingFileInfo {
+  final String fileName;
+  final int fileSize;
+  final String fileId;
+  final String batchId;
+  final int totalChunks;
+  const PendingFileInfo({
+    required this.fileName,
+    required this.fileSize,
+    required this.fileId,
+    required this.batchId,
+    required this.totalChunks,
+  });
+}
+
 class EmailMessage {
   final String sender;
   final String recipient;
@@ -709,6 +724,7 @@ class EmailMessage {
   final String groupId;
   final String xMailer;
   final int isSent;
+  final PendingFileInfo? pendingFile;
 
   EmailMessage({
     required this.sender,
@@ -732,6 +748,7 @@ class EmailMessage {
     this.groupId = '',
     this.xMailer = '',
     this.isSent = 0,
+    this.pendingFile,
   });
 
 }

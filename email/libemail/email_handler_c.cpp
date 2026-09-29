@@ -865,7 +865,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             if (uuid.empty()) continue;
 
             // 1.0.5 (attach chunk): defer insertion — will be inserted after download_pending_bodies
-            if (x_session_chart == XMailer::ATTACH_CHUNK) {
+            if (x_session_chart == XMailer::ATTACH_CHUNK || x_session_chart == XMailer::MLS_FILE_CHUNK) {
                 deferredChunks.push_back({uuid, from_addr, sender, subject, date, reply_to,
                     in_reply_to, message_id, x_session_chart, servicerecvtime, bodystructure, flags,
                     email_data.value("to_addr", "")});
