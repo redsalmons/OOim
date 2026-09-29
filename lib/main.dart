@@ -19,10 +19,37 @@ void main(List<String> args) {
         ? jsonDecode(args[2]) as Map<String, dynamic>
         : <String, dynamic>{};
     final configPath = arguments['configPath'] as String? ?? '';
+    // Sub windows run a separate engine with their own appLocale; the main
+    // window broadcasts 'locale_changed' so they follow the in-app switch.
+    DesktopMultiWindow.setMethodHandler((call, _) async {
+      if (call.method == 'locale_changed') {
+        final code = call.arguments?.toString() ?? '';
+        appLocale.value = (code == 'zh' || code == 'en') ? Locale(code) : null;
+        WindowController.fromWindowId(windowId)
+            .setTitle(AppStrings.emailConfig);
+      }
+      return null;
+    });
     runApp(_ConfigWindowApp(windowId: windowId, configPath: configPath));
     return;
   }
+  appLocale.addListener(_syncLocaleToPlatform);
   runApp(const OIMApp());
+}
+
+/// Pushes the effective locale to the native window title and broadcasts it
+/// to sub windows, which run separate engines with their own appLocale.
+void _syncLocaleToPlatform() {
+  final code = AppStrings.isZh ? 'zh' : 'en';
+  const MethodChannel('oim/window_title')
+      .invokeMethod('setTitle', code)
+      .catchError((_) {});
+  DesktopMultiWindow.getAllSubWindowIds().then((ids) {
+    for (final id in ids) {
+      DesktopMultiWindow.invokeMethod(id, 'locale_changed', code)
+          .catchError((_) {});
+    }
+  }).catchError((_) {});
 }
 
 void _applyPrefs(Map<String, dynamic> prefs) {
@@ -87,7 +114,7 @@ class OIMApp extends StatelessWidget {
         builder: (context, scale, _) => ValueListenableBuilder<Locale?>(
         valueListenable: appLocale,
         builder: (context, _, __) => MaterialApp(
-          title: 'OIM',
+          title: AppStrings.appTitle,
           debugShowCheckedModeBanner: false,
           theme: AppTheme.light(),
           darkTheme: AppTheme.dark(),

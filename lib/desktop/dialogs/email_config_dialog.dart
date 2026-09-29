@@ -552,6 +552,13 @@ class _EmailConfigDialogState extends State<EmailConfigDialog> {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<Locale?>(
+      valueListenable: appLocale,
+      builder: (context, locale, _) => _buildLocalized(context),
+    );
+  }
+
+  Widget _buildLocalized(BuildContext context) {
     if (widget.standalone) {
       return Scaffold(
         appBar: AppBar(

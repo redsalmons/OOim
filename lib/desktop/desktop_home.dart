@@ -17,25 +17,26 @@ class _DesktopHomeState extends State<DesktopHome> {
   final GlobalKey<EmailModuleState> _emailKey = GlobalKey<EmailModuleState>();
   final GlobalKey<ContactsModuleState> _contactsKey = GlobalKey<ContactsModuleState>();
 
-  late final List<Widget> _modules = [
-    EmailModule(key: _emailKey),
-    ContactsModule(key: _contactsKey),
-    const SettingsModule(),
-  ];
-
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Row(
-        children: [
-          _buildSidebar(),
-          Expanded(
-            child: IndexedStack(
-              index: _selectedModule,
-              children: _modules,
+    return ValueListenableBuilder<Locale?>(
+      valueListenable: appLocale,
+      builder: (context, locale, _) => Scaffold(
+        body: Row(
+          children: [
+            _buildSidebar(),
+            Expanded(
+              child: IndexedStack(
+                index: _selectedModule,
+                children: [
+                  EmailModule(key: _emailKey),
+                  ContactsModule(key: _contactsKey),
+                  SettingsModule(),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -269,8 +269,8 @@ class _SettingsModuleState extends State<SettingsModule> {
               ),
               segments: [
                 ButtonSegment(value: 'system', label: Text(AppStrings.followSystem)),
-                const ButtonSegment(value: 'zh', label: Text('中文')),
-                const ButtonSegment(value: 'en', label: Text('English')),
+                ButtonSegment(value: 'zh', label: Text(AppStrings.languageChinese)),
+                ButtonSegment(value: 'en', label: Text(AppStrings.languageEnglish)),
               ],
               selected: {loc?.languageCode ?? 'system'},
               onSelectionChanged: (sel) {

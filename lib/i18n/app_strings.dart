@@ -10,7 +10,7 @@ class AppStrings {
     return locale.languageCode == 'zh';
   }
 
-  static String get appTitle => isZh ? 'OIM' : 'OIM';
+  static String get appTitle => isZh ? '零海' : 'OceanTalk';
   static String get mail => isZh ? '消息' : 'Messages';
   static String get settings => isZh ? '设置' : 'Settings';
   static String get me => isZh ? '我' : 'Me';
@@ -52,6 +52,8 @@ class AppStrings {
   static String get themeLight => isZh ? '浅色' : 'Light';
   static String get themeDark => isZh ? '深色' : 'Dark';
   static String get language => isZh ? '语言' : 'Language';
+  static String get languageChinese => isZh ? '中文' : 'Chinese';
+  static String get languageEnglish => isZh ? '英文' : 'English';
   static String get fontSize => isZh ? '字体大小' : 'Font Size';
   static String get fontSizeSmall => isZh ? '小' : 'Small';
   static String get fontSizeMedium => isZh ? '中' : 'Medium';

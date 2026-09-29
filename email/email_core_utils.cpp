@@ -255,7 +255,7 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
 // ---------------------------------------------------------------------------
 
 const char* oim_notice_text() {
-    return "这是一条私密消息，请在OceanTalk客户端中查看。\n"
+    return "这是一条私密消息，请在零海客户端中查看。\n"
            "This is an OceanTalk-encrypted message — open it in the OceanTalk client.\n";
 }
 
