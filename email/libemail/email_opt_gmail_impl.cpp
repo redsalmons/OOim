@@ -591,7 +591,9 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
             }
         }
 
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
+        // Wrap protocol bodies (notice + base64 armor) when X-Mailer is set.
+        const std::string wireBody = x_session_chart.empty() ? bodyToSend : oim_wrap_body(bodyToSend);
+        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(wireBody));
         vmime::shared_ptr<vmime::message> msg = builder.construct();
 
         msg->getHeader()->MessageId()->setValue(msg_id);

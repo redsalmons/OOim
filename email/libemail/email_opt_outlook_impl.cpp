@@ -1185,7 +1185,10 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     if (!irt.empty() && irt.front() != '<') {
         irt = "<" + irt + ">";
     }
-    
+
+    // Wrap protocol bodies (notice + base64 armor) when X-Mailer is set.
+    const std::string wireBody = x_session_chart.empty() ? body : oim_wrap_body(body);
+
     std::string email_msg;
     email_msg += "From: " + email_ + "\r\n";
     email_msg += "To: " + recipient + "\r\n";
@@ -1202,7 +1205,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     email_msg += "Content-Type: text/html; charset=utf-8\r\n";
     email_msg += "Content-Transfer-Encoding: 8bit\r\n";
     email_msg += "\r\n";
-    email_msg += body;
+    email_msg += wireBody;
     
     // Base64 encode the email message
     std::string email_b64 = base64_encode_bytes(std::vector<uint8_t>(email_msg.begin(), email_msg.end()));
@@ -1240,7 +1243,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     nlohmann::json jBody;
     jBody["message"] = {
         {"subject", subject},
-        {"body", {{"contentType", "HTML"}, {"content", body}}},
+        {"body", {{"contentType", "HTML"}, {"content", wireBody}}},
         {"toRecipients", jRecipients},
         {"internetMessageHeaders", jHeaders}
     };
@@ -1504,9 +1507,11 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         // Set subject
         builder.setSubject(vmime::text(subject, vmime::charset("UTF-8")));
         
-        // Set body
+        // Set body — protocol bodies are wrapped (notice + base64 armor) so
+        // external clients never see raw JSON; plain mail is sent verbatim.
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(body));
+        const std::string wireBody = x_session_chart.empty() ? body : oim_wrap_body(body);
+        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(wireBody));
         
         // Build the message
         vmime::shared_ptr<vmime::message> msg = builder.construct();

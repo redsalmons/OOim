@@ -1139,7 +1139,11 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             x_session_chart.clear();
         }
 
-        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
+        // Protocol bodies are wrapped (notice text + base64 armor) so external
+        // mail clients never see raw protocol JSON. Non-protocol mail (no
+        // X-Mailer) is sent verbatim.
+        const std::string wireBody = x_session_chart.empty() ? bodyToSend : oim_wrap_body(bodyToSend);
+        builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(wireBody));
 
         vmime::shared_ptr<vmime::message> msg = builder.construct();
 

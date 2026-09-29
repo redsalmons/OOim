@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include <random>
 #include <sstream>
@@ -246,6 +247,120 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
         }
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Wire-format body wrapping: notice text + base64 armor block.
+//   <notice>
+//   -----BEGIN OIM MESSAGE-----
+//   <base64(json-meta)>
+//   -----BEGIN OIM DATA-----        <- only when a big string field was split
+//   <field value verbatim (already base64)>
+//   -----END OIM MESSAGE-----
+// ---------------------------------------------------------------------------
+
+static const char* OIM_NOTICE =
+    "这是一条私密消息，请在OceanTalk客户端中查看。\n"
+    "This is an OceanTalk-encrypted message — open it in the OceanTalk client.\n\n";
+static const char* OIM_BEGIN = "-----BEGIN OIM MESSAGE-----";
+static const char* OIM_DATA  = "-----BEGIN OIM DATA-----";
+static const char* OIM_END   = "-----END OIM MESSAGE-----";
+
+// A string field larger than this is moved into the DATA block so an already
+// base64-encoded payload (chunk ciphertext etc.) is not encoded twice.
+static const size_t OIM_DATA_FIELD_MIN = 64 * 1024;
+
+static std::string b64_wrap76(const std::string& b64) {
+    std::string out;
+    out.reserve(b64.size() + b64.size() / 76 + 1);
+    for (size_t i = 0; i < b64.size(); i += 76) {
+        out.append(b64, i, std::min<size_t>(76, b64.size() - i));
+        out.push_back('\n');
+    }
+    return out;
+}
+
+std::string oim_wrap_body(const std::string& body) {
+    std::string meta = body;
+    std::string dataField, dataValue;
+    try {
+        nlohmann::json j = nlohmann::json::parse(body);
+        if (j.is_object()) {
+            std::string bestKey;
+            size_t bestLen = OIM_DATA_FIELD_MIN;
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.value().is_string()) {
+                    const std::string& v = it.value().get_ref<const std::string&>();
+                    if (v.size() > bestLen) { bestLen = v.size(); bestKey = it.key(); }
+                }
+            }
+            if (!bestKey.empty()) {
+                dataField = bestKey;
+                dataValue = j[bestKey].get<std::string>();
+                j[bestKey] = "";
+                j["_oim_data"] = bestKey;
+                meta = j.dump();
+            }
+        }
+    } catch (...) {
+        // Non-JSON body: wrap it whole.
+    }
+
+    std::string out;
+    out.reserve(OIM_DATA_FIELD_MIN + meta.size() + dataValue.size() + 256);
+    out += OIM_NOTICE;
+    out += OIM_BEGIN;
+    out += '\n';
+    out += b64_wrap76(base64_encode(reinterpret_cast<const unsigned char*>(meta.data()), meta.size()));
+    if (!dataField.empty()) {
+        out += OIM_DATA;
+        out += '\n';
+        out += dataValue;
+        out += '\n';
+    }
+    out += OIM_END;
+    out += '\n';
+    return out;
+}
+
+std::string oim_unwrap_body(const std::string& text) {
+    size_t b = text.find(OIM_BEGIN);
+    if (b == std::string::npos) return text;
+    size_t e = text.find(OIM_END, b);
+    if (e == std::string::npos) return text;
+
+    std::string region = text.substr(b + strlen(OIM_BEGIN), e - (b + strlen(OIM_BEGIN)));
+    std::string payload = region, data;
+    size_t dm = region.find(OIM_DATA);
+    if (dm != std::string::npos) {
+        payload = region.substr(0, dm);
+        data = region.substr(dm + strlen(OIM_DATA));
+    }
+
+    auto strip = [](const std::string& s) {
+        std::string r;
+        r.reserve(s.size());
+        for (char c : s)
+            if (!std::isspace((unsigned char)c)) r.push_back(c);
+        return r;
+    };
+
+    std::vector<uint8_t> decoded = base64_decode(strip(payload));
+    if (decoded.empty()) return text;
+    std::string meta(decoded.begin(), decoded.end());
+
+    if (!data.empty()) {
+        try {
+            nlohmann::json j = nlohmann::json::parse(meta);
+            std::string key = j.value("_oim_data", "");
+            if (!key.empty()) {
+                j[key] = strip(data);
+                j.erase("_oim_data");
+                return j.dump();
+            }
+        } catch (...) {}
+    }
+    return meta;
 }
 
 // Verify signature with ECC public key

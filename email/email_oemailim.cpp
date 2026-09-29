@@ -42,6 +42,16 @@
 using json = nlohmann::json;
 
 // Forward declaration for extractParts (defined later in this file)
+
+// Processed (decrypted/placeholder) bodies are written to "<uuid>.dec.eml" —
+// a DIFFERENT file from the wire "<uuid>.eml". The poll path may re-download the
+// wire file concurrently and would otherwise clobber the processed plaintext.
+// The localemail `file` column is repointed to "<uuid>.dec" via updateAfterDownload.
+static std::string decEmlPath(const std::string& filePath) {
+    if (filePath.size() > 4 && filePath.substr(filePath.size() - 4) == ".eml")
+        return filePath.substr(0, filePath.size() - 4) + ".dec.eml";
+    return filePath + ".dec.eml";
+}
 static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
                          std::string& textBody, std::string& htmlBody,
                          nlohmann::json& attachments, bool& hasAttachment);
@@ -420,6 +430,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         // Body-level ids extracted from the decrypted attachment envelopes
         // (x-message-id / x-reply-to are canonical; headers are not).
         std::string attachMsgId, attachReplyTo;
+        // Name stored in localemail.file. Rewritten (decrypted) bodies live in
+        // "<uuid>.dec.eml"; messages that keep the wire body keep "<uuid>".
+        std::string storedFile = pe;
         // Body-level ids of any other JSON-bodied mail (MLS, plaintext protocol mail);
         // used as the row's identity / chain parent when present.
         std::string bodyMessageId, bodyReplyTo;
@@ -487,10 +500,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     newEml += "\r\n";
                     newEml += placeholder;
                     try {
-                        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+                        std::ofstream out(decEmlPath(filePath), std::ios::binary | std::ios::trunc);
                         if (out.is_open()) {
                             out.write(newEml.data(), static_cast<std::streamsize>(newEml.size()));
                             out.close();
+                            storedFile = pe + ".dec";
                             LOG_INFO("[DB] download_pending: wrote placeholder EML for PREKEY_BUNDLE uuid=%s\n", pe.c_str());
                         }
                     } catch (const std::exception& we) {
@@ -500,7 +514,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
                 // Persist body ids (x_message_id / x_reply_to) as this row's identity and
                 // chain parent.
-                s_emailRepo.updateAfterDownload(pe, accountStr, bodyMsgId, bodyReplyTo, pe);
+                s_emailRepo.updateAfterDownload(pe, accountStr, bodyMsgId, bodyReplyTo, storedFile);
                 s_emailRepo.setIslocal(pe, accountStr, 2);
                 LOG_INFO("[DB] download_pending: set islocal=2 for PREKEY_BUNDLE uuid=%s\n", pe.c_str());
 
@@ -783,8 +797,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         newEml += "Content-Transfer-Encoding: 8bit\r\n";
                         newEml += "\r\n";
                         newEml += display;
-                        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
-                        if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); }
+                        std::ofstream out(decEmlPath(filePath), std::ios::binary | std::ios::trunc);
+                        if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); storedFile = pe + ".dec"; }
 
                         if (!groupId.empty()) {
                             int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
@@ -796,7 +810,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 LOG_INFO("[DB] download_pending: MLS %s added to session=%s\n", x_session_chart.c_str(), sid.c_str());
                             }
                         }
-                        s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, pe);
+                        s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, storedFile);
                         s_emailRepo.setIslocal(pe, accountStr, 2);
                         downloaded++;
                         results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
@@ -887,11 +901,13 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
                             // Persist updated EML back to disk so UI can render decrypted text
                             try {
-                                std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+                                std::string decPath = decEmlPath(filePath);
+                                std::ofstream out(decPath, std::ios::binary | std::ios::trunc);
                                 if (out.is_open()) {
                                     out.write(emlContent.data(), static_cast<std::streamsize>(emlContent.size()));
                                     out.close();
-                                    LOG_INFO("[DB] download_pending: wrote decrypted EML for uuid=%s to %s\n", pe.c_str(), filePath.c_str());
+                                    storedFile = pe + ".dec";
+                                    LOG_INFO("[DB] download_pending: wrote decrypted EML for uuid=%s to %s\n", pe.c_str(), decPath.c_str());
                                 } else {
                                     LOG_INFO("[DB] download_pending: failed to open EML for writing (uuid=%s, path=%s)\n", pe.c_str(), filePath.c_str());
                                 }
@@ -1113,7 +1129,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             {
                 const std::string& storeMsgId = signalMessageId;
                 const std::string& storeInReplyTo = signalInReplyTo;
-                s_emailRepo.updateAfterDownload(pe, accountStr, storeMsgId, storeInReplyTo, pe);
+                s_emailRepo.updateAfterDownload(pe, accountStr, storeMsgId, storeInReplyTo, storedFile);
             }
             s_emailRepo.setIslocal(pe, accountStr, 2);
             LOG_INFO("[DB] download_pending: set islocal=2 for Signal uuid=%s\n", pe.c_str());
@@ -1181,8 +1197,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 newEml += "Content-Transfer-Encoding: 8bit\r\n";
                                 newEml += "\r\n";
                                 newEml += plain;
-                                std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
-                                if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); }
+                                std::ofstream out(decEmlPath(filePath), std::ios::binary | std::ios::trunc);
+                                if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); storedFile = pe + ".dec"; }
                             }
                         }
                     } else LOG_INFO("[DB] download_pending: ATTACH_META decrypt failed rc=%d\n", decRc);
@@ -1303,7 +1319,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         // ATTACH_META/CHUNK: use the body-level x-message-id/x-reply-to extracted
         // during decryption, falling back to envelope headers.
         if (x_session_chart == XMailer::ATTACH_META || x_session_chart == XMailer::ATTACH_CHUNK) {
-            s_emailRepo.updateAfterDownload(pe, accountStr, attachMsgId, attachReplyTo, pe);
+            s_emailRepo.updateAfterDownload(pe, accountStr, attachMsgId, attachReplyTo, storedFile);
         } else if (x_session_chart != XMailer::RATCHET_MSG) {
             // Protocol mail: body ids. Ordinary external mail (no X-Mailer, no JSON body)
             // has no body ids and never joins a session; its envelope values are kept
@@ -1311,7 +1327,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             const bool protocolMail = XMailer::isValid(x_session_chart);
             const std::string& m = protocolMail ? bodyMessageId : message_id;
             const std::string& r = protocolMail ? bodyReplyTo : in_reply_to;
-            s_emailRepo.updateAfterDownload(pe, accountStr, m, r, pe);
+            s_emailRepo.updateAfterDownload(pe, accountStr, m, r, storedFile);
         }
 
         // Mark as fully processed to prevent reprocessing
@@ -1452,6 +1468,11 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
             } catch (...) {
             }
         }
+
+        // Unwrap OIM-armored bodies (notice + -----BEGIN OIM MESSAGE----- base64
+        // block) back to the original protocol JSON. Bodies without markers pass
+        // through unchanged.
+        content = oim_unwrap_body(content);
 
         if (subType == vmime::mediaTypes::TEXT_PLAIN && textBody.empty()) {
             textBody = content;

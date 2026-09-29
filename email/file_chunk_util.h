@@ -12,7 +12,10 @@
 
 namespace filechunk {
 
-constexpr int kDefaultChunkSize = 3 * 1024 * 1024;  // 3 MB per chunk (pre-base64)
+// 1.8 MB raw per chunk keeps the whole sent mail under ~4.7 MB: on the wire a
+// chunk expands ~2.5x (base64 inside JSON -> encrypt -> base64 envelope -> MIME
+// transfer encoding), so 3 MB raw produced ~7.6 MB mails.
+constexpr int kDefaultChunkSize = 1800 * 1024;
 
 struct PreparedFile {
     std::string fileName;
