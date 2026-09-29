@@ -157,9 +157,11 @@ Color avatarColor(String name) {
 
 /// Orders messages by following the reply chain: each message's `inReplyTo` points
 /// to the (locally generated) `messageId` of the previous message. Roots are messages
-/// whose parent is empty or not present in [messages]. Siblings (several replies to the
-/// same parent, e.g. two members sending concurrently) and multiple roots fall back to
-/// rowid order.
+/// whose parent is empty or not present in [messages]. A message becomes eligible only
+/// after its parent has been emitted; among all eligible messages the lowest rowid goes
+/// first (topological order). This keeps every reply below its parent even when mail
+/// delivery is out of order, while branches (e.g. several members replying to the same
+/// handshake root) interleave by arrival order instead of one subtree blocking siblings.
 List<native.EmailMessage> sortByReplyChain(List<native.EmailMessage> messages) {
   final byId = <String, native.EmailMessage>{};
   for (final m in messages) {
@@ -167,37 +169,33 @@ List<native.EmailMessage> sortByReplyChain(List<native.EmailMessage> messages) {
   }
 
   final children = <String, List<native.EmailMessage>>{};
-  final roots = <native.EmailMessage>[];
+  final eligible = <native.EmailMessage>[];
   for (final m in messages) {
     final parent = m.inReplyTo;
     if (parent.isNotEmpty && byId.containsKey(parent) && byId[parent] != m) {
       children.putIfAbsent(parent, () => []).add(m);
     } else {
-      roots.add(m);
+      eligible.add(m);
     }
   }
 
   int byRowid(native.EmailMessage a, native.EmailMessage b) => a.rowid.compareTo(b.rowid);
-  roots.sort(byRowid);
-  for (final list in children.values) {
-    list.sort(byRowid);
-  }
+  eligible.sort(byRowid);
 
   final ordered = <native.EmailMessage>[];
-  final visited = <native.EmailMessage>{};
-  void walk(native.EmailMessage m) {
-    if (!visited.add(m)) return;
+  final emitted = <native.EmailMessage>{};
+  while (eligible.isNotEmpty) {
+    final m = eligible.removeAt(0);
+    if (!emitted.add(m)) continue;
     ordered.add(m);
-    for (final c in children[m.messageId] ?? const <native.EmailMessage>[]) {
-      walk(c);
-    }
-  }
-  for (final r in roots) {
-    walk(r);
+    final cs = children[m.messageId];
+    if (cs == null || cs.isEmpty) continue;
+    eligible.addAll(cs);
+    eligible.sort(byRowid);
   }
   // Safety net: anything unreachable (cycles) keeps rowid order at the end
   for (final m in messages) {
-    if (!visited.contains(m)) ordered.add(m);
+    if (!emitted.contains(m)) ordered.add(m);
   }
   return ordered;
 }
