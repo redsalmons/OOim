@@ -60,7 +60,8 @@ std::vector<TaskRecord> TaskRepo::queryPending(const std::string& account, int l
         "SELECT id, account, recipient, subject, body, in_reply_to, message_id, x_message_id, session_id, x_session_chart, status, pre_encrypted, local_body, retry_count, next_retry_at, last_error, created_at FROM task "
         "WHERE account = ? AND status = 0 "
         "AND (next_retry_at IS NULL OR next_retry_at = '' OR next_retry_at <= datetime('now','localtime')) "
-        "ORDER BY CASE WHEN x_session_chart IN ('1.0.0','1.0.1','2.0.0','2.0.1','2.0.2') THEN 0 ELSE 1 END, id ASC LIMIT ?;";
+        "ORDER BY CASE WHEN x_session_chart IN ('1.0.0','1.0.1','2.0.0','2.0.1','2.0.2') THEN 0 "
+        "WHEN x_session_chart IN ('1.0.4','2.0.4') THEN 1 ELSE 2 END, id ASC LIMIT ?;";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
