@@ -412,6 +412,119 @@ extern "C" int group_send_file(const char* account, const char* unifiedSessionId
                  {"message_id", fileMsgId}});
 }
 
+// Multi-file variant: filesJson = [{"path":"...","name":"..."}, ...]. One 2.0.4
+// META task carries a "files" array; all 2.0.5 chunk tasks chain after it.
+extern "C" int group_send_file_multi(const char* account, const char* unifiedSessionId,
+                                     const char* filesJson, const char* inReplyTo,
+                                     const char* subject, const char* text,
+                                     const char* batchId,
+                                     char* outJson, int outSize) {
+    if (!account || !unifiedSessionId || !filesJson) {
+        return fail(outJson, outSize, -1, "null_parameter");
+    }
+    static UnifiedSessionRepo s_usRepo;
+    UnifiedSession us;
+    if (!s_usRepo.load(unifiedSessionId, us) || us.mlsGroupId.empty()) {
+        return fail(outJson, outSize, -2, "not an MLS session");
+    }
+    std::string groupId = us.mlsGroupId;
+    GroupSessionRecord rec;
+    if (!g_groupRepo.loadGroup(groupId, rec)) return fail(outJson, outSize, -3, "group not found");
+    if (!mls::isReady(account, groupId)) return fail(outJson, outSize, -4, "group not ready");
+    std::vector<std::string> tree = mls::members(account, groupId);
+    std::string recipients = joinRecipients(tree, account);
+    if (recipients.empty()) return fail(outJson, outSize, -5, "no other member has joined yet");
+
+    json fileList;
+    try { fileList = json::parse(filesJson); } catch (...) {
+        return fail(outJson, outSize, -6, "bad_files_json");
+    }
+    if (!fileList.is_array() || fileList.empty()) return fail(outJson, outSize, -6, "empty_files");
+
+    std::string acc(account);
+    std::string parent = inReplyTo ? inReplyTo : "";
+    if (parent.empty()) parent = rec.xReplyId;
+    std::string subjectStr = subject ? subject : "";
+
+    static FileTransferRepo s_ftRepo;
+    std::vector<filechunk::PreparedFile> prepared(fileList.size());
+    std::vector<std::string> fileIds(fileList.size());
+    json filesMeta = json::array();
+    for (size_t i = 0; i < fileList.size(); i++) {
+        const auto& f = fileList[i];
+        std::string path = f.value("path", "");
+        std::string name = f.value("name", "");
+        if (path.empty() || name.empty() ||
+            !filechunk::prepareFileForSend(path, name, prepared[i])) {
+            for (size_t j = 0; j < i; j++) filechunk::releasePrepared(prepared[j]);
+            return fail(outJson, outSize, -7, "file_not_found");
+        }
+        fileIds[i] = "file_" + std::to_string(std::time(nullptr) * 1000) + "_" + std::to_string(rand() % 100000) + "_" + std::to_string(i);
+        const auto& p = prepared[i];
+        filesMeta.push_back({
+            {"file_id", fileIds[i]}, {"file_name", p.fileName},
+            {"file_size", p.fileSize}, {"file_md5", p.fileMd5},
+            {"compression", p.compression}, {"compressed_size", p.compressedSize},
+            {"compressed_md5", p.compressedMd5},
+            {"total_chunks", p.totalChunks}, {"chunk_size", p.chunkSize},
+        });
+
+        FileTransferRecord ft;
+        ft.fileId = fileIds[i]; ft.sessionId = unifiedSessionId; ft.account = acc; ft.sender = acc;
+        ft.fileName = p.fileName; ft.fileSize = p.fileSize; ft.fileMd5 = p.fileMd5;
+        ft.totalChunks = p.totalChunks; ft.chunkSize = p.chunkSize; ft.status = 0;
+        ft.originalPath = path;
+        ft.compression = p.compression; ft.compressedMd5 = p.compressedMd5;
+        if (!s_ftRepo.insertFileTransfer(ft)) {
+            for (size_t j = 0; j <= i; j++) filechunk::releasePrepared(prepared[j]);
+            return fail(outJson, outSize, -8, "db_insert_failed");
+        }
+    }
+
+    std::string fileMsgId = newMessageId(acc);
+    json meta = {{"msg_type", "file"}, {"files", filesMeta},
+                 {"text", text ? text : ""}, {"batch_id", batchId ? batchId : ""},
+                 {"x_message_id", fileMsgId}, {"x_reply_to", parent}};
+    json metaEnv = {{"x_session_id", rec.xSessionId}, {"x_message_id", fileMsgId},
+                    {"x_reply_to", parent}, {"sender", acc}, {"plaintext", meta.dump()}};
+    int64_t tid = g_taskRepo.insert(acc, recipients, subjectStr, metaEnv.dump(),
+                                  parent, fileMsgId, "", "", XMailer::MLS_FILE_META);
+    if (tid <= 0) {
+        for (auto& p : prepared) filechunk::releasePrepared(p);
+        return fail(outJson, outSize, -9, "queue failed");
+    }
+
+    std::string prevMsgId = fileMsgId;
+    int queued = 0;
+    for (size_t fi = 0; fi < prepared.size(); fi++) {
+        auto& p = prepared[fi];
+        for (int i = 0; i < p.totalChunks; i++) {
+            auto chunk = filechunk::readChunk(p, i);
+            if (chunk.empty() && i < p.totalChunks - 1) {
+                LOG_INFO("[MLS] group_send_file_multi: failed to read chunk %d\n", i);
+                continue;
+            }
+            std::string truckMsgId = newMessageId(acc);
+            json truck = {{"msg_type", "truck"}, {"file_id", fileIds[fi]}, {"chunk_index", i},
+                          {"chunk_data", base64_encode(chunk.data(), chunk.size())},
+                          {"chunk_md5", compute_md5(std::string(chunk.begin(), chunk.end()))},
+                          {"x_message_id", truckMsgId}, {"x_reply_to", prevMsgId}};
+            json truckEnv = {{"x_session_id", rec.xSessionId}, {"x_message_id", truckMsgId},
+                             {"x_reply_to", prevMsgId}, {"sender", acc}, {"plaintext", truck.dump()}};
+            g_taskRepo.insert(acc, recipients, subjectStr, truckEnv.dump(),
+                              prevMsgId, truckMsgId, "", "", XMailer::MLS_FILE_CHUNK);
+            prevMsgId = truckMsgId;
+            queued++;
+        }
+        filechunk::releasePrepared(p);
+    }
+
+    LOG_INFO("[MLS] group_send_file_multi: group=%s files=%zu tasks=%d\n",
+             groupId.c_str(), fileList.size(), queued + 1);
+    return reply(outJson, outSize, {{"status", "success"}, {"message_id", fileMsgId},
+                 {"batch_id", batchId ? batchId : ""}, {"files", filesMeta}});
+}
+
 extern "C" int group_handle_incoming(const char* account, const char* fromAddr, const char* xMailer, const char* bodyText,
                                      const char* message_id, const char* in_reply_to,
                                      char* outGroupId, int gidSize, char* outPlaintext, int ptSize) {

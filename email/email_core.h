@@ -319,6 +319,15 @@ int email_file_split_and_send(const char* filePath, const char* fileName,
                                const char* batchId,
                                char* outJson, int outSize);
 
+// Multi-file variant: filesJson = [{"path":"...","name":"..."}, ...]. A single
+// META task carries all files in a "files" array; chunks chain behind it.
+int email_file_split_and_send_multi(const char* filesJson,
+                               const char* account, const char* recipient,
+                               const char* sessionId, const char* inReplyTo,
+                               const char* subject, const char* text,
+                               const char* batchId,
+                               char* outJson, int outSize);
+
 // Process a received "file" metadata message (create file_transfer record on receiver).
 int email_file_transfer_receive_file(const char* fileId, const char* sessionId,
                                      const char* account, const char* sender,
@@ -481,6 +490,13 @@ int group_send_file(const char* account, const char* unifiedSessionId,
                     const char* filePath, const char* fileName,
                     const char* inReplyTo, const char* subject,
                     const char* text, const char* batchId,
+                    char* outJson, int outSize);
+
+// Multi-file variant: filesJson = [{"path":"...","name":"..."}, ...]. One 2.0.4
+// META task carries all files in a "files" array; 2.0.5 chunks chain behind it.
+int group_send_file_multi(const char* account, const char* unifiedSessionId,
+                    const char* filesJson, const char* inReplyTo,
+                    const char* subject, const char* text, const char* batchId,
                     char* outJson, int outSize);
 
 // Receive-side handler for any 2.0.x mail (called by download_pending).

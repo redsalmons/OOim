@@ -345,28 +345,9 @@ mixin ConversationViewMixin on State<EmailModule> {
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     itemCount: messages.length,
                     itemBuilder: (context, index) {
-                      // Merge adjacent file messages of the same batch into one bubble
-                      final cur = _fileMetaOf(messages[index]);
-                      if (index > 0 && cur != null && cur.batchId.isNotEmpty) {
-                        final prev = _fileMetaOf(messages[index - 1]);
-                        if (prev != null && prev.batchId == cur.batchId &&
-                            messages[index - 1].sender == messages[index].sender &&
-                            messages[index - 1].isSent == messages[index].isSent) {
-                          return const SizedBox.shrink(); // rendered inside the batch's first bubble
-                        }
-                      }
-                      List<EmlParsedContent>? batch;
-                      if (cur != null && cur.batchId.isNotEmpty) {
-                        batch = [cur];
-                        for (var j = index + 1; j < messages.length; j++) {
-                          final m = _fileMetaOf(messages[j]);
-                          if (m == null || m.batchId != cur.batchId ||
-                              messages[j].sender != messages[index].sender ||
-                              messages[j].isSent != messages[index].isSent) break;
-                          batch.add(m);
-                        }
-                      }
-                      return _buildUnifiedMessageBubble(messages[index], members, usSession!.account, batch);
+                      // One META message carries its whole files[] array — no
+                      // cross-message batch merging needed.
+                      return _buildUnifiedMessageBubble(messages[index], members, usSession!.account);
                     },
                   ),
           ),
@@ -556,21 +537,23 @@ mixin ConversationViewMixin on State<EmailModule> {
   }
 
   EmlParsedContent? _fileMetaOf(native.EmailMessage msg) {
-    final pf = msg.pendingFile;
-    if (pf != null) {
-      int received = 0, status = 0;
-      if (pf.fileId.isNotEmpty) {
-        try {
-          final st = jsonDecode(native.EmailCore.fileTransferQuery(pf.fileId));
-          if (st['status'] == 'success') {
-            received = st['received_chunks'] as int? ?? 0;
-            status = st['transfer_status'] as int? ?? 0;
-          }
-        } catch (_) {}
-      }
-      return EmlParsedContent(isFileMessage: true, fileName: pf.fileName, fileSize: pf.fileSize,
-          fileId: pf.fileId, batchId: pf.batchId, totalChunks: pf.totalChunks,
-          receivedChunks: received, transferStatus: status);
+    if (msg.pendingFiles.isNotEmpty) {
+      final files = msg.pendingFiles.map((pf) {
+        int received = 0, status = 0;
+        if (pf.fileId.isNotEmpty) {
+          try {
+            final st = jsonDecode(native.EmailCore.fileTransferQuery(pf.fileId));
+            if (st['status'] == 'success') {
+              received = st['received_chunks'] as int? ?? 0;
+              status = st['transfer_status'] as int? ?? 0;
+            }
+          } catch (_) {}
+        }
+        return EmlFileEntry(fileId: pf.fileId, fileName: pf.fileName, fileSize: pf.fileSize,
+            totalChunks: pf.totalChunks, receivedChunks: received, transferStatus: status);
+      }).toList();
+      return EmlParsedContent(isFileMessage: true, files: files,
+          batchId: msg.pendingFiles.first.batchId);
     }
     if (msg.file.isEmpty) return null;
     final emlPath = '$emailDataPath/${msg.account}/${msg.file}.eml';
@@ -579,8 +562,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     return parsed.isFileMessage ? parsed : null;
   }
 
-  Widget _buildUnifiedMessageBubble(native.EmailMessage msg, List<String> members, String myAccount,
-      [List<EmlParsedContent>? fileBatch]) {
+  Widget _buildUnifiedMessageBubble(native.EmailMessage msg, List<String> members, String myAccount) {
     final isMe = msg.isSent == 1;
     bool isHandshake = native.XMailer.isKeyExchange(msg.xMailer);
     String displayBody = '';
@@ -591,7 +573,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       isHandshake = isHandshake || parsed.isHandshakeMessage;
       if (parsed.isFileMessage) fileMeta = parsed;
       displayBody = parsed.textBody;
-    } else if (msg.pendingFile != null) {
+    } else if (msg.pendingFiles.isNotEmpty) {
       fileMeta = _fileMetaOf(msg);
       displayBody = msg.body;
     } else if (msg.body.isNotEmpty) {
@@ -626,7 +608,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                   child: isHandshake
                       ? const Text('🤝', style: TextStyle(fontSize: 20))
                       : (fileMeta != null
-                          ? _buildFileCard(fileBatch ?? [fileMeta], isMe, displayBody)
+                          ? _buildFileCard(fileMeta.files, isMe, displayBody)
                           : SelectableText(displayBody, style: const TextStyle(fontSize: 14))),
                 ),
                 const SizedBox(height: 2),
@@ -657,7 +639,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
-  Widget _buildFileCard(List<EmlParsedContent> metas, bool isMe, String caption) {
+  Widget _buildFileCard(List<EmlFileEntry> metas, bool isMe, String caption) {
     return ConstrainedBox(
       constraints: const BoxConstraints(minWidth: 220, maxWidth: 320),
       child: Column(
@@ -678,7 +660,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
-  Widget _buildFileRow(EmlParsedContent meta, bool isMe) {
+  Widget _buildFileRow(EmlFileEntry meta, bool isMe) {
     final sizeStr = _formatBytes(meta.fileSize);
     final progress = meta.totalChunks > 0 ? meta.receivedChunks / meta.totalChunks : 0.0;
     final done = meta.transferStatus == 1;
@@ -726,7 +708,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
-  Future<void> _saveUnifiedFile(EmlParsedContent meta, bool isMe) async {
+  Future<void> _saveUnifiedFile(EmlFileEntry meta, bool isMe) async {
     try {
       final dir = await FilePicker.getDirectoryPath(dialogTitle: AppStrings.saveFile);
       if (dir == null || dir.isEmpty) return;
@@ -978,51 +960,49 @@ mixin ConversationViewMixin on State<EmailModule> {
       final chain = unifiedMessages.where((m) => m.messageId.isNotEmpty).toList();
       final inReplyTo = chain.isNotEmpty ? chain.last.messageId : '';
       final batchId = 'batch_${DateTime.now().millisecondsSinceEpoch}';
-      bool allOk = true;
-      for (int i = 0; i < droppedFiles.length; i++) {
-        final file = droppedFiles[i];
-        final textForThisFile = (i == 0) ? bodyText : '';
-        final resultJson = native.EmailCore.groupSendFile(
-          session.account,
-          session.sessionId,
-          file.path,
-          file.name,
-          inReplyTo,
-          session.subject,
-          textForThisFile,
-          batchId,
-        );
-        native.EmailCore.logWrite('[Unified] groupSendFile result: $resultJson');
-        try {
-          final r = jsonDecode(resultJson);
-          if (r['status'] != 'success') {
-            allOk = false;
-          } else {
-            addPendingUnifiedMessage(native.EmailMessage(
-              sender: session.account,
-              recipient: session.members.where((m) => m.toLowerCase() != session.account.toLowerCase()).join(', '),
-              subject: session.subject,
-              body: textForThisFile,
-              timestamp: DateTime.now().toString().substring(0, 19),
-              uuid: 'pending_${r['message_id'] ?? file.path}',
-              messageId: r['message_id']?.toString() ?? '',
-              sessionId: session.sessionId,
-              account: session.account,
-              isSent: 1,
-              xMailer: native.XMailer.attachMeta,
-              pendingFile: native.PendingFileInfo(
-                fileName: file.name,
-                fileSize: file.size,
-                fileId: r['file_id']?.toString() ?? '',
-                batchId: batchId,
-                totalChunks: r['total_chunks'] is int ? r['total_chunks'] as int : 0,
-              ),
-            ));
-          }
-        } catch (_) {
-          allOk = false;
+      // One 2.0.4 META carries every file in a "files" array; chunks chain
+      // behind it. A single pending bubble shows all rows at once.
+      final resultJson = native.EmailCore.groupSendFileMulti(
+        account: session.account,
+        unifiedSessionId: session.sessionId,
+        files: [for (final f in droppedFiles) {'path': f.path, 'name': f.name}],
+        inReplyTo: inReplyTo,
+        subject: session.subject,
+        text: bodyText,
+        batchId: batchId,
+      );
+      native.EmailCore.logWrite('[Unified] groupSendFileMulti result: $resultJson');
+      bool allOk = false;
+      try {
+        final r = jsonDecode(resultJson);
+        if (r['status'] == 'success') {
+          allOk = true;
+          final filesMeta = (r['files'] as List? ?? const []);
+          addPendingUnifiedMessage(native.EmailMessage(
+            sender: session.account,
+            recipient: session.members.where((m) => m.toLowerCase() != session.account.toLowerCase()).join(', '),
+            subject: session.subject,
+            body: bodyText,
+            timestamp: DateTime.now().toString().substring(0, 19),
+            uuid: 'pending_${r['message_id'] ?? batchId}',
+            messageId: r['message_id']?.toString() ?? '',
+            sessionId: session.sessionId,
+            account: session.account,
+            isSent: 1,
+            xMailer: native.XMailer.mlsFileMeta,
+            pendingFiles: [
+              for (final fm in filesMeta)
+                native.PendingFileInfo(
+                  fileName: fm['file_name']?.toString() ?? '',
+                  fileSize: (fm['file_size'] as num?)?.toInt() ?? 0,
+                  fileId: fm['file_id']?.toString() ?? '',
+                  batchId: batchId,
+                  totalChunks: fm['total_chunks'] is int ? fm['total_chunks'] as int : 0,
+                ),
+            ],
+          ));
         }
-      }
+      } catch (_) {}
       if (allOk) {
         replyController.clear();
         droppedFiles.clear();
@@ -1042,59 +1022,55 @@ mixin ConversationViewMixin on State<EmailModule> {
     final inReplyTo = chain.isNotEmpty ? chain.last.messageId : '';
 
     if (hasFiles) {
-      // Signal 1:1 file send: queue attach tasks via fileSplitAndSend. Chunks are
-      // compressed+split now and Double-Ratchet-encrypted by the task processor
-      // right before each send; sessionId is the unified session id.
+      // Signal 1:1 file send: one ATTACH_META task carries all files in a
+      // "files" array; chunks chain linearly behind it and are Double-Ratchet
+      // encrypted by the task processor right before each send.
       final recipients = session.members
           .where((m) => m.toLowerCase() != session.account.toLowerCase())
           .join(', ');
       final batchId = 'batch_${DateTime.now().millisecondsSinceEpoch}';
-      bool allOk = true;
-      for (int i = 0; i < droppedFiles.length; i++) {
-        final file = droppedFiles[i];
-        final textForThisFile = (i == 0) ? bodyText : '';
-        final resultJson = native.EmailCore.fileSplitAndSend(
-          filePath: file.path,
-          fileName: file.name,
-          account: session.account,
-          recipient: recipients,
-          sessionId: session.sessionId,
-          inReplyTo: inReplyTo,
-          subject: session.subject,
-          text: textForThisFile,
-          batchId: batchId,
-        );
-        native.EmailCore.logWrite('[Unified] fileSplitAndSend result: $resultJson');
-        try {
-          final r = jsonDecode(resultJson);
-          if (r['status'] != 'success') {
-            allOk = false;
-          } else {
-            addPendingUnifiedMessage(native.EmailMessage(
-              sender: session.account,
-              recipient: recipients,
-              subject: session.subject,
-              body: textForThisFile,
-              timestamp: DateTime.now().toString().substring(0, 19),
-              uuid: 'pending_${r['message_id'] ?? file.path}',
-              messageId: r['message_id']?.toString() ?? '',
-              sessionId: session.sessionId,
-              account: session.account,
-              isSent: 1,
-              xMailer: native.XMailer.attachMeta,
-              pendingFile: native.PendingFileInfo(
-                fileName: file.name,
-                fileSize: file.size,
-                fileId: r['file_id']?.toString() ?? '',
-                batchId: batchId,
-                totalChunks: r['total_chunks'] is int ? r['total_chunks'] as int : 0,
-              ),
-            ));
-          }
-        } catch (_) {
-          allOk = false;
+      final resultJson = native.EmailCore.fileSplitAndSendMulti(
+        files: [for (final f in droppedFiles) {'path': f.path, 'name': f.name}],
+        account: session.account,
+        recipient: recipients,
+        sessionId: session.sessionId,
+        inReplyTo: inReplyTo,
+        subject: session.subject,
+        text: bodyText,
+        batchId: batchId,
+      );
+      native.EmailCore.logWrite('[Unified] fileSplitAndSendMulti result: $resultJson');
+      bool allOk = false;
+      try {
+        final r = jsonDecode(resultJson);
+        if (r['status'] == 'success') {
+          allOk = true;
+          final filesMeta = (r['files'] as List? ?? const []);
+          addPendingUnifiedMessage(native.EmailMessage(
+            sender: session.account,
+            recipient: recipients,
+            subject: session.subject,
+            body: bodyText,
+            timestamp: DateTime.now().toString().substring(0, 19),
+            uuid: 'pending_${r['message_id'] ?? batchId}',
+            messageId: r['message_id']?.toString() ?? '',
+            sessionId: session.sessionId,
+            account: session.account,
+            isSent: 1,
+            xMailer: native.XMailer.attachMeta,
+            pendingFiles: [
+              for (final fm in filesMeta)
+                native.PendingFileInfo(
+                  fileName: fm['file_name']?.toString() ?? '',
+                  fileSize: (fm['file_size'] as num?)?.toInt() ?? 0,
+                  fileId: fm['file_id']?.toString() ?? '',
+                  batchId: batchId,
+                  totalChunks: fm['total_chunks'] is int ? fm['total_chunks'] as int : 0,
+                ),
+            ],
+          ));
         }
-      }
+      } catch (_) {}
       if (allOk) {
         replyController.clear();
         droppedFiles.clear();

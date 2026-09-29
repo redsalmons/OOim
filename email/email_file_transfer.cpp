@@ -180,6 +180,125 @@ extern "C" int email_file_split_and_send(const char* filePath, const char* fileN
     return 0;
 }
 
+// Multi-file variant: filesJson is a JSON array [{"path":"...","name":"..."}, ...].
+// One META task (1.0.4) carries a "files" array with every file's metadata + the
+// caption text; all chunk tasks (1.0.5) chain linearly behind it:
+//   META -> f0c0 -> f0c1 -> f1c0 -> ...
+extern "C" int email_file_split_and_send_multi(const char* filesJson,
+                                               const char* account, const char* recipient,
+                                               const char* sessionId, const char* inReplyTo,
+                                               const char* subject, const char* text,
+                                               const char* batchId,
+                                               char* outJson, int outSize) {
+    auto fail = [&](int rc, const char* err) {
+        if (outJson && outSize > 0) snprintf(outJson, outSize, R"({"status":"failed","error":"%s"})", err);
+        return rc;
+    };
+    if (!filesJson || !account || !recipient) return fail(-1, "null_parameter");
+
+    std::string accountStr(account), recipientStr(recipient);
+    std::string sessionIdStr(sessionId ? sessionId : "");
+    std::string inReplyToStr(inReplyTo ? inReplyTo : "");
+    std::string subjectStr(subject ? subject : "");
+
+    json fileList;
+    try { fileList = json::parse(filesJson); } catch (...) { return fail(-2, "bad_files_json"); }
+    if (!fileList.is_array() || fileList.empty()) return fail(-2, "empty_files");
+
+    // Prepare every file first so the single META can carry all of them.
+    std::vector<filechunk::PreparedFile> prepared(fileList.size());
+    std::vector<std::string> fileIds(fileList.size());
+    std::vector<std::string> paths(fileList.size());
+    json filesMeta = json::array();
+    for (size_t i = 0; i < fileList.size(); i++) {
+        const auto& f = fileList[i];
+        paths[i] = f.value("path", "");
+        std::string name = f.value("name", "");
+        if (paths[i].empty() || name.empty() ||
+            !filechunk::prepareFileForSend(paths[i], name, prepared[i])) {
+            for (size_t j = 0; j < i; j++) filechunk::releasePrepared(prepared[j]);
+            return fail(-3, "file_not_found");
+        }
+        fileIds[i] = generate_file_id();
+        const auto& p = prepared[i];
+        filesMeta.push_back({
+            {"file_id", fileIds[i]}, {"file_name", p.fileName},
+            {"file_size", p.fileSize}, {"file_md5", p.fileMd5},
+            {"compression", p.compression}, {"compressed_size", p.compressedSize},
+            {"compressed_md5", p.compressedMd5},
+            {"total_chunks", p.totalChunks}, {"chunk_size", p.chunkSize},
+        });
+
+        FileTransferRecord ftRec;
+        ftRec.fileId = fileIds[i];
+        ftRec.sessionId = sessionIdStr;
+        ftRec.account = accountStr;
+        ftRec.sender = accountStr;
+        ftRec.fileName = p.fileName;
+        ftRec.fileSize = p.fileSize;
+        ftRec.fileMd5 = p.fileMd5;
+        ftRec.totalChunks = p.totalChunks;
+        ftRec.chunkSize = p.chunkSize;
+        ftRec.status = 0;
+        ftRec.originalPath = paths[i];
+        ftRec.compression = p.compression;
+        ftRec.compressedMd5 = p.compressedMd5;
+        if (!s_fileTransferRepo.insertFileTransfer(ftRec)) {
+            for (size_t j = 0; j <= i; j++) filechunk::releasePrepared(prepared[j]);
+            return fail(-4, "db_insert_failed");
+        }
+    }
+
+    // Single META task carrying the whole files[] array.
+    std::string fileMsgId = generate_x_message_id(accountStr);
+    {
+        json meta = {
+            {"msg_type", "file"}, {"files", filesMeta},
+            {"text", text ? text : ""}, {"batch_id", batchId ? batchId : ""},
+            {"x_message_id", fileMsgId}, {"x_reply_to", inReplyToStr},
+        };
+        s_taskRepo.insert(accountStr, recipientStr, subjectStr, meta.dump(),
+                          inReplyToStr, fileMsgId, fileMsgId, sessionIdStr, XMailer::ATTACH_META);
+        LOG_INFO("email_file_split_and_send_multi: META task (1.0.4) files=%zu, msg_id=%s\n",
+                 fileList.size(), fileMsgId.c_str());
+    }
+
+    // Chunk tasks for all files, chained linearly after the META.
+    std::string prevMsgId = fileMsgId;
+    int queued = 0;
+    for (size_t fi = 0; fi < prepared.size(); fi++) {
+        auto& p = prepared[fi];
+        for (int i = 0; i < p.totalChunks; i++) {
+            auto chunk = filechunk::readChunk(p, i);
+            if (chunk.empty() && i < p.totalChunks - 1) {
+                LOG_INFO("email_file_split_and_send_multi: failed to read chunk %d of %s\n", i, p.fileName.c_str());
+                continue;
+            }
+            std::string truckMsgId = generate_x_message_id(accountStr);
+            json truck = {
+                {"msg_type", "truck"}, {"file_id", fileIds[fi]}, {"chunk_index", i},
+                {"chunk_data", base64_encode(chunk.data(), chunk.size())},
+                {"chunk_md5", compute_md5(std::string(chunk.begin(), chunk.end()))},
+                {"x_message_id", truckMsgId}, {"x_reply_to", prevMsgId},
+            };
+            s_taskRepo.insert(accountStr, recipientStr, subjectStr, truck.dump(),
+                              prevMsgId, truckMsgId, truckMsgId, sessionIdStr, XMailer::ATTACH_CHUNK);
+            prevMsgId = truckMsgId;
+            queued++;
+        }
+        filechunk::releasePrepared(p);
+    }
+
+    if (outJson && outSize > 0) {
+        json resp = {{"status", "success"}, {"message_id", fileMsgId},
+                     {"batch_id", batchId ? batchId : ""}, {"files", filesMeta}};
+        snprintf(outJson, outSize, "%s", resp.dump().c_str());
+    }
+    LOG_INFO("email_file_split_and_send_multi: success, files=%zu, total_tasks=%d\n",
+             fileList.size(), queued + 1);
+    return 0;
+}
+
 // Process a received "file" message: create file_transfer record on receiver side.
 // Called after decryption when msg_type == "file".
 extern "C" int email_file_transfer_receive_file(const char* fileId, const char* sessionId,

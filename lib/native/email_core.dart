@@ -424,6 +424,9 @@ typedef _EmailMigrateIslocalDart = int Function();
 // File transfer operations
 typedef _EmailFileSplitAndSendNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailFileSplitAndSendDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+// multi: (filesJson, account, recipient, sessionId, inReplyTo, subject, text, batchId, outJson, outSize)
+typedef _EmailFileSplitAndSendMultiNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailFileSplitAndSendMultiDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _EmailFileTransferQueryNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailFileTransferQueryDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
@@ -479,6 +482,9 @@ typedef _GroupSendMessageNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, P
 typedef _GroupSendMessageDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 typedef _GroupSendFileNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _GroupSendFileDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+// multi: (account, sessionId, filesJson, inReplyTo, subject, text, batchId, outJson, outSize)
+typedef _GroupSendFileMultiNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _GroupSendFileMultiDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
 
 typedef _GroupHandleIncomingNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Int32);
 typedef _GroupHandleIncomingDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, int);
@@ -616,6 +622,7 @@ final _emailTaskStatus = _lib.lookupFunction<_EmailTaskStatusNative, _EmailTaskS
 final _emailMigrateIslocal = _lib.lookupFunction<_EmailMigrateIslocalNative, _EmailMigrateIslocalDart>('email_migrate_islocal');
 
 final _emailFileSplitAndSend = _lib.lookupFunction<_EmailFileSplitAndSendNative, _EmailFileSplitAndSendDart>('email_file_split_and_send');
+final _emailFileSplitAndSendMulti = _lib.lookupFunction<_EmailFileSplitAndSendMultiNative, _EmailFileSplitAndSendMultiDart>('email_file_split_and_send_multi');
 final _emailFileTransferQuery = _lib.lookupFunction<_EmailFileTransferQueryNative, _EmailFileTransferQueryDart>('email_file_transfer_query');
 final _emailFileTransferQueryPending = _lib.lookupFunction<_EmailFileTransferQueryPendingNative, _EmailFileTransferQueryPendingDart>('email_file_transfer_query_pending');
 final _emailFileTransferReassemble = _lib.lookupFunction<_EmailFileTransferReassembleNative, _EmailFileTransferReassembleDart>('email_file_transfer_reassemble');
@@ -638,6 +645,7 @@ final _groupGetInfo = _lib.lookupFunction<_GroupGetInfoNative, _GroupGetInfoDart
 final _groupList = _lib.lookupFunction<_GroupListNative, _GroupListDart>('group_list');
 final _groupSendMessage = _lib.lookupFunction<_GroupSendMessageNative, _GroupSendMessageDart>('group_send_message');
 final _groupSendFile = _lib.lookupFunction<_GroupSendFileNative, _GroupSendFileDart>('group_send_file');
+final _groupSendFileMulti = _lib.lookupFunction<_GroupSendFileMultiNative, _GroupSendFileMultiDart>('group_send_file_multi');
 final _groupHandleIncoming = _lib.lookupFunction<_GroupHandleIncomingNative, _GroupHandleIncomingDart>('group_handle_incoming');
 final _groupPrepareOutgoing = _lib.lookupFunction<_GroupPrepareOutgoingNative, _GroupPrepareOutgoingDart>('group_prepare_outgoing');
 final _groupAfterSent = _lib.lookupFunction<_GroupAfterSentNative, _GroupAfterSentDart>('group_after_sent');
@@ -724,7 +732,7 @@ class EmailMessage {
   final String groupId;
   final String xMailer;
   final int isSent;
-  final PendingFileInfo? pendingFile;
+  final List<PendingFileInfo> pendingFiles;
 
   EmailMessage({
     required this.sender,
@@ -748,7 +756,7 @@ class EmailMessage {
     this.groupId = '',
     this.xMailer = '',
     this.isSent = 0,
-    this.pendingFile,
+    this.pendingFiles = const [],
   });
 
 }
@@ -1867,6 +1875,79 @@ class EmailCore {
       malloc.free(accountPtr);
       malloc.free(recipientPtr);
       malloc.free(sessionIdPtr);
+      malloc.free(inReplyToPtr);
+      malloc.free(subjectPtr);
+      malloc.free(textPtr);
+      malloc.free(batchIdPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Multi-file variant: a single META carries all files in a "files" array.
+  /// filesJson = [{"path":"...","name":"..."}, ...]. Returns JSON result.
+  static String fileSplitAndSendMulti({
+    required List<Map<String, String>> files,
+    required String account,
+    required String recipient,
+    String sessionId = '',
+    String inReplyTo = '',
+    String subject = '',
+    String text = '',
+    String batchId = '',
+  }) {
+    final filesJsonPtr = jsonEncode(files).toNativeUtf8();
+    final accountPtr = account.toNativeUtf8();
+    final recipientPtr = recipient.toNativeUtf8();
+    final sessionIdPtr = sessionId.toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
+    final subjectPtr = subject.toNativeUtf8();
+    final textPtr = text.toNativeUtf8();
+    final batchIdPtr = batchId.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _emailFileSplitAndSendMulti(filesJsonPtr, accountPtr, recipientPtr,
+                              sessionIdPtr, inReplyToPtr, subjectPtr, textPtr, batchIdPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(filesJsonPtr);
+      malloc.free(accountPtr);
+      malloc.free(recipientPtr);
+      malloc.free(sessionIdPtr);
+      malloc.free(inReplyToPtr);
+      malloc.free(subjectPtr);
+      malloc.free(textPtr);
+      malloc.free(batchIdPtr);
+      malloc.free(outJson);
+    }
+  }
+
+  /// Multi-file MLS variant: one 2.0.4 META carries all files.
+  /// filesJson = [{"path":"...","name":"..."}, ...]. Returns JSON result.
+  static String groupSendFileMulti({
+    required String account,
+    required String unifiedSessionId,
+    required List<Map<String, String>> files,
+    String inReplyTo = '',
+    String subject = '',
+    String text = '',
+    String batchId = '',
+  }) {
+    final accountPtr = account.toNativeUtf8();
+    final sessionPtr = unifiedSessionId.toNativeUtf8();
+    final filesJsonPtr = jsonEncode(files).toNativeUtf8();
+    final inReplyToPtr = inReplyTo.toNativeUtf8();
+    final subjectPtr = subject.toNativeUtf8();
+    final textPtr = text.toNativeUtf8();
+    final batchIdPtr = batchId.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(65536);
+    try {
+      _groupSendFileMulti(accountPtr, sessionPtr, filesJsonPtr,
+                          inReplyToPtr, subjectPtr, textPtr, batchIdPtr, outJson, 65536);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(accountPtr);
+      malloc.free(sessionPtr);
+      malloc.free(filesJsonPtr);
       malloc.free(inReplyToPtr);
       malloc.free(subjectPtr);
       malloc.free(textPtr);

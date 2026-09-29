@@ -723,16 +723,22 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                         ftSid = us.sessionId;
                                     }
                                 }
-                                char ftResult[4096];
-                                email_file_transfer_receive_file(
-                                    fj.value("file_id", "").c_str(), ftSid.c_str(), accountStr.c_str(), eml_from.c_str(),
-                                    fj.value("file_name", "").c_str(), fj.value("file_size", 0LL),
-                                    fj.value("file_md5", "").c_str(), fj.value("total_chunks", 0),
-                                    fj.value("chunk_size", 0), message_id.c_str(),
-                                    fj.value("compression", "").c_str(), fj.value("compressed_md5", "").c_str(),
-                                    ftResult, sizeof(ftResult));
-                                LOG_INFO("[DB] download_pending: MLS file meta received, file_id=%s\n",
-                                         fj.value("file_id", "").c_str());
+                                // Multi-file META: "files" array; fall back to the
+                                // top-level object for single-file metas.
+                                json fileArr = fj.contains("files") ? fj["files"]
+                                                                    : json::array({fj});
+                                for (const auto& fe : fileArr) {
+                                    char ftResult[4096];
+                                    email_file_transfer_receive_file(
+                                        fe.value("file_id", "").c_str(), ftSid.c_str(), accountStr.c_str(), eml_from.c_str(),
+                                        fe.value("file_name", "").c_str(), fe.value("file_size", 0LL),
+                                        fe.value("file_md5", "").c_str(), fe.value("total_chunks", 0),
+                                        fe.value("chunk_size", 0), message_id.c_str(),
+                                        fe.value("compression", "").c_str(), fe.value("compressed_md5", "").c_str(),
+                                        ftResult, sizeof(ftResult));
+                                    LOG_INFO("[DB] download_pending: MLS file meta received, file_id=%s\n",
+                                             fe.value("file_id", "").c_str());
+                                }
                             } else if (x_session_chart == XMailer::MLS_FILE_CHUNK && fj.value("msg_type", "") == "truck") {
                                 std::string outputDir = storageDirStr + "/" + accountStr + "/received_files";
                                 std::filesystem::create_directories(outputDir);
@@ -1138,14 +1144,20 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             attachReplyTo = fileJson.value("x_reply_to", "");
                             std::string sid;
                             if (!attachReplyTo.empty()) sid = s_sessionRepo.querySessionByInReplyTo(attachReplyTo, accountStr);
-                            char ftResult[4096];
-                            email_file_transfer_receive_file(
-                                fileJson.value("file_id","").c_str(), sid.c_str(), accountStr.c_str(), eml_from.c_str(),
-                                fileJson.value("file_name","").c_str(), fileJson.value("file_size",0LL),
-                                fileJson.value("file_md5","").c_str(), fileJson.value("total_chunks",0),
-                                fileJson.value("chunk_size",0), message_id.c_str(),
-                                fileJson.value("compression","").c_str(), fileJson.value("compressed_md5","").c_str(),
-                                ftResult, sizeof(ftResult));
+                            // Multi-file META: "files" array; fall back to the top-level
+                            // object itself so a single-file meta still registers.
+                            json fileArr = fileJson.contains("files") ? fileJson["files"]
+                                                                      : json::array({fileJson});
+                            for (const auto& fj : fileArr) {
+                                char ftResult[4096];
+                                email_file_transfer_receive_file(
+                                    fj.value("file_id","").c_str(), sid.c_str(), accountStr.c_str(), eml_from.c_str(),
+                                    fj.value("file_name","").c_str(), fj.value("file_size",0LL),
+                                    fj.value("file_md5","").c_str(), fj.value("total_chunks",0),
+                                    fj.value("chunk_size",0), message_id.c_str(),
+                                    fj.value("compression","").c_str(), fj.value("compressed_md5","").c_str(),
+                                    ftResult, sizeof(ftResult));
+                            }
                             if (!sid.empty()) {
                                 int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
                                 if (emailId > 0) {

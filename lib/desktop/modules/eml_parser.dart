@@ -1,7 +1,25 @@
 import 'dart:convert';
-import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 import '../../native/email_core.dart' as native;
+
+/// One file entry inside a multi-file META message (files[] array element).
+class EmlFileEntry {
+  final String fileId;
+  final String fileName;
+  final int fileSize;
+  final int totalChunks;
+  final int receivedChunks;
+  final int transferStatus; // 0=pending, 1=complete, 2=failed
+
+  const EmlFileEntry({
+    this.fileId = '',
+    this.fileName = '',
+    this.fileSize = 0,
+    this.totalChunks = 0,
+    this.receivedChunks = 0,
+    this.transferStatus = 0,
+  });
+}
 
 class EmlParsedContent {
   final String textBody;
@@ -9,13 +27,8 @@ class EmlParsedContent {
   final List<EmlAttachment> attachments;
   final bool hasAttachments;
   final bool isFileMessage;
-  final String fileName;
-  final int fileSize;
-  final String fileId;
+  final List<EmlFileEntry> files;
   final String batchId;
-  final int totalChunks;
-  final int receivedChunks;
-  final int transferStatus; // 0=pending, 1=complete, 2=failed
   final bool isHandshakeMessage; // true for PREKEY_BUNDLE (1.0.0) and SESSION_INIT (1.0.1)
 
   EmlParsedContent({
@@ -24,15 +37,44 @@ class EmlParsedContent {
     this.attachments = const [],
     this.hasAttachments = false,
     this.isFileMessage = false,
-    this.fileName = '',
-    this.fileSize = 0,
-    this.fileId = '',
+    this.files = const [],
     this.batchId = '',
-    this.totalChunks = 0,
-    this.receivedChunks = 0,
-    this.transferStatus = 0,
     this.isHandshakeMessage = false,
   });
+}
+
+/// Query native transfer state for one file entry in a META's files[] array.
+EmlFileEntry _fileEntryFromMeta(Map f) {
+  final fId = f['file_id'] as String? ?? '';
+  int receivedChunks = 0;
+  int transferStatus = 0;
+  if (fId.isNotEmpty) {
+    try {
+      final st = jsonDecode(native.EmailCore.fileTransferQuery(fId));
+      if (st['status'] == 'success') {
+        receivedChunks = st['received_chunks'] as int? ?? 0;
+        transferStatus = st['transfer_status'] as int? ?? 0;
+      }
+    } catch (_) {}
+  }
+  return EmlFileEntry(
+    fileId: fId,
+    fileName: f['file_name'] as String? ?? '',
+    fileSize: (f['file_size'] as num?)?.toInt() ?? 0,
+    totalChunks: f['total_chunks'] as int? ?? 0,
+    receivedChunks: receivedChunks,
+    transferStatus: transferStatus,
+  );
+}
+
+/// Build file entries from a META's "files" array, falling back to the
+/// top-level single-file fields when "files" is absent.
+List<EmlFileEntry> _fileEntriesFromMeta(Map meta) {
+  final arr = meta['files'];
+  if (arr is List && arr.isNotEmpty) {
+    return arr.whereType<Map>().map(_fileEntryFromMeta).toList();
+  }
+  return [_fileEntryFromMeta(meta)];
 }
 
 class EmlAttachment {
@@ -102,37 +144,14 @@ EmlParsedContent parseEmlFile(String filePath, {String? account, String? session
                       final msgType = decryptedJson['msg_type'] as String? ?? '';
                       if (msgType == 'file') {
                         textBody = decryptedJson['text'] as String? ?? '';
-                        final fId = decryptedJson['file_id'] as String? ?? '';
-                        final fName = decryptedJson['file_name'] as String? ?? '';
-                        final fSize = decryptedJson['file_size'] as int? ?? 0;
-                        final fChunks = decryptedJson['total_chunks'] as int? ?? 0;
-                        final fBatchId = decryptedJson['batch_id'] as String? ?? '';
-                        // Query transfer status from native
-                        int receivedChunks = 0;
-                        int transferStatus = 0;
-                        if (fId.isNotEmpty) {
-                          try {
-                            final statusJson = native.EmailCore.fileTransferQuery(fId);
-                            final statusDecoded = jsonDecode(statusJson);
-                            if (statusDecoded['status'] == 'success') {
-                              receivedChunks = statusDecoded['received_chunks'] as int? ?? 0;
-                              transferStatus = statusDecoded['transfer_status'] as int? ?? 0;
-                            }
-                          } catch (_) {}
-                        }
                         final result = EmlParsedContent(
                           textBody: textBody.isNotEmpty ? textBody : '',
                           htmlBody: '',
                           attachments: [],
                           hasAttachments: false,
                           isFileMessage: true,
-                          fileName: fName,
-                          fileSize: fSize,
-                          fileId: fId,
-                          batchId: fBatchId,
-                          totalChunks: fChunks,
-                          receivedChunks: receivedChunks,
-                          transferStatus: transferStatus,
+                          files: _fileEntriesFromMeta(decryptedJson),
+                          batchId: decryptedJson['batch_id'] as String? ?? '',
                         );
                         _emlCache[cacheKey] = result;
                         return result;
@@ -180,28 +199,11 @@ EmlParsedContent parseEmlFile(String filePath, {String? account, String? session
       try {
         final meta = jsonDecode(textBody);
         if (meta is Map && meta['msg_type'] == 'file') {
-          final fId = meta['file_id'] as String? ?? '';
-          int receivedChunks = 0;
-          int transferStatus = 0;
-          if (fId.isNotEmpty) {
-            try {
-              final st = jsonDecode(native.EmailCore.fileTransferQuery(fId));
-              if (st['status'] == 'success') {
-                receivedChunks = st['received_chunks'] as int? ?? 0;
-                transferStatus = st['transfer_status'] as int? ?? 0;
-              }
-            } catch (_) {}
-          }
           final result = EmlParsedContent(
             textBody: meta['text'] as String? ?? '',
             isFileMessage: true,
-            fileName: meta['file_name'] as String? ?? '',
-            fileSize: (meta['file_size'] as num?)?.toInt() ?? 0,
-            fileId: fId,
+            files: _fileEntriesFromMeta(meta),
             batchId: meta['batch_id'] as String? ?? '',
-            totalChunks: meta['total_chunks'] as int? ?? 0,
-            receivedChunks: receivedChunks,
-            transferStatus: transferStatus,
           );
           // Not cached: transfer progress changes over time.
           return result;
