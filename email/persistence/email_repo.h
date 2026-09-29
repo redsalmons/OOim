@@ -90,6 +90,7 @@ public:
 
     // Set islocal flag for an email (used when body is downloaded in fetch phase)
     bool setIslocal(const std::string& uuid, const std::string& account, int islocal);
+    bool setIslocalIfLowerThan(const std::string& uuid, const std::string& account, int islocal, int maxExclusive);
 
     // Get islocal value by rowid
     int getIslocal(int64_t id);

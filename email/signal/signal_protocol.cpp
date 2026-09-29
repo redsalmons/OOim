@@ -819,14 +819,22 @@ DecryptResult dr_decrypt(const std::string& account, const std::string& peerEmai
     std::string mkStr(mkBytes.begin(), mkBytes.end());
     result.plaintext = aes_decrypt(mkStr, msg.ciphertext);
 
+    result.success = !result.plaintext.empty();
+    if (!result.success) {
+        // Decrypt failed (duplicate, out-of-order beyond skip window, or wrong key).
+        // Do NOT persist recvN/recvChainKey: a failed decrypt must not consume a
+        // chain slot, or every subsequent message on this chain will misalign.
+        result.error = "decrypt_failed";
+        LOG_INFO("[Signal] dr_decrypt: decrypted msg n=%d for session=%s, success=0\n",
+                 msg.header.n, sessionId.c_str());
+        return result;
+    }
+
     rec.recvChainKey = newCk;
     rec.recvN++;
     s_sessionRepo.saveSession(rec);
 
-    result.success = !result.plaintext.empty();
-    if (!result.success) result.error = "decrypt_failed";
-    
-    LOG_INFO("[Signal] dr_decrypt: decrypted msg n=%d for session=%s, success=%d\n",
-             msg.header.n, sessionId.c_str(), result.success);
+    LOG_INFO("[Signal] dr_decrypt: decrypted msg n=%d for session=%s, success=1\n",
+             msg.header.n, sessionId.c_str());
     return result;
 }

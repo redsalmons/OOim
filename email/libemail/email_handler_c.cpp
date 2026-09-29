@@ -924,8 +924,11 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                         int getRc = GetEmailToFile_c(configIndex, folder.c_str(), uuid.c_str(), emlPath.c_str());
                         LOG_INFO("FetchAndStore_c: downloaded EML for existing uuid=%s, rc=%d\n", uuid.c_str(), getRc);
                         if (getRc == 0) {
-                            // Body downloaded, set islocal=1 for download_pending_bodies to process
-                            s_emailRepo.setIslocal(uuid, accountStr, 1);
+                            // Body downloaded, set islocal=1 for download_pending_bodies to process.
+                            // Never downgrade islocal=2: a concurrent download_pending pass may
+                            // have already decrypted this message, and re-running it would burn
+                            // a Double Ratchet chain slot and desync the session.
+                            s_emailRepo.setIslocalIfLowerThan(uuid, accountStr, 1, 2);
                         }
                     } else {
                         LOG_INFO("FetchAndStore_c: skipping EML download for uuid=%s, already processed (islocal=2)\n", uuid.c_str());
@@ -974,8 +977,8 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                 int getRc = GetEmailToFile_c(configIndex, folder.c_str(), uuid.c_str(), emlPath.c_str());
                 LOG_INFO("FetchAndStore_c: downloaded EML for new uuid=%s, rc=%d\n", uuid.c_str(), getRc);
                 if (getRc == 0) {
-                    // Body downloaded, set islocal=1 for download_pending_bodies to process
-                    s_emailRepo.setIslocal(uuid, accountStr, 1);
+                    // Same guard: don't regress an already-processed (islocal=2) row.
+                    s_emailRepo.setIslocalIfLowerThan(uuid, accountStr, 1, 2);
                 }
             }
 

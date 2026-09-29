@@ -422,6 +422,23 @@ bool EmailRepo::setIslocal(const std::string& uuid, const std::string& account, 
     return rc == SQLITE_DONE;
 }
 
+bool EmailRepo::setIslocalIfLowerThan(const std::string& uuid, const std::string& account, int islocal, int maxExclusive) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE localemail SET islocal = ? WHERE uuid = ? AND account = ? AND islocal < ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, islocal);
+    sqlite3_bind_text(stmt, 2, uuid.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, maxExclusive);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
 int EmailRepo::getIslocal(int64_t id) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();

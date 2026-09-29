@@ -614,40 +614,54 @@ mixin ConversationViewMixin on State<EmailModule> {
     return GestureDetector(
       onTap: done || isMe ? () => _saveUnifiedFile(meta, isMe) : null,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 180, maxWidth: 260),
+        constraints: const BoxConstraints(minWidth: 220, maxWidth: 320),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(failed ? Icons.error_outline : Icons.insert_drive_file,
-                  size: 28, color: failed ? Colors.red : Colors.blueGrey),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(meta.fileName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-                      overflow: TextOverflow.ellipsis),
-                  Text(sizeStr, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
-                ]),
-              ),
-              if (done || isMe) Icon(Icons.download, size: 16, color: context.oim.textSecondary),
-            ]),
-            const SizedBox(height: 6),
-            LinearProgressIndicator(
-              value: progress,
-              minHeight: 3,
-              backgroundColor: context.oim.border,
-              valueColor: AlwaysStoppedAnimation<Color>(failed ? Colors.red : context.scheme.primary),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              failed ? AppStrings.transferFailed : done ? (AppStrings.isZh ? '已完成 ${meta.receivedChunks}/${meta.totalChunks}' : 'Done ${meta.receivedChunks}/${meta.totalChunks}') : '${meta.receivedChunks}/${meta.totalChunks}',
-              style: TextStyle(fontSize: 10, color: context.oim.textMuted),
-            ),
             if (caption.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(bottom: 6),
                 child: SelectableText(caption, style: const TextStyle(fontSize: 14)),
               ),
+            // One file per row: icon | name | size | progress
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Icon(failed ? Icons.error_outline : Icons.insert_drive_file,
+                    size: 22, color: failed ? Colors.red : Colors.blueGrey),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(meta.fileName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                      overflow: TextOverflow.ellipsis),
+                ),
+                const SizedBox(width: 8),
+                Text(sizeStr, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 60,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 3,
+                        backgroundColor: context.oim.border,
+                        valueColor: AlwaysStoppedAnimation<Color>(failed ? Colors.red : context.scheme.primary),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        failed ? AppStrings.transferFailed : '${meta.receivedChunks}/${meta.totalChunks}',
+                        style: TextStyle(fontSize: 9, color: context.oim.textMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                if (done || isMe) ...[
+                  const SizedBox(width: 6),
+                  Icon(Icons.download, size: 16, color: context.oim.textSecondary),
+                ],
+              ],
+            ),
           ],
         ),
       ),
@@ -692,7 +706,8 @@ mixin ConversationViewMixin on State<EmailModule> {
                     setState(() {
                       for (final file in detail.files) {
                         final path = file.path;
-                        final name = path.split('/').last;
+                        // Both separators: Windows paths arrive as C:\dir\file
+                        final name = path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).lastOrNull ?? path;
                         int size = 0;
                         try {
                           size = File(path).lengthSync();
