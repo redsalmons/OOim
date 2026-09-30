@@ -657,73 +657,6 @@ int GetEmail_c(int configIndex, const char* folder, const char* uid, char* outJs
     }
 }
 
-int GetEmailToFile_c(int configIndex, const char* folder, const char* uid, const char* filePath) {
-    try {
-        if (configIndex < 0 || configIndex >= static_cast<int>(oemailim::EmailHandler::g_EmailConfigIndices.size())) {
-            return -1;
-        }
-
-        auto emailObj = oemailim::EmailHandler::g_EmailConfigIndices[configIndex];
-        if (!emailObj) {
-            return -2;
-        }
-
-        auto delegate = emailObj->get_delegate();
-        if (!delegate) {
-            return -3;
-        }
-
-        std::string folderStr = folder ? folder : "INBOX";
-        std::string uidStr = uid ? uid : "";
-        std::string filePathStr = filePath ? filePath : "";
-
-        std::string content = delegate->get_email(folderStr, uidStr);
-        if (content.empty()) {
-            // Check if this was a network error or a non-network error
-            std::string lastErr = delegate->get_last_error();
-            // Network-related keywords in error message
-            bool isNetwork = lastErr.find("EPIPE") != std::string::npos ||
-                             lastErr.find("broken pipe") != std::string::npos ||
-                             lastErr.find("ECONNRESET") != std::string::npos ||
-                             lastErr.find("connection reset") != std::string::npos ||
-                             lastErr.find("connect failed") != std::string::npos ||
-                             lastErr.find("not connected") != std::string::npos ||
-                             lastErr.find("timeout") != std::string::npos ||
-                             lastErr.find("socket") != std::string::npos;
-            LOG_INFO("GetEmailToFile_c: get_email returned empty, last_error='%s', isNetwork=%d\n", lastErr.c_str(), isNetwork);
-            return isNetwork ? -10 : -4;
-        }
-
-        std::ofstream outFile(filePathStr, std::ios::binary | std::ios::trunc);
-        if (!outFile.is_open()) {
-            return -7;
-        }
-        outFile << content;
-        outFile.close();
-
-        // Detect silent write failure (e.g. disk full): ofstream sets failbit
-        // instead of throwing, so verify both the stream state and the size on disk.
-        std::error_code fsErr;
-        auto onDisk = std::filesystem::file_size(filePathStr, fsErr);
-        if (outFile.fail() || fsErr || onDisk != content.size()) {
-            LOG_INFO("GetEmailToFile_c: write failed for uid=%s to %s (expected %zu, on-disk %llu)%s\n",
-                     uidStr.c_str(), filePathStr.c_str(), content.size(),
-                     (unsigned long long)(fsErr ? 0 : onDisk),
-                     fsErr ? " [stat failed]" : "");
-            std::filesystem::remove(filePathStr, fsErr);  // drop the truncated stub
-            return -8;
-        }
-
-        LOG_INFO("GetEmailToFile_c: saved uid=%s to %s (%zu bytes)\n", uidStr.c_str(), filePathStr.c_str(), content.size());
-        return 0;
-    } catch (const std::exception& e) {
-        LOG_INFO("GetEmailToFile_c: exception: %s\n", e.what());
-        return -5;
-    } catch (...) {
-        return -6;
-    }
-}
-
 int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                     const char* account, const char* storageDir,
                     char* outJson, int outSize) {
@@ -832,12 +765,27 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                     [](unsigned char c) { return c == '\r' || c == '\n' || std::isspace(c); }),
                 x_session_chart.end());
 
-            // Filter: only skip emails whose X-Mailer value is explicitly invalid.
-            // If X-Mailer is empty, treat it as a normal (non-Signal) email and store it,
-            // so that plain replies can still be associated to sessions via In-Reply-To.
-            if (!x_session_chart.empty() && !XMailer::isValid(x_session_chart)) {
+            // Filter: only whitelist X-Mailer values are ours. Everything else —
+            // foreign X-Mailer or none at all — is skipped, with only a uuid stub
+            // recorded so the incremental sync watermark still advances.
+            if (!XMailer::isValid(x_session_chart)) {
                 LOG_INFO("FetchAndStore_c: skipping email uuid=%s, X-Mailer='%s' not in whitelist\n",
                          uuid.c_str(), x_session_chart.c_str());
+                // Persist a stub row (uuid only, invisible, already-processed) so the
+                // incremental sync watermark MAX(uuid) advances past this mail and it
+                // is never re-fetched. islocal=2 keeps it out of the pending-download
+                // queue; visible=0 keeps it out of the UI.
+                if (!uuid.empty()) {
+                    EmailRecord stub;
+                    stub.uuid = uuid;
+                    stub.account = accountStr;
+                    stub.folder = folderStr;
+                    stub.messageId = message_id;
+                    stub.isLocal = 2;
+                    stub.visible = 0;
+                    stub.xMailer = x_session_chart;
+                    s_emailRepo.insert(stub);
+                }
                 continue;
             }
 
@@ -909,32 +857,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                     LOG_INFO("FetchAndStore_c: Updated id=%lld, uuid='%s', folder='%s'\n", (long long)existing_id, uuid.c_str(), folder.c_str());
                 }
 
-                // Download full EML for this email (skip if already processed)
-                std::string storageDirStr = storageDir ? storageDir : "";
-                if (!storageDirStr.empty()) {
-                    int64_t currentRowid = s_emailRepo.findRowidByUuidAndAccount(uuid, accountStr);
-                    int currentIslocal = -1;
-                    if (currentRowid > 0) {
-                        currentIslocal = s_emailRepo.getIslocal(currentRowid);
-                    }
-                    if (currentIslocal < 2) {
-                        std::string accountDir = storageDirStr + "/" + accountStr;
-                        std::filesystem::create_directories(accountDir);
-                        std::string emlPath = accountDir + "/" + uuid + ".eml";
-                        int getRc = GetEmailToFile_c(configIndex, folder.c_str(), uuid.c_str(), emlPath.c_str());
-                        LOG_INFO("FetchAndStore_c: downloaded EML for existing uuid=%s, rc=%d\n", uuid.c_str(), getRc);
-                        if (getRc == 0) {
-                            // Body downloaded, set islocal=1 for download_pending_bodies to process.
-                            // Never downgrade islocal=2: a concurrent download_pending pass may
-                            // have already decrypted this message, and re-running it would burn
-                            // a Double Ratchet chain slot and desync the session.
-                            s_emailRepo.setIslocalIfLowerThan(uuid, accountStr, 1, 2);
-                        }
-                    } else {
-                        LOG_INFO("FetchAndStore_c: skipping EML download for uuid=%s, already processed (islocal=2)\n", uuid.c_str());
-                    }
-                }
-
+                // Body is fetched into memory by download_pending_bodies (no disk .eml).
                 stored_count++;
                 continue;
             }
@@ -968,19 +891,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                          uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str());
             }
 
-            // Download full EML for this email
-            std::string storageDirStr = storageDir ? storageDir : "";
-            if (!storageDirStr.empty() && my_rowid > 0) {
-                std::string accountDir = storageDirStr + "/" + accountStr;
-                std::filesystem::create_directories(accountDir);
-                std::string emlPath = accountDir + "/" + uuid + ".eml";
-                int getRc = GetEmailToFile_c(configIndex, folder.c_str(), uuid.c_str(), emlPath.c_str());
-                LOG_INFO("FetchAndStore_c: downloaded EML for new uuid=%s, rc=%d\n", uuid.c_str(), getRc);
-                if (getRc == 0) {
-                    // Same guard: don't regress an already-processed (islocal=2) row.
-                    s_emailRepo.setIslocalIfLowerThan(uuid, accountStr, 1, 2);
-                }
-            }
+            // Body is fetched into memory by download_pending_bodies (no disk .eml).
 
             // Extract contacts from From and To headers into addressbook
             if (!from_addr.empty()) {

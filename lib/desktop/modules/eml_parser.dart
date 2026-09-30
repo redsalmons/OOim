@@ -91,19 +91,21 @@ void clearEmlCache() {
   _emlCache.clear();
 }
 
-EmlParsedContent parseEmlFile(String filePath, {String? account, String? sessionId, String? fromAddr, String? xMailer, int isSent = 0}) {
+/// Parses the stored body of a localemail row (email_body table, keyed by
+/// rowid). Bodies are no longer read from .eml files on disk.
+EmlParsedContent parseEmailBody(int emailId, {String? account, String? sessionId, String? fromAddr, String? xMailer, int isSent = 0}) {
   // Clear cache if it grows too large
   if (_emlCache.length > 1000) {
     _emlCache.clear();
   }
-  final cacheKey = [filePath, account ?? '', sessionId ?? '', fromAddr ?? '', xMailer ?? '', isSent].join('|');
+  final cacheKey = [emailId, account ?? '', sessionId ?? '', fromAddr ?? '', xMailer ?? '', isSent].join('|');
   if (_emlCache.containsKey(cacheKey)) {
     return _emlCache[cacheKey]!;
   }
   native.EmailCore.logWrite('[EML] cache miss for $cacheKey, parsing...');
 
   try {
-    final jsonStr = native.EmailCore.parseEml(filePath);
+    final jsonStr = native.EmailCore.parseEmailBody(emailId);
     final decoded = jsonDecode(jsonStr);
 
     if (decoded['status'] != 'success') {

@@ -2,6 +2,7 @@
 #include "email_core.h"
 #include "logger.h"
 #include "email_handler_c.h"
+#include "keychain_store.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -331,9 +332,14 @@ int email_config_save(const char* path, const char* local_data_path,
     for (int i = 0; i < count; i++) {
         const EmailAccountConfig* acc = &accounts[i];
         json account_obj;
+        // Secrets never hit disk: auth_code lives in the Keychain, the conf
+        // file only records that an account exists.
+        if (acc->auth_code && *acc->auth_code && acc->email && *acc->email) {
+            keychain_store::store_secret(acc->email, acc->auth_code);
+        }
         account_obj["type"] = acc->type ? acc->type : "";
         account_obj["email"] = acc->email ? acc->email : "";
-        account_obj["auth_code"] = acc->auth_code ? acc->auth_code : "";
+        account_obj["auth_code"] = "";
         account_obj["smtp_server"] = acc->smtp_server ? acc->smtp_server : "";
         account_obj["smtp_port"] = acc->smtp_port;
         account_obj["imap_server"] = acc->imap_server ? acc->imap_server : "";
@@ -419,6 +425,7 @@ int email_config_load(const char* path, char** local_data_path,
 
         int capacity = 0;
         json accounts_array = root["accounts"];
+        bool migratedSecrets = false;
 
         for (const auto& account_obj : accounts_array) {
             if (!account_obj.is_object()) continue;
@@ -430,8 +437,23 @@ int email_config_load(const char* path, char** local_data_path,
                 current.type = strdup(account_obj["type"].get<std::string>().c_str());
             if (account_obj.contains("email") && account_obj["email"].is_string())
                 current.email = strdup(account_obj["email"].get<std::string>().c_str());
+
+            // Secrets live in the Keychain. A plaintext auth_code in the file
+            // is legacy data: migrate it and scrub the file below.
+            std::string fileSecret;
             if (account_obj.contains("auth_code") && account_obj["auth_code"].is_string())
-                current.auth_code = strdup(account_obj["auth_code"].get<std::string>().c_str());
+                fileSecret = account_obj["auth_code"].get<std::string>();
+            std::string secret;
+            if (current.email && *current.email) {
+                if (!fileSecret.empty()) {
+                    if (keychain_store::store_secret(current.email, fileSecret)) migratedSecrets = true;
+                    secret = fileSecret;
+                } else {
+                    secret = keychain_store::load_secret(current.email);
+                }
+            }
+            if (!secret.empty())
+                current.auth_code = strdup(secret.c_str());
             if (account_obj.contains("smtp_server") && account_obj["smtp_server"].is_string())
                 current.smtp_server = strdup(account_obj["smtp_server"].get<std::string>().c_str());
             if (account_obj.contains("smtp_port") && account_obj["smtp_port"].is_number())
@@ -468,6 +490,18 @@ int email_config_load(const char* path, char** local_data_path,
             }
             (*accounts)[*count] = current;
             (*count)++;
+        }
+
+        // Scrub migrated secrets out of the conf file.
+        if (migratedSecrets) {
+            for (auto& account_obj : accounts_array) {
+                if (account_obj.is_object() && account_obj.contains("auth_code"))
+                    account_obj["auth_code"] = "";
+            }
+            root["accounts"] = accounts_array;
+            std::string out = root.dump(2);
+            FILE* fw = fopen(path, "w");
+            if (fw) { fputs(out.c_str(), fw); fclose(fw); }
         }
         return 0;
     } catch (const json::exception& e) {

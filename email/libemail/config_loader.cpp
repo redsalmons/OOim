@@ -1,4 +1,5 @@
 #include "config_loader.h"
+#include "keychain_store.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -57,6 +58,23 @@ bool ConfigLoader::load() {
             phrase_test_ = config_json["phrase_test"];
         }
         
+        // Secrets live in the Keychain, not the file. File values are migrated
+        // on first read; the next save() writes empty strings back to disk.
+        for (auto& config : email_configs_) {
+            if (config.email.empty()) continue;
+            if (!config.auth_code.empty()) {
+                keychain_store::store_secret(config.email, config.auth_code);
+            } else {
+                config.auth_code = keychain_store::load_secret(config.email);
+            }
+            std::string refreshKey = config.email + ":refresh";
+            if (!config.refresh_token.empty()) {
+                keychain_store::store_secret(refreshKey, config.refresh_token);
+            } else {
+                config.refresh_token = keychain_store::load_secret(refreshKey);
+            }
+        }
+
         // Ensure id and uid fields exist
         ensure_id_uid_fields();
         
@@ -74,6 +92,13 @@ bool ConfigLoader::save() {
         config_json["email_list"] = nlohmann::json::array();
         
         for (const auto& config : email_configs_) {
+            if (!config.email.empty()) {
+                std::string refreshKey = config.email + ":refresh";
+                if (!config.auth_code.empty()) keychain_store::store_secret(config.email, config.auth_code);
+                else keychain_store::delete_secret(config.email);
+                if (!config.refresh_token.empty()) keychain_store::store_secret(refreshKey, config.refresh_token);
+                else keychain_store::delete_secret(refreshKey);
+            }
             config_json["email_list"].push_back(email_config_to_json(config));
         }
         
@@ -159,6 +184,7 @@ bool ConfigLoader::clear_refresh_token(const std::string& email_id) {
     for (auto& config : email_configs_) {
         if (config.id == email_id) {
             config.refresh_token.clear();
+            keychain_store::delete_secret(config.email + ":refresh");
             last_error_.clear();
             return true;
         }
@@ -171,6 +197,7 @@ void ConfigLoader::clear_all_outlook_refresh_tokens() {
     for (auto& config : email_configs_) {
         if (config.type == "outlook" || config.type == "outlook.com" || config.type == "hotmail.com") {
             config.refresh_token.clear();
+            keychain_store::delete_secret(config.email + ":refresh");
         }
     }
     last_error_.clear();
@@ -207,7 +234,7 @@ void ConfigLoader::ensure_id_uid_fields() {
 
 nlohmann::json ConfigLoader::email_config_to_json(const EmailConfig& config) const {
     nlohmann::json json;
-    json["auth_code"] = config.auth_code;
+    json["auth_code"] = "";
     json["email"] = config.email;
     json["imap_port"] = config.imap_port;
     json["imap_server"] = config.imap_server;
@@ -221,7 +248,7 @@ nlohmann::json ConfigLoader::email_config_to_json(const EmailConfig& config) con
     // OAuth fields for Outlook
     if (!config.client_id.empty()) json["client_id"] = config.client_id;
     if (!config.tenant_id.empty()) json["tenant_id"] = config.tenant_id;
-    if (!config.refresh_token.empty()) json["refresh_token"] = config.refresh_token;
+    if (!config.refresh_token.empty()) json["refresh_token"] = "";
     if (!config.account_type.empty()) json["account_type"] = config.account_type;
     if (config.is_default) json["is_default"] = 1;
     

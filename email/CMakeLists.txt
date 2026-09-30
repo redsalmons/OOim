@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(EmailCore CXX)
+project(EmailCore CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -177,7 +177,9 @@ add_library(email_core STATIC
     email_core.h
     email_core_common.h
     persistence/db_connection.cpp
+    persistence/keychain_store.cpp
     persistence/email_repo.cpp
+    persistence/email_body_repo.cpp
     persistence/session_repo.cpp
     persistence/key_repo.cpp
     persistence/contact_repo.cpp
@@ -213,7 +215,9 @@ add_library(email_core_shared SHARED
     email_core.h
     email_core_common.h
     persistence/db_connection.cpp
+    persistence/keychain_store.cpp
     persistence/email_repo.cpp
+    persistence/email_body_repo.cpp
     persistence/session_repo.cpp
     persistence/key_repo.cpp
     persistence/contact_repo.cpp
@@ -237,8 +241,17 @@ set_target_properties(email_core_shared PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
+# SQLCipher amalgamation provides sqlite3 — compiled directly into each target
+# so the whole emails.db is encrypted at rest (CommonCrypto provider, no extra
+# dylib, builds for every CMAKE_OSX_ARCHITECTURES slice automatically).
+target_sources(email_core PRIVATE deps/sqlcipher-amalg/sqlite3.c)
+target_sources(email_core_shared PRIVATE deps/sqlcipher-amalg/sqlite3.c)
+set_source_files_properties(deps/sqlcipher-amalg/sqlite3.c PROPERTIES
+    COMPILE_DEFINITIONS "SQLITE_HAS_CODEC;SQLCIPHER_CRYPTO_CC;SQLITE_TEMP_STORE=2;SQLITE_THREADSAFE=1;SQLITE_EXTRA_INIT=sqlcipher_extra_init;SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
+
 # Include directories
-target_include_directories(email_core PUBLIC
+target_include_directories(email_core BEFORE PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
@@ -247,7 +260,8 @@ target_include_directories(email_core PUBLIC
     ${GSASL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
 )
-target_include_directories(email_core_shared PUBLIC
+target_include_directories(email_core_shared BEFORE PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
@@ -274,8 +288,8 @@ if(WIN32)
     target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv)
     target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv)
 else()
-    target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} iconv)
-    target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} z iconv)
+    target_link_libraries(email_core PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} iconv)
+    target_link_libraries(email_core_shared PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} z iconv)
 endif()
 
 # Link the Rust MLS static library into the shared lib (Flutter-facing).

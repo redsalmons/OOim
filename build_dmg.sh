@@ -64,12 +64,12 @@ done
 # Re-sign all libraries
 echo "Re-signing libraries..."
 for f in "$FRAMEWORKS_DIR"/*.dylib; do
-    codesign --force --sign - "$f"
+    codesign --force --sign "OceanTalk Dev" "$f"
 done
 
 # Re-sign the app bundle with release entitlements (sandbox)
 echo "Re-signing app bundle..."
-codesign --force --deep --sign - --entitlements /Users/steven/Cascade/OIM/macos/Runner/Release.entitlements "$APP_PATH"
+codesign --force --deep --sign "OceanTalk Dev" --entitlements /Users/steven/Cascade/OIM/macos/Runner/Release.entitlements "$APP_PATH"
 
 # Stage DMG contents: the app plus an Applications symlink for drag-install
 echo "Staging DMG contents..."

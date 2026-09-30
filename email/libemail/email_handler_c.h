@@ -162,15 +162,6 @@ int SetCredentials_c(int configIndex, const char* email, const char* authCode);
 int GetEmail_c(int configIndex, const char* folder, const char* uid, char* outJson, int outSize);
 
 /**
- * @brief Get email content by UID and save directly to file (C interface)
- * @param configIndex Config index returned by OpenNewEmail_c
- * @param folder Folder path
- * @param uid Email UID
- * @param filePath Full path to save the email content
- * @return 0 if successful, negative on error
- */
-int GetEmailToFile_c(int configIndex, const char* folder, const char* uid, const char* filePath);
-
 /**
  * @brief Fetch email headers and store in localemail table (C interface)
  * @param configIndex Config index returned by OpenNewEmail_c

@@ -78,12 +78,12 @@ done
 # Re-sign all libraries
 echo "Re-signing libraries..."
 for f in "$FRAMEWORKS_DIR"/*.dylib; do
-    codesign --force --sign - "$f" 2>&1
+    codesign --force --sign "OceanTalk Dev" "$f" 2>&1
 done
 
 # Re-sign the app bundle with sandbox entitlements so it uses the container path
 echo "Re-signing app bundle..."
-codesign --force --deep --sign - --entitlements /Users/steven/Cascade/OIM/macos/Runner/DebugProfile.entitlements "$APP_PATH" 2>&1
+codesign --force --deep --sign "OceanTalk Dev" --entitlements /Users/steven/Cascade/OIM/macos/Runner/DebugProfile.entitlements "$APP_PATH" 2>&1
 
 # Launch app
 echo "Launching app..."

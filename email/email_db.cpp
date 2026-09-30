@@ -5,15 +5,46 @@
 #include "email_repo.h"
 #include "x_mailer.h"
 #include "key_repo.h"
+#include "keychain_store.h"
 #include <stdio.h>
 #include <string.h>
 #include <sqlite3.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
 
 static EmailRepo s_emailRepo;
 static KeyRepo s_keyRepo;
+
+static bool open_keyed_db(const char* path, const std::string& keyHex, sqlite3** out) {
+    if (sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                        nullptr) != SQLITE_OK) {
+        return false;
+    }
+    char keySql[160];
+    snprintf(keySql, sizeof(keySql), "PRAGMA key = \"x'%s'\";", keyHex.c_str());
+    if (sqlite3_exec(*out, keySql, nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_close(*out);
+        *out = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Keyed open succeeded but the file is not readable with this key → it is a
+// pre-encryption plaintext (or foreign) database. No migration: set it aside
+// and start from a fresh encrypted file. Stale -wal/-shm sidecars must be
+// removed first or SQLite would replay them into the new database.
+static void set_aside_unreadable_db(const char* path) {
+    std::string bakPath = std::string(path) + ".plaintext.bak";
+    ::unlink(bakPath.c_str());
+    ::rename(path, bakPath.c_str());
+    ::unlink((std::string(path) + "-wal").c_str());
+    ::unlink((std::string(path) + "-shm").c_str());
+    LOG_INFO("[DB] unreadable database moved aside: %s\n", bakPath.c_str());
+}
 
 int email_db_init(const char* path) {
     if (g_db != NULL) {
@@ -214,10 +245,29 @@ int email_db_init(const char* path) {
         return 0;
     }
 
-    int rc = sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
-    if (rc != SQLITE_OK) {
-        LOG_INFO("Cannot open database: %s\n", sqlite3_errmsg(g_db));
+    // SQLCipher: the whole database is encrypted at rest with a per-install
+    // master key kept in the macOS Keychain.
+    std::string dbKey = keychain_store::db_master_key_hex();
+    if (dbKey.empty()) {
+        LOG_INFO("Cannot open database: keychain master key unavailable\n");
         return -1;
+    }
+
+    if (!open_keyed_db(path, dbKey, &g_db)) {
+        LOG_INFO("Cannot open database: %s\n", g_db ? sqlite3_errmsg(g_db) : "open failed");
+        if (g_db) { sqlite3_close(g_db); g_db = NULL; }
+        return -1;
+    }
+
+    int rc = sqlite3_exec(g_db, "SELECT count(*) FROM sqlite_master;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        set_aside_unreadable_db(path);
+        if (!open_keyed_db(path, dbKey, &g_db)) {
+            LOG_INFO("Cannot open database after reset\n");
+            return -1;
+        }
     }
 
     sqlite3_exec(g_db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
@@ -321,6 +371,19 @@ int email_db_init(const char* path) {
         // Remove stale group session rows from 1:1 session table
         sqlite3_exec(g_db, "DELETE FROM session WHERE session_id LIKE 'group_%';", NULL, NULL, &err_msg);
         if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    }
+
+    // Processed message bodies (decrypted/rewritten EML text). Keyed by
+    // localemail.id — bodies live in DB, not on disk.
+    const char* sql_email_body = "CREATE TABLE IF NOT EXISTS email_body ("
+                                 "email_id INTEGER PRIMARY KEY,"
+                                 "body TEXT"
+                                 ");";
+    rc = sqlite3_exec(g_db, sql_email_body, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_INFO("SQL error (email_body): %s\n", err_msg);
+        sqlite3_free(err_msg);
+        err_msg = NULL;
     }
 
     sqlite3_exec(g_db, "ALTER TABLE localemail ADD COLUMN islocal INTEGER DEFAULT 0;", NULL, NULL, &err_msg);

@@ -3,6 +3,7 @@
 #include "logger.h"
 #include "db_connection.h"
 #include "email_repo.h"
+#include "email_body_repo.h"
 #include "session_repo.h"
 #include "signal/signal_protocol.h"
 #include "key_repo.h"
@@ -21,6 +22,7 @@
 using json = nlohmann::json;
 
 static EmailRepo s_emailRepo;
+static EmailBodyRepo s_bodyRepo;
 static SessionRepo s_sessionRepo;
 static KeyRepo s_keyRepo;
 
@@ -204,42 +206,29 @@ extern "C" int email_insert_sent_email(const char* account, const char* sender, 
         std::string rowidStr = std::to_string(rowid);
         LOG_INFO("[DB] email_insert_sent_email: inserted with pending uuid='%s', id='%s', file='%s'\n", pending_uuid.c_str(), rowidStr.c_str(), filename.c_str());
 
-        if (storageDir && account && message_id && body) {
-            std::string accountStr(account);
-            std::string messageIdStr(message_id);
-            std::string storageDirStr(storageDir);
-
-            std::string accountDir = storageDirStr + "/" + accountStr;
-            std::filesystem::create_directories(accountDir);
-
-            std::string filename = messageIdStr;
-            size_t start = filename.find('<');
-            size_t end = filename.find('>');
-            if (start != std::string::npos && end != std::string::npos && end > start) {
-                filename = filename.substr(start + 1, end - start - 1);
+        // Store the local copy in email_body (keyed by localemail.id) — no .eml on disk.
+        if (message_id && body) {
+            std::ostringstream eml;
+            eml << "Message-ID: " << message_id << "\n";
+            eml << "From: " << (from_addr ? from_addr : "") << "\n";
+            eml << "To: " << (to_addr ? to_addr : "") << "\n";
+            eml << "Subject: " << (subject ? subject : "") << "\n";
+            eml << "Date: " << (date ? date : "") << "\n";
+            if (x_mailer && *x_mailer) {
+                eml << "X-Mailer: " << x_mailer << "\n";
             }
-
-            std::string filePath = accountDir + "/" + filename + ".eml";
-            std::ofstream emlFile(filePath);
-            if (emlFile.is_open()) {
-                emlFile << "Message-ID: " << messageIdStr << "\n";
-                emlFile << "From: " << (from_addr ? from_addr : "") << "\n";
-                emlFile << "To: " << (to_addr ? to_addr : "") << "\n";
-                emlFile << "Subject: " << (subject ? subject : "") << "\n";
-                emlFile << "Date: " << (date ? date : "") << "\n";
-                if (x_mailer && *x_mailer) {
-                    emlFile << "X-Mailer: " << x_mailer << "\n";
-                }
-                emlFile << "Mime-Version: 1.0\n";
-                emlFile << "Content-Type: text/plain; charset=UTF-8\n";
-                emlFile << "Content-Transfer-Encoding: 8bit\n";
-                if (in_reply_to && *in_reply_to) {
-                    emlFile << "In-Reply-To: " << in_reply_to << "\n";
-                }
-                emlFile << "\n";
-                emlFile << (body ? body : "");
-                emlFile.close();
-                LOG_INFO("[DB] email_insert_sent_email: saved to %s\n", filePath.c_str());
+            eml << "Mime-Version: 1.0\n";
+            eml << "Content-Type: text/plain; charset=UTF-8\n";
+            eml << "Content-Transfer-Encoding: 8bit\n";
+            if (in_reply_to && *in_reply_to) {
+                eml << "In-Reply-To: " << in_reply_to << "\n";
+            }
+            eml << "\n";
+            eml << body;
+            if (s_bodyRepo.upsert(rowid, eml.str())) {
+                LOG_INFO("[DB] email_insert_sent_email: stored body for id='%s'\n", rowidStr.c_str());
+            } else {
+                LOG_INFO("[DB] email_insert_sent_email: body store failed for id='%s'\n", rowidStr.c_str());
             }
         }
 

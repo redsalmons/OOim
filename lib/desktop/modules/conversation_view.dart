@@ -556,8 +556,7 @@ mixin ConversationViewMixin on State<EmailModule> {
           batchId: msg.pendingFiles.first.batchId);
     }
     if (msg.file.isEmpty) return null;
-    final emlPath = '$emailDataPath/${msg.account}/${msg.file}.eml';
-    final parsed = parseEmlFile(emlPath, account: msg.account, sessionId: msg.sessionId,
+    final parsed = parseEmailBody(msg.rowid, account: msg.account, sessionId: msg.sessionId,
         fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
     return parsed.isFileMessage ? parsed : null;
   }
@@ -568,8 +567,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     String displayBody = '';
     EmlParsedContent? fileMeta;
     if (msg.file.isNotEmpty) {
-      final emlPath = '$emailDataPath/${msg.account}/${msg.file}.eml';
-      final parsed = parseEmlFile(emlPath, account: msg.account, sessionId: msg.sessionId, fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
+      final parsed = parseEmailBody(msg.rowid, account: msg.account, sessionId: msg.sessionId, fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
       isHandshake = isHandshake || parsed.isHandshakeMessage;
       if (parsed.isFileMessage) fileMeta = parsed;
       displayBody = parsed.textBody;

@@ -350,11 +350,8 @@ typedef _EmailDownloadPendingDart = int Function(int, Pointer<Utf8>, Pointer<Utf
 typedef _EmailCountPendingNative = Int32 Function(Pointer<Utf8>);
 typedef _EmailCountPendingDart = int Function(Pointer<Utf8>);
 
-typedef _EmailParseEmlNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
-typedef _EmailParseEmlDart = int Function(Pointer<Utf8>, Pointer<Utf8>, int);
-
-typedef _EmailSaveAttachmentNative = Int32 Function(Pointer<Utf8>, Int32, Pointer<Utf8>);
-typedef _EmailSaveAttachmentDart = int Function(Pointer<Utf8>, int, Pointer<Utf8>);
+typedef _EmailParseBodyNative = Int32 Function(Int64, Pointer<Utf8>, Int32);
+typedef _EmailParseBodyDart = int Function(int, Pointer<Utf8>, int);
 
 typedef _EmailDecryptDataBodyNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _EmailDecryptDataBodyDart = int Function(Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
@@ -594,8 +591,7 @@ final _emailLastError = _lib.lookupFunction<_EmailLastErrorNative, _EmailLastErr
 final _emailLogWrite = _lib.lookupFunction<_EmailLogWriteNative, _EmailLogWriteDart>('email_log_write');
 final _emailDownloadPending = _lib.lookupFunction<_EmailDownloadPendingNative, _EmailDownloadPendingDart>('email_download_pending_bodies');
 final _emailCountPending = _lib.lookupFunction<_EmailCountPendingNative, _EmailCountPendingDart>('email_count_pending_bodies');
-final _emailParseEml = _lib.lookupFunction<_EmailParseEmlNative, _EmailParseEmlDart>('email_parse_eml');
-final _emailSaveAttachment = _lib.lookupFunction<_EmailSaveAttachmentNative, _EmailSaveAttachmentDart>('email_save_attachment');
+final _emailParseBody = _lib.lookupFunction<_EmailParseBodyNative, _EmailParseBodyDart>('email_parse_body');
 final _emailDecryptDataBody = _lib.lookupFunction<_EmailDecryptDataBodyNative, _EmailDecryptDataBodyDart>('email_decrypt_data_body');
 final _emailUpdateSessionRead = _lib.lookupFunction<_EmailUpdateSessionReadNative, _EmailUpdateSessionReadDart>('email_update_session_read');
 final _emailQuerySessionUnread = _lib.lookupFunction<_EmailQuerySessionUnreadNative, _EmailQuerySessionUnreadDart>('email_query_session_unread');
@@ -1568,29 +1564,15 @@ class EmailCore {
     }
   }
 
-  /// Parses an .eml file using vmime and returns JSON with text_body, html_body, attachments.
-  static String parseEml(String filePath) {
-    final filePathPtr = filePath.toNativeUtf8();
+  /// Parses the stored body (email_body table) for a localemail row and returns
+  /// JSON with text_body, html_body, attachments.
+  static String parseEmailBody(int emailId) {
     final outJson = malloc.allocate<Utf8>(1048576);
     try {
-      _emailParseEml(filePathPtr, outJson, 1048576);
+      _emailParseBody(emailId, outJson, 1048576);
       return outJson.toDartString();
     } finally {
-      malloc.free(filePathPtr);
       malloc.free(outJson);
-    }
-  }
-
-  /// Saves an attachment from an EML file to the specified output path.
-  /// Returns 0 on success, negative on error.
-  static int saveAttachment(String emlPath, int attachmentIndex, String outputPath) {
-    final emlPathPtr = emlPath.toNativeUtf8();
-    final outputPathPtr = outputPath.toNativeUtf8();
-    try {
-      return _emailSaveAttachment(emlPathPtr, attachmentIndex, outputPathPtr);
-    } finally {
-      malloc.free(emlPathPtr);
-      malloc.free(outputPathPtr);
     }
   }
 

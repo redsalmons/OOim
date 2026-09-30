@@ -19,6 +19,7 @@
 #include "mls_group.h"
 #include "group_session_repo.h"
 #include "email_repo.h"
+#include "email_body_repo.h"
 #include "task_repo.h"
 #include "unified/unified_session_repo.h"
 #include "persistence/file_transfer_repo.h"
@@ -41,6 +42,7 @@ namespace {
 
 GroupSessionRepo g_groupRepo;
 EmailRepo g_emailRepo;
+EmailBodyRepo g_bodyRepo;
 TaskRepo g_taskRepo;
 
 std::string newMessageId(const std::string& account) {
@@ -597,10 +599,11 @@ extern "C" int group_after_sent(const char* account, const char* xMailer, const 
 
     const std::string xmStr(xMailer);
     if ((xmStr == XMailer::MLS_APP_MSG || xmStr == XMailer::MLS_FILE_META || xmStr == XMailer::MLS_FILE_CHUNK)
-        && localBody && dataDir && *dataDir) {
-        // Keep the plaintext locally: rewrite the body of the sent .eml (headers unchanged).
-        // localBody is the task envelope {..., "plaintext": <payload>}; store the payload
-        // itself — plain text for app messages, the file meta JSON for 2.0.4, and a small
+        && localBody) {
+        // Keep the plaintext locally: rewrite the stored body of the sent row
+        // in email_body (headers unchanged). localBody is the task envelope
+        // {..., "plaintext": <payload>}; store the payload itself — plain text
+        // for app messages, the file meta JSON for 2.0.4, and a small
         // placeholder for multi-MB chunk envelopes.
         std::string displayBody;
         if (xmStr == XMailer::MLS_FILE_CHUNK) {
@@ -612,21 +615,18 @@ extern "C" int group_after_sent(const char* account, const char* xMailer, const 
                 displayBody = localBody;
             }
         }
-        std::string fname = mid;
-        if (fname.size() > 2 && fname.front() == '<' && fname.back() == '>') fname = fname.substr(1, fname.size() - 2);
-        std::filesystem::path p = std::filesystem::path(dataDir) / acc / (fname + ".eml");
-        std::ifstream in(p, std::ios::binary);
-        if (in) {
-            std::string content((std::istreambuf_iterator<char>(in)), {});
-            in.close();
-            size_t sep = content.find("\n\n");
-            size_t sepLen = 2;
-            size_t crlf = content.find("\r\n\r\n");
-            if (crlf != std::string::npos && (sep == std::string::npos || crlf < sep)) { sep = crlf; sepLen = 4; }
-            if (sep != std::string::npos) {
-                std::ofstream out(p, std::ios::binary | std::ios::trunc);
-                out << content.substr(0, sep + sepLen) << displayBody;
-                LOG_INFO("[MLS] after_sent: stored plaintext copy %s\n", p.string().c_str());
+        int64_t emailId = g_emailRepo.findIdByMessageId(mid, acc);
+        if (emailId > 0) {
+            std::string content = g_bodyRepo.get(emailId);
+            if (!content.empty()) {
+                size_t sep = content.find("\n\n");
+                size_t sepLen = 2;
+                size_t crlf = content.find("\r\n\r\n");
+                if (crlf != std::string::npos && (sep == std::string::npos || crlf < sep)) { sep = crlf; sepLen = 4; }
+                if (sep != std::string::npos) {
+                    g_bodyRepo.upsert(emailId, content.substr(0, sep + sepLen) + displayBody);
+                    LOG_INFO("[MLS] after_sent: stored plaintext body for id=%lld\n", (long long)emailId);
+                }
             }
         }
     }

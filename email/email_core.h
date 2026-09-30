@@ -239,14 +239,10 @@ int email_download_pending_bodies(int configIndex, const char* account,
 // Returns count, or negative on error. Does not connect to IMAP.
 int email_count_pending_bodies(const char* account);
 
-// Parse an .eml file using vmime and return structured JSON.
-// Extracts text body, HTML body, and attachment info.
+// Parse the stored body (email_body table, keyed by localemail.id) using vmime
+// and return structured JSON: text body, HTML body, attachment info.
 // Returns 0 on success, negative on error. outJson contains the parsed result.
-int email_parse_eml(const char* filePath, char* outJson, int outSize);
-
-// Save a specific attachment from an EML file to a target path.
-// Returns 0 on success, negative on error.
-int email_save_attachment(const char* emlPath, int attachmentIndex, const char* outputPath);
+int email_parse_body(int64_t emailId, char* outJson, int outSize);
 
 // Update session isread field to 1 for all emails in a session.
 // Returns 0 on success, negative on error.

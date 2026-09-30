@@ -38,11 +38,6 @@ constexpr const char* TEXT         = RATCHET_MSG;    // Encrypted text message
 constexpr const char* FILE_META    = ATTACH_META;    // File metadata (visible in UI)
 constexpr const char* FILE_CHUNK   = ATTACH_CHUNK;   // File chunk (hidden from UI)
 
-// Legacy 0.1.x values from older builds
-constexpr const char* LEGACY_PREKEY_BUNDLE = "0.1.0";
-constexpr const char* LEGACY_SESSION_INIT  = "0.1.1";
-constexpr const char* LEGACY_RAT_MSG       = "0.1.2";
-
 // Whitelist of all valid X-Mailer values
 inline bool isValid(const std::string& value) {
     return value == PREKEY_BUNDLE ||
@@ -51,10 +46,7 @@ inline bool isValid(const std::string& value) {
            value == REPAIR_MSG ||
            value == ATTACH_META ||
            value == ATTACH_CHUNK ||
-           isMls(value) ||
-           value == LEGACY_PREKEY_BUNDLE ||
-           value == LEGACY_SESSION_INIT ||
-           value == LEGACY_RAT_MSG;
+           isMls(value);
 }
 
 } // namespace XMailer

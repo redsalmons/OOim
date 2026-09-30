@@ -9,7 +9,9 @@
 #include "email_opt_outlook_impl.h"
 #include "email_opt_gmail_impl.h"
 #include "db_connection.h"
+#include "keychain_store.h"
 #include "email_repo.h"
+#include "email_body_repo.h"
 #include "session_repo.h"
 #include "key_repo.h"
 #include "task_repo.h"
@@ -43,14 +45,50 @@ using json = nlohmann::json;
 
 // Forward declaration for extractParts (defined later in this file)
 
-// Processed (decrypted/placeholder) bodies are written to "<uuid>.dec.eml" —
-// a DIFFERENT file from the wire "<uuid>.eml". The poll path may re-download the
-// wire file concurrently and would otherwise clobber the processed plaintext.
-// The localemail `file` column is repointed to "<uuid>.dec" via updateAfterDownload.
-static std::string decEmlPath(const std::string& filePath) {
-    if (filePath.size() > 4 && filePath.substr(filePath.size() - 4) == ".eml")
-        return filePath.substr(0, filePath.size() - 4) + ".dec.eml";
-    return filePath + ".dec.eml";
+// Processed (decrypted/placeholder) bodies are stored in the email_body table
+// keyed by localemail.id — no .eml files on disk.
+static EmailRepo s_emailRepoFile;
+static EmailBodyRepo s_bodyRepo;
+
+// Store processed body for a received mail (uuid+account → rowid → email_body).
+static bool storeEmailBody(const std::string& uuid, const std::string& account,
+                           const std::string& body) {
+    int64_t emailId = s_emailRepoFile.findRowidByUuidAndAccount(uuid, account);
+    if (emailId <= 0) return false;
+    return s_bodyRepo.upsert(emailId, body);
+}
+
+// Fetch full message content into memory. Same semantics as the old
+// GetEmailToFile_c minus the file write.
+// outRc: 0 ok, -10 network error (retry without penalty), -4 other failure.
+static std::string fetchEmailContent(int configIndex, const std::string& folder,
+                                     const std::string& uid, int* outRc) {
+    *outRc = -4;
+    if (configIndex < 0 || configIndex >= static_cast<int>(oemailim::EmailHandler::g_EmailConfigIndices.size())) {
+        *outRc = -1;
+        return "";
+    }
+    auto emailObj = oemailim::EmailHandler::g_EmailConfigIndices[configIndex];
+    if (!emailObj) { *outRc = -2; return ""; }
+    auto delegate = emailObj->get_delegate();
+    if (!delegate) { *outRc = -3; return ""; }
+
+    std::string content = delegate->get_email(folder, uid);
+    if (content.empty()) {
+        std::string lastErr = delegate->get_last_error();
+        bool isNetwork = lastErr.find("EPIPE") != std::string::npos ||
+                         lastErr.find("broken pipe") != std::string::npos ||
+                         lastErr.find("ECONNRESET") != std::string::npos ||
+                         lastErr.find("connection reset") != std::string::npos ||
+                         lastErr.find("connect failed") != std::string::npos ||
+                         lastErr.find("not connected") != std::string::npos ||
+                         lastErr.find("timeout") != std::string::npos ||
+                         lastErr.find("socket") != std::string::npos;
+        *outRc = isNetwork ? -10 : -4;
+        return "";
+    }
+    *outRc = 0;
+    return content;
 }
 static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
                          std::string& textBody, std::string& htmlBody,
@@ -84,6 +122,7 @@ extern "C" int oemailim_delete_account_data(const char* account, const char* sto
     // DB cleanup — children/dangling references first, parents last.
     static const char* kStmts[] = {
         "DELETE FROM session WHERE email_id IN (SELECT id FROM localemail WHERE account=?)",
+        "DELETE FROM email_body WHERE email_id IN (SELECT id FROM localemail WHERE account=?)",
         "DELETE FROM group_session_email WHERE account=?",
         "DELETE FROM file_chunk WHERE file_id IN (SELECT file_id FROM file_transfer WHERE account=?)",
         "DELETE FROM file_transfer WHERE account=?",
@@ -115,6 +154,10 @@ extern "C" int oemailim_delete_account_data(const char* account, const char* sto
         std::error_code ec;
         std::filesystem::remove_all(std::filesystem::path(storageDir) / acc, ec);
     }
+
+    // Keychain credential (auth code / OAuth token).
+    keychain_store::delete_secret(acc);
+
     LOG_INFO("oemailim_delete_account_data: account=%s done\n", acc.c_str());
     return 0;
 }
@@ -256,17 +299,13 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
     LOG_INFO("[DB] download_pending: found %zu emails to download for %s\n", pending.size(), accountStr.c_str());
 
-    std::string accountDir = storageDirStr + "/" + accountStr;
-    std::filesystem::create_directories(accountDir);
-
     int downloaded = 0;
     json results = json::array();
 
-    // Phase 1: Download all pending EMLs and classify by x_session_chart
+    // Phase 1: Download all pending EMLs (in memory) and classify by x_session_chart
     struct DownloadedEml {
         std::string uuid;
         std::string folder;
-        std::string filePath;
         std::string emlContent;
         std::string message_id;
         std::string in_reply_to;
@@ -280,27 +319,15 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
     std::vector<DownloadedEml> newEmls, exchangeEmls, dataEmls, otherEmls;
 
     for (const auto& pe : pending) {
-        std::string filePath = accountDir + "/" + pe.uuid + ".eml";
-
-        // islocal=1 means EML was already downloaded in fetch phase, skip download
-        if (pe.islocal == 0) {
-            int getResult = GetEmailToFile_c(configIndex, pe.folder.c_str(), pe.uuid.c_str(), filePath.c_str());
-            if (getResult != 0) {
-                LOG_INFO("[DB] download_pending: failed to fetch uid=%s folder=%s: %d\n", pe.uuid.c_str(), pe.folder.c_str(), getResult);
-                if (getResult == -8) {
-                    // Local write failure (e.g. disk full). Stop retrying this message —
-                    // re-downloading multi-MB bodies every round only burns bandwidth.
-                    // islocal=3 removes it from the pending queue (islocal IN (0,1));
-                    // to recover, reset islocal=0 after the disk problem is fixed.
-                    s_emailRepo.setIslocal(pe.uuid, accountStr, 3);
-                    LOG_INFO("[DB] download_pending: uid=%s marked islocal=3 (write failed, download paused)\n", pe.uuid.c_str());
-                } else if (getResult != -10) {
-                    s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
-                }
-                continue;
+        // Body fetched straight into memory — no .eml file on disk.
+        int fetchRc = 0;
+        std::string emlContent = fetchEmailContent(configIndex, pe.folder, pe.uuid, &fetchRc);
+        if (fetchRc != 0) {
+            LOG_INFO("[DB] download_pending: failed to fetch uid=%s folder=%s: %d\n", pe.uuid.c_str(), pe.folder.c_str(), fetchRc);
+            if (fetchRc != -10) {
+                s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
             }
-        } else {
-            LOG_INFO("[DB] download_pending: islocal=1, skipping download for uid=%s\n", pe.uuid.c_str());
+            continue;
         }
 
         std::string message_id = "";
@@ -309,14 +336,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         std::string eml_subject = "";
         std::string eml_to = "";
         std::string eml_from = "";
-        std::string emlContent;
 
         try {
-            std::ifstream emlFile(filePath);
-            emlContent.assign((std::istreambuf_iterator<char>(emlFile)),
-                              std::istreambuf_iterator<char>());
-            emlFile.close();
-
             vmime::parsingContext parseCtx;
             size_t pos = 0;
             const size_t end = emlContent.size();
@@ -379,13 +400,21 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             if (!eml_bcc.empty()) addressbook_extract_from_header(eml_bcc.c_str());
             if (!eml_from.empty()) addressbook_extract_from_header(eml_from.c_str());
 
-            LOG_INFO("[DB] download_pending: parsed message_id='%s', in_reply_to='%s', x_mailer='%s' from %s\n",
-                     message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str(), filePath.c_str());
+            LOG_INFO("[DB] download_pending: parsed message_id='%s', in_reply_to='%s', x_mailer='%s' uuid=%s\n",
+                     message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str(), pe.uuid.c_str());
         } catch (const std::exception& e) {
-            LOG_INFO("[DB] download_pending: failed to parse .eml file: %s\n", e.what());
+            LOG_INFO("[DB] download_pending: failed to parse eml content: %s\n", e.what());
         }
 
-        DownloadedEml de{pe.uuid, pe.folder, filePath, emlContent, message_id, in_reply_to, x_session_chart, eml_subject, eml_to, eml_from, pe.islocal};
+        // Persist the wire body up front so every displayable message has a
+        // displayable body row; decrypted/placeholder rewrites upsert over it.
+        // File-chunk mails (1.0.5/2.0.5) stay invisible and carry huge base64
+        // payloads — their bodies are not stored.
+        const bool isChunk = (x_session_chart == XMailer::ATTACH_CHUNK ||
+                              x_session_chart == XMailer::MLS_FILE_CHUNK);
+        if (!isChunk) storeEmailBody(pe.uuid, accountStr, emlContent);
+
+        DownloadedEml de{pe.uuid, pe.folder, emlContent, message_id, in_reply_to, x_session_chart, eml_subject, eml_to, eml_from, pe.islocal};
 
         if (x_session_chart == XMailer::SESSION_INIT) {
             newEmls.push_back(de);
@@ -411,7 +440,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 
     for (auto* dep : orderedEmls) {
         const auto& pe = dep->uuid;
-        const std::string& filePath = dep->filePath;
         std::string& emlContent = dep->emlContent;
         std::string message_id = dep->message_id;
         std::string in_reply_to = dep->in_reply_to;
@@ -432,7 +460,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         std::string attachMsgId, attachReplyTo;
         // Name stored in localemail.file. Rewritten (decrypted) bodies live in
         // "<uuid>.dec.eml"; messages that keep the wire body keep "<uuid>".
-        std::string storedFile = pe;
+        // "db" in the file column marks that the displayable body lives in the
+        // email_body table (keyed by localemail.id); chunk mails get "" (hidden).
+        const bool chunkMail = (x_session_chart == XMailer::ATTACH_CHUNK ||
+                                x_session_chart == XMailer::MLS_FILE_CHUNK);
+        std::string storedFile = chunkMail ? "" : "db";
         // Body-level ids of any other JSON-bodied mail (MLS, plaintext protocol mail);
         // used as the row's identity / chain parent when present.
         std::string bodyMessageId, bodyReplyTo;
@@ -499,16 +531,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     newEml += "Content-Transfer-Encoding: 8bit\r\n";
                     newEml += "\r\n";
                     newEml += placeholder;
-                    try {
-                        std::ofstream out(decEmlPath(filePath), std::ios::binary | std::ios::trunc);
-                        if (out.is_open()) {
-                            out.write(newEml.data(), static_cast<std::streamsize>(newEml.size()));
-                            out.close();
-                            storedFile = pe + ".dec";
-                            LOG_INFO("[DB] download_pending: wrote placeholder EML for PREKEY_BUNDLE uuid=%s\n", pe.c_str());
-                        }
-                    } catch (const std::exception& we) {
-                        LOG_INFO("[DB] download_pending: failed to write placeholder EML for uuid=%s: %s\n", pe.c_str(), we.what());
+                    if (storeEmailBody(pe, accountStr, newEml)) {
+                        storedFile = "db";
+                        LOG_INFO("[DB] download_pending: stored placeholder body for PREKEY_BUNDLE uuid=%s\n", pe.c_str());
+                    } else {
+                        LOG_INFO("[DB] download_pending: failed to store body for uuid=%s\n", pe.c_str());
                     }
                 }
 
@@ -629,7 +656,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                         replyBody = rj.dump();
                                     } catch (...) {}
 
-                                    std::string replySubject = "Re: " + eml_subject;
+                                    std::string replySubject = eml_subject;
                                     std::string replyMsgId = generate_x_message_id(accountStr);
 
                                     int64_t taskId = s_taskRepo.insert(
@@ -711,7 +738,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 }
 
                 downloaded++;
-                results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
+                results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}});
                 continue;
             }
 
@@ -792,7 +819,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 try {
                                     auto tr = json::parse(truckResult);
                                     if (tr.value("complete", false))
-                                        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}, {"file_complete", true}, {"file_id", tr.value("file_id", "")}});
+                                        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}, {"file_complete", true}, {"file_id", tr.value("file_id", "")}});
                                 } catch (...) {}
                             }
                         } catch (const std::exception& e) {
@@ -825,8 +852,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         newEml += "Content-Transfer-Encoding: 8bit\r\n";
                         newEml += "\r\n";
                         newEml += display;
-                        std::ofstream out(decEmlPath(filePath), std::ios::binary | std::ios::trunc);
-                        if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); storedFile = pe + ".dec"; }
+                        if (storeEmailBody(pe, accountStr, newEml)) storedFile = "db";
 
                         if (!groupId.empty()) {
                             int64_t emailId = s_emailRepo.findRowidByUuidAndAccount(pe, accountStr);
@@ -841,7 +867,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         s_emailRepo.updateAfterDownload(pe, accountStr, message_id, in_reply_to, storedFile);
                         s_emailRepo.setIslocal(pe, accountStr, 2);
                         downloaded++;
-                        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
+                        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}});
                         continue;
                     } else if (mlsRc == 1) {
                         // Retry later (e.g. Commit arrived before Welcome)
@@ -927,20 +953,12 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             emlContent += "\r\n";
                             emlContent += plaintext;
 
-                            // Persist updated EML back to disk so UI can render decrypted text
-                            try {
-                                std::string decPath = decEmlPath(filePath);
-                                std::ofstream out(decPath, std::ios::binary | std::ios::trunc);
-                                if (out.is_open()) {
-                                    out.write(emlContent.data(), static_cast<std::streamsize>(emlContent.size()));
-                                    out.close();
-                                    storedFile = pe + ".dec";
-                                    LOG_INFO("[DB] download_pending: wrote decrypted EML for uuid=%s to %s\n", pe.c_str(), decPath.c_str());
-                                } else {
-                                    LOG_INFO("[DB] download_pending: failed to open EML for writing (uuid=%s, path=%s)\n", pe.c_str(), filePath.c_str());
-                                }
-                            } catch (const std::exception& we) {
-                                LOG_INFO("[DB] download_pending: exception while writing decrypted EML for uuid=%s: %s\n", pe.c_str(), we.what());
+                            // Persist decrypted EML text to email_body so the UI can render it
+                            if (storeEmailBody(pe, accountStr, emlContent)) {
+                                storedFile = "db";
+                                LOG_INFO("[DB] download_pending: stored decrypted body for uuid=%s\n", pe.c_str());
+                            } else {
+                                LOG_INFO("[DB] download_pending: failed to store decrypted body for uuid=%s\n", pe.c_str());
                             }
                         } else {
                             std::string err = resp.value("error", "");
@@ -1162,7 +1180,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             s_emailRepo.setIslocal(pe, accountStr, 2);
             LOG_INFO("[DB] download_pending: set islocal=2 for Signal uuid=%s\n", pe.c_str());
             downloaded++;
-            results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
+            results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}});
             continue;
         }
 
@@ -1225,8 +1243,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                 newEml += "Content-Transfer-Encoding: 8bit\r\n";
                                 newEml += "\r\n";
                                 newEml += plain;
-                                std::ofstream out(decEmlPath(filePath), std::ios::binary | std::ios::trunc);
-                                if (out.is_open()) { out.write(newEml.data(), (std::streamsize)newEml.size()); out.close(); storedFile = pe + ".dec"; }
+                                if (storeEmailBody(pe, accountStr, newEml)) storedFile = "db";
                             }
                         }
                     } else LOG_INFO("[DB] download_pending: ATTACH_META decrypt failed rc=%d\n", decRc);
@@ -1263,7 +1280,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             try {
                                 auto tr = json::parse(truckResult);
                                 if (tr.value("complete", false))
-                                    results.push_back({{"uuid",pe},{"folder",dep->folder},{"file",filePath},{"file_complete",true},{"file_id",tr.value("file_id","")}});
+                                    results.push_back({{"uuid",pe},{"folder",dep->folder},{"file",storedFile},{"file_complete",true},{"file_id",tr.value("file_id","")}});
                             } catch (...) {}
                         }
                     } else LOG_INFO("[DB] download_pending: ATTACH_CHUNK decrypt failed rc=%d\n", decRc);
@@ -1363,8 +1380,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
         LOG_INFO("[DB] download_pending: set islocal=2 for uuid=%s\n", pe.c_str());
 
         downloaded++;
-        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", filePath}});
-        LOG_INFO("[DB] download_pending: saved uid=%s to %s\n", pe.c_str(), filePath.c_str());
+        results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}});
+        LOG_INFO("[DB] download_pending: processed uid=%s\n", pe.c_str());
     }
 
     json response;
@@ -1524,25 +1541,22 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
     }
 }
 
-extern "C" int email_parse_eml(const char* filePath, char* outJson, int outSize) {
-    if (!filePath || !outJson || outSize <= 0) {
+// Parse the stored (already decrypted/normalized) body of a mail.
+// Bodies live in email_body keyed by localemail.id, not on disk.
+extern "C" int email_parse_body(int64_t emailId, char* outJson, int outSize) {
+    if (emailId <= 0 || !outJson || outSize <= 0) {
         if (outJson && outSize > 0) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"null_parameter"})");
+            snprintf(outJson, outSize, R"({"status":"failed","error":"invalid_parameter"})");
         }
         return -1;
     }
 
     try {
-        std::ifstream file(filePath, std::ios::binary);
-        if (!file.is_open()) {
-            snprintf(outJson, outSize, R"({"status":"failed","error":"file_not_found"})");
+        std::string content = s_bodyRepo.get(emailId);
+        if (content.empty()) {
+            snprintf(outJson, outSize, R"({"status":"failed","error":"body_not_found"})");
             return -2;
         }
-
-        std::ostringstream oss;
-        oss << file.rdbuf();
-        std::string content = oss.str();
-        file.close();
 
         vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
         msg->parse(content);
@@ -1592,108 +1606,20 @@ extern "C" int email_parse_eml(const char* filePath, char* outJson, int outSize)
         }
         snprintf(outJson, outSize, "%s", jsonStr.c_str());
 
-        LOG_INFO("email_parse_eml: parsed %s, text=%zu bytes, html=%zu bytes, attachments=%zu\n",
-                 filePath, textBody.size(), htmlBody.size(), attachments.size());
+        LOG_INFO("email_parse_body: parsed id=%lld, text=%zu bytes, html=%zu bytes, attachments=%zu\n",
+                 (long long)emailId, textBody.size(), htmlBody.size(), attachments.size());
         return 0;
     } catch (const vmime::exception& e) {
         snprintf(outJson, outSize, R"({"status":"failed","error":"vmime_exception"})");
-        LOG_INFO("email_parse_eml: vmime exception: %s\n", e.what());
+        LOG_INFO("email_parse_body: vmime exception: %s\n", e.what());
         return -4;
     } catch (const std::exception& e) {
         snprintf(outJson, outSize, R"({"status":"failed","error":"std_exception"})");
-        LOG_INFO("email_parse_eml: std exception: %s\n", e.what());
+        LOG_INFO("email_parse_body: std exception: %s\n", e.what());
         return -5;
     } catch (...) {
         snprintf(outJson, outSize, R"({"status":"failed","error":"unknown_exception"})");
         return -6;
-    }
-}
-
-// Helper: extract attachment by index and write to file
-static bool extractAttachmentToFile(vmime::shared_ptr<vmime::bodyPart> part,
-                                     int targetIndex, int& currentIndex,
-                                     const std::string& outputPath) {
-    auto body = part->getBody();
-    vmime::mediaType ct = body->getContentType();
-
-    if (ct.getType() == vmime::mediaTypes::MULTIPART) {
-        auto parts = body->getPartList();
-        for (size_t i = 0; i < parts.size(); i++) {
-            if (extractAttachmentToFile(parts[i], targetIndex, currentIndex, outputPath))
-                return true;
-        }
-        return false;
-    }
-
-    bool isAttachment = false;
-    std::string filename;
-
-    if (part->getHeader()->hasField(vmime::fields::CONTENT_DISPOSITION)) {
-        auto cdf = part->getHeader()->findField<vmime::contentDispositionField>(vmime::fields::CONTENT_DISPOSITION);
-        if (cdf) {
-            auto disp = cdf->getValue<vmime::contentDisposition>();
-            if (disp && disp->getName() != vmime::contentDispositionTypes::INLINE) {
-                isAttachment = true;
-                auto cdfField = vmime::dynamicCast<vmime::contentDispositionField>(cdf);
-                if (cdfField && cdfField->hasFilename()) {
-                    filename = cdfField->getFilename().getBuffer();
-                }
-            }
-        }
-    }
-
-    auto mainType = ct.getType();
-    auto subType = ct.getSubType();
-
-    if (mainType != vmime::mediaTypes::TEXT && !isAttachment) {
-        isAttachment = true;
-    }
-
-    if (!isAttachment) return false;
-
-    if (currentIndex == targetIndex) {
-        std::string data;
-        vmime::utility::outputStreamStringAdapter osa(data);
-        body->getContents()->extract(osa);
-        osa.flush();
-        std::ofstream out(outputPath, std::ios::binary);
-        if (!out.is_open()) return false;
-        out.write(data.data(), (std::streamsize)data.size());
-        out.close();
-        return true;
-    }
-
-    currentIndex++;
-    return false;
-}
-
-extern "C" int email_save_attachment(const char* emlPath, int attachmentIndex, const char* outputPath) {
-    if (!emlPath || !outputPath || attachmentIndex < 0) return -1;
-
-    try {
-        std::ifstream file(emlPath, std::ios::binary);
-        if (!file.is_open()) return -2;
-
-        std::ostringstream oss;
-        oss << file.rdbuf();
-        std::string content = oss.str();
-        file.close();
-
-        vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
-        msg->parse(content);
-
-        int currentIndex = 0;
-        if (extractAttachmentToFile(msg, attachmentIndex, currentIndex, outputPath)) {
-            LOG_INFO("email_save_attachment: saved attachment %d from %s to %s\n",
-                     attachmentIndex, emlPath, outputPath);
-            return 0;
-        }
-        return -3;
-    } catch (const std::exception& e) {
-        LOG_INFO("email_save_attachment: exception: %s\n", e.what());
-        return -4;
-    } catch (...) {
-        return -5;
     }
 }
 
