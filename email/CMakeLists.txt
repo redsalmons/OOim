@@ -8,9 +8,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Uses the system proxy via CARGO_HTTP_PROXY if set in the environment.
 set(MLS_FFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mls_ffi")
 if(WIN32)
-    set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/mls_ffi.lib")
+    # Rust target follows the vcpkg triplet: x64-windows -> x86_64, arm64-windows -> aarch64
+    if(DEFINED VCPKG_TARGET_TRIPLET AND VCPKG_TARGET_TRIPLET MATCHES "^x64")
+        set(MLS_RUST_TARGET "x86_64-pc-windows-msvc")
+    else()
+        set(MLS_RUST_TARGET "aarch64-pc-windows-msvc")
+    endif()
+    set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/${MLS_RUST_TARGET}/release/mls_ffi.lib")
+    set(MLS_CARGO_TARGET_ARGS --target ${MLS_RUST_TARGET})
 else()
     set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/libmls_ffi.a")
+    set(MLS_CARGO_TARGET_ARGS "")
 endif()
 if(DEFINED ENV{CARGO_HTTP_PROXY})
     set(_cargo_proxy "CARGO_HTTP_PROXY=$ENV{CARGO_HTTP_PROXY}")
@@ -30,7 +38,7 @@ if(APPLE)
 else()
     add_custom_command(
         OUTPUT ${MLS_FFI_LIB}
-        COMMAND ${_cargo_proxy} cargo build --release --manifest-path ${MLS_FFI_DIR}/Cargo.toml
+        COMMAND ${_cargo_proxy} cargo build --release ${MLS_CARGO_TARGET_ARGS} --manifest-path ${MLS_FFI_DIR}/Cargo.toml
         WORKING_DIRECTORY ${MLS_FFI_DIR}
         COMMENT "Building Rust MLS FFI static library"
         VERBATIM
@@ -223,8 +231,9 @@ add_library(email_core_shared SHARED
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
     ARCHIVE_OUTPUT_NAME email_core_shared
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build
+    # Output into the configured build dir so arm64/x64 builds don't overwrite each other
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 

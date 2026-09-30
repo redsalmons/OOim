@@ -1,16 +1,25 @@
-# run_app.ps1 - Windows build & launch script for OIM
-# Usage: .\run_app.ps1
+# run_app.ps1 - Windows build & launch script for OceanTalk
+# Usage: .\run_app.ps1 [-Arch arm64|x64]
+#   arm64 (default): vcpkg arm64-windows in K:\vcpkg\installed, engine windows-arm64
+#   x64:             vcpkg x64-windows installed under E:\x86\vcpkg, engine windows-x64,
+#                    vmime at E:\x86\vmime-install
+
+param(
+    [ValidateSet('arm64','x64')]
+    [string]$Arch = 'arm64'
+)
 
 $ErrorActionPreference = "Stop"
 
 # Ensure Flutter is in PATH
 $env:PATH = "C:\flutter\bin;" + $env:PATH
 
-# Load MSVC ARM64 environment (E:\vsc is a copied install not registered
+# Load MSVC environment (E:\vsc is a copied install not registered
 # with vswhere, so the toolchain must be activated manually).
+# On this ARM64 host, `vcvarsall x64` selects the ARM64->x64 cross toolchain.
 $VcvarsAll = "E:\vsc\VC\Auxiliary\Build\vcvarsall.bat"
 if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
-    cmd /c "`"$VcvarsAll`" arm64 && set" | ForEach-Object {
+    cmd /c "`"$VcvarsAll`" $Arch && set" | ForEach-Object {
         if ($_ -match "^([^=]+)=(.*)$") {
             Set-Item -Path "env:$($matches[1])" -Value $matches[2]
         }
@@ -25,17 +34,31 @@ $env:PATH = "E:\vsc\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;" + $env:
 $ProjectRoot = $PSScriptRoot
 $EmailDir = Join-Path $ProjectRoot "email"
 $MlsFfiDir = Join-Path $EmailDir "mls_ffi"
-$BuildDir = Join-Path $EmailDir "build"
+$BuildDir = Join-Path $EmailDir "build-$Arch"
+
+# Per-arch dependency roots. x64 packages live under E:\x86.
+if ($Arch -eq 'x64') {
+    $VcpkgTriplet      = "x64-windows"
+    $VcpkgInstalledDir = "E:\x86\vcpkg"
+    $env:VMIME_ROOT    = "E:\x86\vmime-install"
+    $FlutterPlatform   = "windows-x64"
+    $RustTarget        = "x86_64-pc-windows-msvc"
+} else {
+    $VcpkgTriplet      = "arm64-windows"
+    $VcpkgInstalledDir = "K:\vcpkg\installed"
+    Remove-Item Env:\VMIME_ROOT -ErrorAction SilentlyContinue  # default E:\vmime-install
+    $FlutterPlatform   = "windows-arm64"
+    $RustTarget        = "aarch64-pc-windows-msvc"
+}
 
 # vcpkg toolchain file (required for CMake to find dependencies)
 $VcpkgToolchain = "K:\vcpkg\scripts\buildsystems\vcpkg.cmake"
-$VcpkgTriplet = "arm64-windows"
 
 # Flutter Windows build output (Ninja: single-config, bundle lands in runner\ directly)
-$FlutterBuildDir = Join-Path $ProjectRoot "build\windows\arm64\runner"
-$FlutterCmakeBuildDir = Join-Path $ProjectRoot "build\windows\arm64"
+$FlutterBuildDir = Join-Path $ProjectRoot "build\windows\$Arch\runner"
+$FlutterCmakeBuildDir = Join-Path $ProjectRoot "build\windows\$Arch"
 $EphemeralDir = Join-Path $ProjectRoot "windows\flutter\ephemeral"
-$FlutterEngineArtifacts = "C:\flutter\bin\cache\artifacts\engine\windows-arm64"
+$FlutterEngineArtifacts = "C:\flutter\bin\cache\artifacts\engine\$FlutterPlatform"
 
 # ---------------------------------------------------------------------------
 # Step 1: Build Rust MLS FFI
@@ -43,7 +66,7 @@ $FlutterEngineArtifacts = "C:\flutter\bin\cache\artifacts\engine\windows-arm64"
 Write-Host "=== Building Rust MLS FFI ===" -ForegroundColor Cyan
 Push-Location $MlsFfiDir
 try {
-    cargo build --release
+    cargo build --release --target $RustTarget
     if ($LASTEXITCODE -ne 0) { throw "Rust MLS FFI build failed" }
 } finally {
     Pop-Location
@@ -61,8 +84,9 @@ if (-not (Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
     if (-not (Test-Path $BuildDir)) { New-Item -ItemType Directory -Path $BuildDir | Out-Null }
     cmake -S $EmailDir -B $BuildDir `
         -G Ninja `
-        -DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain `
-        -DVCPKG_TARGET_TRIPLET=$VcpkgTriplet `
+        "-DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain" `
+        "-DVCPKG_TARGET_TRIPLET=$VcpkgTriplet" `
+        "-DVCPKG_INSTALLED_DIR=$VcpkgInstalledDir" `
         -DCMAKE_BUILD_TYPE=Release
     if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
 }
@@ -91,19 +115,22 @@ $ephemeralInputs = @(
 foreach ($f in $ephemeralInputs) {
     $src = Join-Path $FlutterEngineArtifacts $f
     $dst = Join-Path $EphemeralDir $f
-    if ((Test-Path $src) -and (-not (Test-Path $dst))) {
+    if (Test-Path $src) {
+        # Force-copy: the engine .dll/.lib are arch-specific and must match -Arch.
         Copy-Item $src $dst -Force
     }
 }
-if (-not (Test-Path (Join-Path $EphemeralDir "cpp_client_wrapper"))) {
-    Copy-Item (Join-Path $FlutterEngineArtifacts "cpp_client_wrapper") $EphemeralDir -Recurse -Force
+$cppWrapperDst = Join-Path $EphemeralDir "cpp_client_wrapper"
+$cppWrapperSrc = Join-Path $FlutterEngineArtifacts "cpp_client_wrapper"
+if ((Test-Path $cppWrapperSrc) -and (-not (Test-Path $cppWrapperDst))) {
+    Copy-Item $cppWrapperSrc $EphemeralDir -Recurse -Force
 }
 
 # 3b. Configure + build the windows runner with Ninja
 if (-not (Test-Path (Join-Path $FlutterCmakeBuildDir "CMakeCache.txt"))) {
     cmake -S (Join-Path $ProjectRoot "windows") -B $FlutterCmakeBuildDir `
         -G Ninja `
-        -DFLUTTER_TARGET_PLATFORM=windows-arm64 `
+        "-DFLUTTER_TARGET_PLATFORM=$FlutterPlatform" `
         -DCMAKE_BUILD_TYPE=Release
     if ($LASTEXITCODE -ne 0) { throw "Flutter CMake configuration failed" }
 }
@@ -144,10 +171,10 @@ if (Test-Path $emailCoreDll) {
 }
 
 # Copy vcpkg dependency DLLs
-$vcpkgBin = "K:\vcpkg\installed\$VcpkgTriplet\bin"
+$vcpkgBin = Join-Path $VcpkgInstalledDir "$VcpkgTriplet\bin"
 $depDlls = @(
-    "libcrypto-3-arm64.dll",
-    "libssl-3-arm64.dll",
+    "libcrypto-3-$Arch.dll",
+    "libssl-3-$Arch.dll",
     "libcurl.dll",
     "z.dll",
     "iconv-2.dll",
@@ -170,7 +197,8 @@ foreach ($dll in $depDlls) {
 }
 
 # Copy vmime DLL if dynamically linked (static build: no-op)
-$vmimeDll = "E:\vmime-install\bin\vmime.dll"
+$vmimeRoot = if ($env:VMIME_ROOT) { $env:VMIME_ROOT } else { "E:\vmime-install" }
+$vmimeDll = "$vmimeRoot\bin\vmime.dll"
 if (Test-Path $vmimeDll) {
     Copy-Item $vmimeDll $FlutterBuildDir -Force
     Write-Host "  Copied vmime.dll"
@@ -193,7 +221,7 @@ Write-Host "  DLL copy complete" -ForegroundColor Green
 # Step 5: Launch app
 # ---------------------------------------------------------------------------
 Write-Host "=== Launching app ===" -ForegroundColor Cyan
-$exePath = Join-Path $FlutterBuildDir "oim.exe"
+$exePath = Join-Path $FlutterBuildDir "oceantalk.exe"
 if (Test-Path $exePath) {
     Start-Process $exePath
     Write-Host "App launched: $exePath" -ForegroundColor Green

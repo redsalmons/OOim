@@ -1,7 +1,7 @@
 ﻿; OceanTalk (零海) Windows installer — Modern UI 2 wizard
-; Build: "C:\Program Files (x86)\NSIS\makensis.exe" installer\oim.nsi
-; Input:  build\windows\arm64\runner\* (produced by run_app.ps1)
-; Output: build\windows\arm64\OceanTalk-Setup-1.0.0.exe
+; Build:  "C:\Program Files (x86)\NSIS\makensis.exe" [/DARCH=x64] installer\oim.nsi
+; Input:  build\windows\<ARCH>\runner\* (produced by run_app.ps1 -Arch <ARCH>)
+; Output: build\windows\<ARCH>\OceanTalk-Setup-win-<ver>-(x64|aarch64).exe
 ; NOTE: this file MUST be saved as UTF-8 **with BOM** — without the BOM NSIS
 ; decodes it as ANSI (GBK) and the 零海 shortcut/wizard text turns mojibake.
 
@@ -9,10 +9,22 @@ Unicode true
 !define APP_NAME      "OceanTalk"
 !define APP_NAME_ZH   "零海 OceanTalk"
 !define APP_EXE       "oceantalk.exe"
-!define APP_VERSION   "1.0.0"
 !define APP_PUBLISHER "OceanTalk"
-!define BUILD_DIR     "..\build\windows\arm64\runner"
-!define OUT_FILE      "..\build\windows\arm64\OceanTalk-Setup-${APP_VERSION}.exe"
+; Version is read from pubspec.yaml ("version: X.Y.Z+N") — bump it in one place.
+; Override at build time: makensis /DAPP_VERSION=1.2.3
+!ifndef APP_VERSION
+  !searchparse /file "..\pubspec.yaml" "version: " APP_VERSION "+"
+!endif
+!ifndef ARCH
+!define ARCH          "arm64"
+!endif
+!if ${ARCH} == "arm64"
+  !define ARCH_SUFFIX "aarch64"
+!else
+  !define ARCH_SUFFIX "${ARCH}"
+!endif
+!define BUILD_DIR     "..\build\windows\${ARCH}\runner"
+!define OUT_FILE      "..\build\windows\${ARCH}\OceanTalk-Setup-win-${APP_VERSION}-${ARCH_SUFFIX}.exe"
 
 !include "MUI2.nsh"
 
