@@ -27,7 +27,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"零海 OceanTalk", origin, size)) {
+  // Initial title; Dart retitles via the "oim/window_title" channel once the
+  // effective locale is known (zh -> 零海, en -> OceanTalk).
+  if (!window.Create(L"OceanTalk", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

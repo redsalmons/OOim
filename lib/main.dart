@@ -35,6 +35,11 @@ void main(List<String> args) {
   }
   appLocale.addListener(_syncLocaleToPlatform);
   runApp(const OIMApp());
+  // ValueNotifier only fires on change; push the initial title once so a
+  // persisted/system locale that doesn't change appLocale still retitles the
+  // native window.
+  WidgetsBinding.instance
+      .addPostFrameCallback((_) => _syncLocaleToPlatform());
 }
 
 /// Pushes the effective locale to the native window title and broadcasts it
