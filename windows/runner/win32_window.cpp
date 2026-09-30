@@ -144,6 +144,15 @@ bool Win32Window::Create(const std::wstring& title,
     return false;
   }
 
+  // Explicit small icon: WNDCLASS has no hIconSm; without it Windows
+  // synthesizes the small icon by downscaling hIcon, which leaves a light
+  // halo on multi-size alpha ICOs (visible as a white edge in the taskbar).
+  SendMessage(window, WM_SETICON, ICON_SMALL,
+              reinterpret_cast<LPARAM>(LoadImage(
+                  GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON),
+                  IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                  GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)));
+
   UpdateTheme(window);
 
   return OnCreate();
