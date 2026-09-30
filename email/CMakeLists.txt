@@ -17,13 +17,25 @@ if(DEFINED ENV{CARGO_HTTP_PROXY})
 else()
     set(_cargo_proxy "")
 endif()
-add_custom_command(
-    OUTPUT ${MLS_FFI_LIB}
-    COMMAND ${_cargo_proxy} cargo build --release --manifest-path ${MLS_FFI_DIR}/Cargo.toml
-    WORKING_DIRECTORY ${MLS_FFI_DIR}
-    COMMENT "Building Rust MLS FFI static library"
-    VERBATIM
-)
+if(APPLE)
+    add_custom_command(
+        OUTPUT ${MLS_FFI_LIB}
+        COMMAND ${_cargo_proxy} cargo build --release --target aarch64-apple-darwin --manifest-path ${MLS_FFI_DIR}/Cargo.toml
+        COMMAND ${_cargo_proxy} cargo build --release --target x86_64-apple-darwin --manifest-path ${MLS_FFI_DIR}/Cargo.toml
+        COMMAND lipo -create ${MLS_FFI_DIR}/target/aarch64-apple-darwin/release/libmls_ffi.a ${MLS_FFI_DIR}/target/x86_64-apple-darwin/release/libmls_ffi.a -output ${MLS_FFI_LIB}
+        WORKING_DIRECTORY ${MLS_FFI_DIR}
+        COMMENT "Building Rust MLS FFI static library (universal)"
+        VERBATIM
+    )
+else()
+    add_custom_command(
+        OUTPUT ${MLS_FFI_LIB}
+        COMMAND ${_cargo_proxy} cargo build --release --manifest-path ${MLS_FFI_DIR}/Cargo.toml
+        WORKING_DIRECTORY ${MLS_FFI_DIR}
+        COMMENT "Building Rust MLS FFI static library"
+        VERBATIM
+    )
+endif()
 add_custom_target(mls_ffi_build DEPENDS ${MLS_FFI_LIB})
 
 # ---------------------------------------------------------------------------
@@ -55,32 +67,27 @@ if(WIN32)
     set(GSASL_LIBRARIES "${GSASL_LIBRARY}")
     set(GSASL_FOUND TRUE)
 else()
-    # macOS: Find SQLite3, OpenSSL, libcurl via system / Homebrew
+    # macOS: Find SQLite3, libcurl via system; native deps are universal
+    # (arm64 + x86_64) fat libraries staged under deps/univ-libs.
     find_package(SQLite3 REQUIRED)
-    find_package(OpenSSL REQUIRED)
     find_package(CURL REQUIRED)
 
-    # Use static OpenSSL libraries
-    set(OPENSSL_SSL_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libssl.a")
-    set(OPENSSL_CRYPTO_LIBRARY "/opt/homebrew/opt/openssl@3/lib/libcrypto.a")
+    set(_univ_libs "${CMAKE_CURRENT_SOURCE_DIR}/deps/univ-libs")
 
-    # Use locally built vmime with OpenSSL TLS backend
-    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/include")
-    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-install/lib/libvmime.dylib")
+    # Static OpenSSL fat archives (headers from the older slice's version for ABI safety)
+    set(OPENSSL_SSL_LIBRARY "${_univ_libs}/lib/libssl.a")
+    set(OPENSSL_CRYPTO_LIBRARY "${_univ_libs}/lib/libcrypto.a")
+    set(OPENSSL_INCLUDE_DIR "${_univ_libs}/include")
+
+    # Universal vmime (GnuTLS TLS backend + gsasl)
+    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-univ-install/include")
+    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-univ-install/lib/libvmime.dylib")
     set(VMIME_FOUND TRUE)
 
-    # Find gsasl
-    find_package(PkgConfig)
-    if(PKG_CONFIG_FOUND)
-        pkg_check_modules(GSASL libgsasl)
-    endif()
-
-    # Fallback to Homebrew path if pkg-config fails
-    if(NOT GSASL_FOUND)
-        set(GSASL_INCLUDE_DIRS "/opt/homebrew/include")
-        set(GSASL_LIBRARIES "/opt/homebrew/lib/libgsasl.dylib")
-        set(GSASL_FOUND TRUE)
-    endif()
+    # Universal gsasl
+    set(GSASL_INCLUDE_DIRS "${_univ_libs}/include")
+    set(GSASL_LIBRARIES "${_univ_libs}/lib/libgsasl.dylib")
+    set(GSASL_FOUND TRUE)
 endif()
 
 # cppasyncworker - header-only worker pool used by libemail.
@@ -139,7 +146,7 @@ if(WIN32)
     target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} ${GSASL_LIBRARIES}
         OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
 else()
-    target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
+    target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
 endif()
 
 # Email core library (static, used by example executable)
@@ -258,8 +265,8 @@ if(WIN32)
     target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv)
     target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv)
 else()
-    target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib iconv)
-    target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} /opt/homebrew/lib/libgsasl.dylib z iconv)
+    target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} iconv)
+    target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} z iconv)
 endif()
 
 # Link the Rust MLS static library into the shared lib (Flutter-facing).

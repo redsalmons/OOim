@@ -2,7 +2,7 @@
 
 # Kill existing app and lingering processes first
 echo "Killing existing app and processes..."
-pkill -9 -f oceantalk.app 2>/dev/null
+pkill -9 -f OceanTalk.app 2>/dev/null
 pkill -9 -f "flutter" 2>/dev/null
 pkill -9 -f "dart" 2>/dev/null
 sleep 2
@@ -31,7 +31,7 @@ fi
 
 # Copy dependent libraries
 echo "Copying dependent libraries..."
-APP_PATH="build/macos/Build/Products/Debug/oceantalk.app"
+APP_PATH="build/macos/Build/Products/Debug/OceanTalk.app"
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 
 # Remove all previously copied dylibs
@@ -42,22 +42,20 @@ find "$FRAMEWORKS_DIR" -name "*.dylib" -maxdepth 1 -delete
 echo "Copying libemail_core.dylib..."
 cp /Users/steven/Cascade/OIM/email/build/libemail_core.dylib "$FRAMEWORKS_DIR/"
 
-# Copy homebrew dependencies
-echo "Copying homebrew dependencies..."
-export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
-for pair in "gnutls:libgnutls.30" "gettext:libintl.8" "p11-kit:libp11-kit.0" "libidn2:libidn2.0" "libunistring:libunistring.5" "libtasn1:libtasn1.6" "nettle:libhogweed.7" "nettle:libnettle.9" "gmp:libgmp.10" "gsasl:libgsasl.18"; do
-    opt=$(echo $pair | cut -d: -f1)
-    lib=$(echo $pair | cut -d: -f2)
-    src="/opt/homebrew/opt/$opt/lib/$lib.dylib"
+# Copy native dependencies (universal arm64+x86_64)
+echo "Copying native dependencies..."
+UNIV_LIBS="/Users/steven/Cascade/OIM/email/deps/univ-libs/lib"
+for lib in libgnutls.30 libintl.8 libp11-kit.0 libidn2.0 libunistring.5 libtasn1.6 libhogweed.7 libnettle.9 libhogweed.6 libnettle.8 libgmp.10 libgsasl.18; do
+    src="$UNIV_LIBS/$lib.dylib"
     if [ -f "$src" ] && [ ! -f "$FRAMEWORKS_DIR/$lib.dylib" ]; then
         cp "$src" "$FRAMEWORKS_DIR/$lib.dylib"
         echo "  Copied $lib.dylib"
     fi
 done
 
-# Also copy libvmime
-if [ -f "/usr/local/lib/libvmime.1.dylib" ] && [ ! -f "$FRAMEWORKS_DIR/libvmime.1.dylib" ]; then
-    cp /usr/local/lib/libvmime.1.dylib "$FRAMEWORKS_DIR/"
+# Also copy libvmime (universal build)
+if [ ! -f "$FRAMEWORKS_DIR/libvmime.1.dylib" ]; then
+    cp /Users/steven/Cascade/OIM/email/deps/vmime-univ-install/lib/libvmime.1.dylib "$FRAMEWORKS_DIR/"
     echo "  Copied libvmime.1.dylib"
 fi
 
@@ -68,7 +66,7 @@ for pass in 1 2 3; do
         base=$(basename "$f")
         chmod u+w "$f"
         install_name_tool -id @rpath/$base "$f" 2>/dev/null
-        for dep in $(otool -L "$f" | grep homebrew | awk '{print $1}'); do
+        for dep in $(otool -L "$f" | grep -i homebrew | awk '{print $1}'); do
             depbase=$(basename "$dep")
             if [ -f "$FRAMEWORKS_DIR/$depbase" ]; then
                 install_name_tool -change "$dep" @rpath/$depbase "$f" 2>/dev/null
