@@ -295,8 +295,9 @@ endif()
 # Link SQLCipher, EmailComm, vmime, and the Rust MLS static library
 if(WIN32)
     find_package(Iconv REQUIRED)
-    # crypt32/bcrypt/shell32/ole32: DPAPI + known-folder APIs used by keychain_store
-    set(_keychain_libs crypt32 bcrypt shell32 ole32)
+    # advapi32: Credential Manager vault; crypt32: legacy DPAPI blob migration;
+    # shell32/ole32: known-folder APIs used by keychain_store
+    set(_keychain_libs advapi32 crypt32 bcrypt shell32 ole32)
     target_link_libraries(email_core PUBLIC sqlcipher::sqlcipher EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv ${_keychain_libs})
     target_link_libraries(email_core_shared PUBLIC sqlcipher::sqlcipher EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv ${_keychain_libs})
 else()

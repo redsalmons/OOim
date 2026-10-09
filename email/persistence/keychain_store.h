@@ -9,8 +9,9 @@
 //   service "com.redsalmon.oim.credentials"— per-account secrets (auth codes,
 //                                            OAuth tokens), keyed by email
 // macOS:   Keychain generic-password items, ThisDeviceOnly (no iCloud sync).
-// Windows: DPAPI-protected blobs under %LOCALAPPDATA%\OceanTalk\keychain,
-//          bound to the current user + machine.
+// Windows: Credential Manager generic credentials ("OceanTalk:<service>:<account>"),
+//          per-user vault bound to the current logon session; legacy DPAPI blob
+//          files are migrated into the vault on first access.
 
 namespace keychain_store {
 
