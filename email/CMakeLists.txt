@@ -51,7 +51,12 @@ add_custom_target(mls_ffi_build DEPENDS ${MLS_FFI_LIB})
 # ---------------------------------------------------------------------------
 if(WIN32)
     # Windows: use vcpkg toolchain (pass -DCMAKE_TOOLCHAIN_FILE=.../vcpkg.cmake)
-    find_package(SQLite3 REQUIRED)
+    # sqlite3 comes from the vcpkg sqlcipher port (OpenSSL crypto provider).
+    # Its headers live in include/sqlcipher/ so they shadow the plain sqlite3
+    # port when that dir is put first on the include path.
+    find_package(sqlcipher CONFIG REQUIRED)
+    find_path(SQLCIPHER_INCLUDE_ROOT NAMES sqlcipher/sqlite3.h REQUIRED)
+    set(_sqlite_include_dir "${SQLCIPHER_INCLUDE_ROOT}/sqlcipher")
     find_package(OpenSSL REQUIRED)
     find_package(CURL REQUIRED)
     find_package(ZLIB REQUIRED)
@@ -241,17 +246,22 @@ set_target_properties(email_core_shared PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
-# SQLCipher amalgamation provides sqlite3 — compiled directly into each target
-# so the whole emails.db is encrypted at rest (CommonCrypto provider, no extra
-# dylib, builds for every CMAKE_OSX_ARCHITECTURES slice automatically).
-target_sources(email_core PRIVATE deps/sqlcipher-amalg/sqlite3.c)
-target_sources(email_core_shared PRIVATE deps/sqlcipher-amalg/sqlite3.c)
-set_source_files_properties(deps/sqlcipher-amalg/sqlite3.c PROPERTIES
-    COMPILE_DEFINITIONS "SQLITE_HAS_CODEC;SQLCIPHER_CRYPTO_CC;SQLITE_TEMP_STORE=2;SQLITE_THREADSAFE=1;SQLITE_EXTRA_INIT=sqlcipher_extra_init;SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
+# SQLCipher provides sqlite3 so the whole emails.db is encrypted at rest.
+#   macOS:   amalgamation compiled directly into each target (CommonCrypto
+#            provider, no extra dylib, builds for every CMAKE_OSX_ARCHITECTURES
+#            slice automatically).
+#   Windows: vcpkg sqlcipher port (OpenSSL provider), linked below.
+if(APPLE)
+    set(_sqlite_include_dir "${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg")
+    target_sources(email_core PRIVATE deps/sqlcipher-amalg/sqlite3.c)
+    target_sources(email_core_shared PRIVATE deps/sqlcipher-amalg/sqlite3.c)
+    set_source_files_properties(deps/sqlcipher-amalg/sqlite3.c PROPERTIES
+        COMPILE_DEFINITIONS "SQLITE_HAS_CODEC;SQLCIPHER_CRYPTO_CC;SQLITE_TEMP_STORE=2;SQLITE_THREADSAFE=1;SQLITE_EXTRA_INIT=sqlcipher_extra_init;SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
+endif()
 
 # Include directories
 target_include_directories(email_core BEFORE PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg
+    ${_sqlite_include_dir}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
@@ -261,7 +271,7 @@ target_include_directories(email_core BEFORE PUBLIC
     ${OPENSSL_INCLUDE_DIR}
 )
 target_include_directories(email_core_shared BEFORE PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg
+    ${_sqlite_include_dir}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/persistence
     ${CMAKE_CURRENT_SOURCE_DIR}/signal
@@ -282,11 +292,13 @@ else()
     )
 endif()
 
-# Link SQLite3, EmailComm, vmime, and the Rust MLS static library
+# Link SQLCipher, EmailComm, vmime, and the Rust MLS static library
 if(WIN32)
     find_package(Iconv REQUIRED)
-    target_link_libraries(email_core PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv)
-    target_link_libraries(email_core_shared PUBLIC SQLite3::SQLite3 EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv)
+    # crypt32/bcrypt/shell32/ole32: DPAPI + known-folder APIs used by keychain_store
+    set(_keychain_libs crypt32 bcrypt shell32 ole32)
+    target_link_libraries(email_core PUBLIC sqlcipher::sqlcipher EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv ${_keychain_libs})
+    target_link_libraries(email_core_shared PUBLIC sqlcipher::sqlcipher EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv ${_keychain_libs})
 else()
     target_link_libraries(email_core PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} iconv)
     target_link_libraries(email_core_shared PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} z iconv)

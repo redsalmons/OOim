@@ -4,11 +4,13 @@
 #include <string>
 #include <vector>
 
-// macOS Keychain-backed secret storage. Two item families:
+// OS-backed secret storage. Two item families:
 //   service "com.redsalmon.oim.db"         — SQLCipher master key (one item)
 //   service "com.redsalmon.oim.credentials"— per-account secrets (auth codes,
 //                                            OAuth tokens), keyed by email
-// Items are ThisDeviceOnly so they never leave the machine via iCloud.
+// macOS:   Keychain generic-password items, ThisDeviceOnly (no iCloud sync).
+// Windows: DPAPI-protected blobs under %LOCALAPPDATA%\OceanTalk\keychain,
+//          bound to the current user + machine.
 
 namespace keychain_store {
 

@@ -10,7 +10,11 @@
 #include <string.h>
 #include <sqlite3.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;

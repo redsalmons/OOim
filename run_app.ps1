@@ -18,7 +18,9 @@ $env:PATH = "C:\flutter\bin;" + $env:PATH
 # with vswhere, so the toolchain must be activated manually).
 # On this ARM64 host, `vcvarsall x64` selects the ARM64->x64 cross toolchain.
 $VcvarsAll = "E:\vsc\VC\Auxiliary\Build\vcvarsall.bat"
-if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+# vcvarsall exports VSCMD_ARG_TGT_ARCH; only reuse an inherited env if it
+# targets the same arch, otherwise an arm64 shell would link x64 objects.
+if ($env:VSCMD_ARG_TGT_ARCH -ne $Arch) {
     cmd /c "`"$VcvarsAll`" $Arch && set" | ForEach-Object {
         if ($_ -match "^([^=]+)=(.*)$") {
             Set-Item -Path "env:$($matches[1])" -Value $matches[2]
@@ -179,7 +181,7 @@ $depDlls = @(
     "z.dll",
     "iconv-2.dll",
     "charset-1.dll",
-    "sqlite3.dll",
+    "sqlcipher.dll",
     "gsasl-18.dll",
     "libssh2.dll",
     "liblzma.dll",
