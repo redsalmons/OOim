@@ -281,7 +281,7 @@ int email_db_init(const char* path) {
 
     const char* sql_localemail = "CREATE TABLE IF NOT EXISTS localemail ("
                                  "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                 "uuid TEXT,"
+                                 "uuid INTEGER,"
                                  "account TEXT NOT NULL,"
                                  "sender TEXT,"
                                  "from_addr TEXT,"

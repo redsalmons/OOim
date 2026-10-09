@@ -319,11 +319,19 @@ void email_free(Email* email) {
 
 // --- Config save/load ---
 
+static void set_vault_path_for(const char* confPath) {
+    std::string dir = confPath ? confPath : "";
+    size_t slash = dir.find_last_of('/');
+    if (slash != std::string::npos) dir.resize(slash);
+    keychain_store::set_vault_path(dir + "/secrets.vault");
+}
+
 int email_config_save(const char* path, const char* local_data_path,
                        const EmailAccountConfig* accounts, int count) {
     if (!path) {
         return -1;
     }
+    set_vault_path_for(path);
 
     json root;
     root["local_data_path"] = local_data_path ? local_data_path : "";
@@ -388,6 +396,7 @@ int email_config_load(const char* path, char** local_data_path,
     if (!path || !local_data_path || !accounts || !count) {
         return -1;
     }
+    set_vault_path_for(path);
 
     FILE* f = fopen(path, "rb");
     if (!f) {

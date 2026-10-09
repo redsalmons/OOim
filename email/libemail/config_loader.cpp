@@ -25,6 +25,10 @@ static std::string generate_email_id(const std::string& type) {
 
 ConfigLoader::ConfigLoader(const std::string& config_path)
     : config_path_(config_path) {
+    std::string dir = config_path;
+    size_t slash = dir.find_last_of('/');
+    if (slash != std::string::npos) dir.resize(slash);
+    keychain_store::set_vault_path(dir + "/secrets.vault");
 }
 
 bool ConfigLoader::load() {
