@@ -2,10 +2,17 @@
 #include "logger.h"
 #include <string.h>
 #include <stdint.h>
+#include <mutex>
 
 #if defined(__APPLE__)
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <fstream>
+#include <filesystem>
+#include <vector>
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -44,18 +51,20 @@ static std::string hex_encode(const uint8_t* p, size_t n) {
 // macOS: Security.framework generic-password items
 // ---------------------------------------------------------------------------
 
-static CFDataRef copy_query_item(const char* service, const std::string& account) {
+static CFDataRef copy_query_item(const char* service, const std::string& account,
+                                 bool noUi = false) {
     CFStringRef svc = CFStringCreateWithCString(nullptr, service, kCFStringEncodingUTF8);
     CFStringRef acc = CFStringCreateWithCString(nullptr, account.c_str(), kCFStringEncodingUTF8);
     const void* keys[] = {
         kSecClass, kSecAttrService, kSecAttrAccount,
-        kSecReturnData, kSecMatchLimit,
+        kSecReturnData, kSecMatchLimit, kSecUseAuthenticationUI,
     };
     const void* vals[] = {
         kSecClassGenericPassword, svc, acc,
         kCFBooleanTrue, kSecMatchLimitOne,
+        noUi ? kSecUseAuthenticationUISkip : kSecUseAuthenticationUIAllow,
     };
-    CFDictionaryRef q = CFDictionaryCreate(nullptr, keys, vals, 5,
+    CFDictionaryRef q = CFDictionaryCreate(nullptr, keys, vals, 6,
                                            &kCFTypeDictionaryKeyCallBacks,
                                            &kCFTypeDictionaryValueCallBacks);
     CFRelease(svc);
@@ -116,12 +125,15 @@ static bool upsert_item(const char* service, const std::string& account,
     return rc == errSecSuccess;
 }
 
-static bool delete_item(const char* service, const std::string& account) {
+static bool delete_item(const char* service, const std::string& account,
+                        bool noUi = false) {
     CFStringRef svc = CFStringCreateWithCString(nullptr, service, kCFStringEncodingUTF8);
     CFStringRef acc = CFStringCreateWithCString(nullptr, account.c_str(), kCFStringEncodingUTF8);
-    const void* keys[] = { kSecClass, kSecAttrService, kSecAttrAccount };
-    const void* vals[] = { kSecClassGenericPassword, svc, acc };
-    CFDictionaryRef q = CFDictionaryCreate(nullptr, keys, vals, 3,
+    const void* keys[] = { kSecClass, kSecAttrService, kSecAttrAccount,
+                           kSecUseAuthenticationUI };
+    const void* vals[] = { kSecClassGenericPassword, svc, acc,
+                           noUi ? kSecUseAuthenticationUISkip : kSecUseAuthenticationUIAllow };
+    CFDictionaryRef q = CFDictionaryCreate(nullptr, keys, vals, 4,
                                            &kCFTypeDictionaryKeyCallBacks,
                                            &kCFTypeDictionaryValueCallBacks);
     OSStatus rc = SecItemDelete(q);
@@ -159,23 +171,188 @@ std::string db_master_key_hex() {
     return cached;
 }
 
+// ---------------------------------------------------------------------------
+// Credential vault: account secrets live in a single AES-256-GCM encrypted
+// file, keyed by the same master key as the database. Only the master key
+// touches the Keychain, so keychain authorization prompts happen once per
+// signing identity instead of once per account.
+// Layout: magic(4) | iv(12) | ciphertext | tag(16); plaintext is a JSON map.
+// ---------------------------------------------------------------------------
+
+static std::string g_vaultPath;
+static std::mutex g_vaultMutex;
+
+void set_vault_path(const std::string& path) {
+    std::lock_guard<std::mutex> lk(g_vaultMutex);
+    g_vaultPath = path;
+}
+
+static bool hex_decode(const std::string& hex, uint8_t* out, size_t n) {
+    if (hex.size() != n * 2) return false;
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < n; i++) {
+        int hi = nib(hex[2 * i]), lo = nib(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+static bool vault_master_key(uint8_t out[32]) {
+    std::string hex = db_master_key_hex();
+    return !hex.empty() && hex_decode(hex, out, 32);
+}
+
+static bool gcm_encrypt(const uint8_t key[32], const std::string& plain,
+                        std::vector<uint8_t>& out) {
+    uint8_t iv[12];
+    if (RAND_bytes(iv, sizeof(iv)) != 1) return false;
+    EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+    if (!c) return false;
+    bool ok = EVP_EncryptInit_ex(c, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+              EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), nullptr) == 1 &&
+              EVP_EncryptInit_ex(c, nullptr, nullptr, key, iv) == 1;
+    out.resize(sizeof(iv) + plain.size() + 16);
+    memcpy(out.data(), iv, sizeof(iv));
+    int len = 0, total = 0;
+    if (ok) ok = EVP_EncryptUpdate(c, out.data() + sizeof(iv), &len,
+                                   (const uint8_t*)plain.data(), (int)plain.size()) == 1;
+    total += ok ? len : 0;
+    if (ok) ok = EVP_EncryptFinal_ex(c, out.data() + sizeof(iv) + total, &len) == 1;
+    total += ok ? len : 0;
+    if (ok) ok = EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16,
+                                     out.data() + sizeof(iv) + total) == 1;
+    EVP_CIPHER_CTX_free(c);
+    if (!ok) return false;
+    out.resize(sizeof(iv) + total + 16);
+    return true;
+}
+
+static bool gcm_decrypt(const uint8_t key[32], const uint8_t* blob, size_t n,
+                        std::string& plain) {
+    if (n < 12 + 16) return false;
+    const uint8_t* iv = blob;
+    size_t ctLen = n - 12 - 16;
+    const uint8_t* tag = blob + 12 + ctLen;
+    EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+    if (!c) return false;
+    bool ok = EVP_DecryptInit_ex(c, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+              EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
+              EVP_DecryptInit_ex(c, nullptr, nullptr, key, iv) == 1;
+    std::vector<uint8_t> buf(ctLen ? ctLen : 1);
+    int len = 0, total = 0;
+    if (ok && ctLen) ok = EVP_DecryptUpdate(c, buf.data(), &len, blob + 12, (int)ctLen) == 1;
+    total += ok ? len : 0;
+    if (ok) ok = EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_SET_TAG, 16, (void*)tag) == 1;
+    if (ok) ok = EVP_DecryptFinal_ex(c, buf.data() + total, &len) > 0;
+    total += ok ? len : 0;
+    EVP_CIPHER_CTX_free(c);
+    if (!ok) return false;
+    plain.assign((const char*)buf.data(), total);
+    return true;
+}
+
+// Caller must hold g_vaultMutex.
+static bool vault_read(nlohmann::json& map) {
+    map = nlohmann::json::object();
+    if (g_vaultPath.empty()) return false;
+    std::ifstream f(g_vaultPath, std::ios::binary);
+    if (!f) return false;
+    std::vector<uint8_t> blob((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+    static const char kMagic[4] = {'O', 'T', 'V', '1'};
+    if (blob.size() < 4 + 12 + 16 || memcmp(blob.data(), kMagic, 4) != 0) return false;
+    uint8_t key[32];
+    if (!vault_master_key(key)) return false;
+    std::string plain;
+    bool ok = gcm_decrypt(key, blob.data() + 4, blob.size() - 4, plain);
+    memset(key, 0, sizeof(key));
+    if (!ok) return false;
+    try {
+        map = nlohmann::json::parse(plain);
+    } catch (...) {
+        return false;
+    }
+    return map.is_object();
+}
+
+// Caller must hold g_vaultMutex.
+static bool vault_write(const nlohmann::json& map) {
+    if (g_vaultPath.empty()) return false;
+    uint8_t key[32];
+    if (!vault_master_key(key)) return false;
+    std::vector<uint8_t> blob;
+    bool ok = gcm_encrypt(key, map.dump(), blob);
+    memset(key, 0, sizeof(key));
+    if (!ok) return false;
+    static const char kMagic[4] = {'O', 'T', 'V', '1'};
+    blob.insert(blob.begin(), kMagic, kMagic + 4);
+
+    std::filesystem::path tmp = g_vaultPath + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f.write((const char*)blob.data(), (std::streamsize)blob.size());
+        if (!f.good()) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, g_vaultPath, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        LOG_INFO("[keychain] vault rename failed: %s\n", ec.message().c_str());
+        return false;
+    }
+    return true;
+}
+
 bool store_secret(const std::string& account, const std::string& secret) {
     if (account.empty()) return false;
-    return upsert_item(kServiceCreds, account, secret.data(), secret.size());
+    std::lock_guard<std::mutex> lk(g_vaultMutex);
+    nlohmann::json map;
+    vault_read(map); // missing/corrupt file starts fresh
+    map[account] = secret;
+    return vault_write(map);
 }
 
 std::string load_secret(const std::string& account) {
     if (account.empty()) return "";
-    CFDataRef data = copy_query_item(kServiceCreds, account);
-    if (!data) return "";
-    std::string out((const char*)CFDataGetBytePtr(data), (size_t)CFDataGetLength(data));
-    CFRelease(data);
-    return out;
+    std::lock_guard<std::mutex> lk(g_vaultMutex);
+    nlohmann::json map;
+    if (vault_read(map)) {
+        auto it = map.find(account);
+        if (it != map.end() && it->is_string()) return it->get<std::string>();
+    }
+    // One-time migration: secrets written before the vault existed live as
+    // individual Keychain items. Read without UI: items whose ACL already
+    // trusts this signer migrate silently; anything that would prompt is
+    // skipped so the user never gets a cascade of auth dialogs.
+    CFDataRef legacy = copy_query_item(kServiceCreds, account, /*noUi=*/true);
+    if (!legacy) return "";
+    std::string secret((const char*)CFDataGetBytePtr(legacy), (size_t)CFDataGetLength(legacy));
+    CFRelease(legacy);
+    map[account] = secret;
+    if (vault_write(map)) {
+        delete_item(kServiceCreds, account, /*noUi=*/true);
+        LOG_INFO("[keychain] migrated credential for %s into vault\n", account.c_str());
+    }
+    return secret;
 }
 
 bool delete_secret(const std::string& account) {
     if (account.empty()) return false;
-    return delete_item(kServiceCreds, account);
+    std::lock_guard<std::mutex> lk(g_vaultMutex);
+    nlohmann::json map;
+    bool ok = true;
+    if (vault_read(map) && map.erase(account) > 0) {
+        ok = vault_write(map);
+    }
+    delete_item(kServiceCreds, account, /*noUi=*/true); // drop any pre-vault remnant too
+    return ok;
 }
 
 #elif defined(_WIN32)
@@ -360,6 +537,9 @@ bool delete_secret(const std::string& account) {
     if (account.empty()) return false;
     return delete_item(kServiceCreds, account);
 }
+
+// Windows stores each secret as its own DPAPI blob; no vault file needed.
+void set_vault_path(const std::string&) {}
 
 #else
 #error "keychain_store: no secret-storage backend for this platform"

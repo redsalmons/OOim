@@ -19,6 +19,11 @@ namespace keychain_store {
 // generating and persisting it on first use. Empty on failure.
 std::string db_master_key_hex();
 
+// Sets the path of the encrypted credential vault file (AES-256-GCM over a
+// JSON map, keyed by the master key). Secrets are stored there, not as
+// individual Keychain items — only the master key touches the Keychain.
+void set_vault_path(const std::string& path);
+
 bool store_secret(const std::string& account, const std::string& secret);
 std::string load_secret(const std::string& account);
 bool delete_secret(const std::string& account);
