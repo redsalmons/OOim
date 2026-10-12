@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import '../../native/email_core.dart' as native;
-import '../../native/unified_session.dart';
-import '../../i18n/app_strings.dart';
+import 'package:oim_core/native/email_core.dart' as native;
+import 'package:oim_core/native/unified_session.dart';
+import 'package:oim_core/i18n/app_strings.dart';
 import '../app_theme.dart';
 
 class CreateSessionDialog extends StatefulWidget {
@@ -112,102 +112,7 @@ class _CreateSessionDialogState extends State<CreateSessionDialog> {
       return;
     }
 
-    final messageId = createJson['message_id']?.toString() ?? '';
-    final xMailer = createJson['x_mailer']?.toString() ?? '';
-    final sessionId = createJson['session_id']?.toString() ?? '';
-    final encryptedBody = createJson['encrypted_body']?.toString() ?? '';
-
-    // Determine if this is a Signal or MLS session based on member count.
-    // Signal (2 members): 创建即密钥交换 — 发明文 PREKEY_BUNDLE(1.0.0)，body 是 prekey bundle JSON。
-    // MLS (3+ members): group_create already set up the group — pass x_mailer for task processing.
-    final isSignal = (_members.length == 1); // 1 remote member = 2 total = Signal
-    final bodyForSmtp = encryptedBody;  // Signal: prekey bundle JSON; MLS: group encrypted body
-    final sessionIdForSmtp = isSignal ? '' : sessionId;
-    final xMailerForSmtp = isSignal ? '1.0.0' : xMailer;  // Signal: PREKEY_BUNDLE
-
-    // Load config for SMTP send
-    final config = native.EmailCore.loadConfig(widget.configPath);
-    if (config == null || config.accounts.isEmpty) {
-      if (mounted) {
-        setState(() => _creating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.cannotLoadConfig), duration: const Duration(seconds: 2)),
-        );
-      }
-      return;
-    }
-
-    final accountData = config.accounts.where((a) => a.email == _selectedAccount).firstOrNull;
-    if (accountData == null) {
-      if (mounted) {
-        setState(() => _creating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.accountNotFound), duration: const Duration(seconds: 2)),
-        );
-      }
-      return;
-    }
-
-    // Build SMTP content — recipients exclude self
-    final recipientStr = _members.join(', ');
-    final content = jsonEncode({
-      'recipient': recipientStr,
-      'subject': title,
-      'body': bodyForSmtp,
-      'in_reply_to': '',
-      'message_id': messageId,
-      'session_id': sessionIdForSmtp,
-      'x_session_chart': xMailerForSmtp,
-      'encrypt_method': 0,  // PREKEY_BUNDLE 是明文发送，不需要 SMTP 层加密
-      'members': _members.join(','),
-    });
-
-    native.EmailCore.logWrite('[CREATE_SESSION] Sending email to: $recipientStr, subject: $title');
-
-    bool sendOk = false;
-    String sendError = '';
-    try {
-      await Future.delayed(const Duration(milliseconds: 50));
-
-      int ci;
-      if (accountData.type == 'outlook.com') {
-        ci = native.EmailCore.oemailimAddOutlookEmail();
-      } else {
-        ci = native.EmailCore.oemailimOpenNewEmail(accountData.id);
-      }
-      native.EmailCore.logWrite('[CREATE_SESSION] configIndex: $ci');
-
-      if (ci < 0) {
-        sendError = '${AppStrings.createEmailInstanceFailed} ($ci)';
-      } else {
-        native.EmailCore.setEmailCredentials(ci, accountData.email, accountData.authCode);
-        native.EmailCore.oemailimSetImapServer(ci, accountData.imapServer, accountData.imapPort);
-        native.EmailCore.oemailimSetSmtpServer(ci, accountData.smtpServer, accountData.smtpPort);
-        native.EmailCore.setRefreshToken(ci, accountData.authCode);
-
-        final sendResult = native.EmailCore.sendViaConfigRaw(ci, content);
-        native.EmailCore.logWrite('[CREATE_SESSION] sendViaConfig result: $sendResult');
-        sendOk = sendResult == 0;
-        if (!sendOk) {
-          sendError = native.EmailCore.getLastError(ci);
-        }
-      }
-    } catch (e) {
-      sendError = '$e';
-      native.EmailCore.logWrite('[CREATE_SESSION] Exception: $sendError');
-    }
-
-    if (!sendOk) {
-      if (mounted) {
-        setState(() => _creating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${AppStrings.emailSendFailed}: $sendError'), duration: const Duration(seconds: 5)),
-        );
-      }
-      return;
-    }
-
-    native.EmailCore.logWrite('[CREATE_SESSION] Unified session created and email sent, session_id=${createJson['session_id']}');
+    native.EmailCore.logWrite('[CREATE_SESSION] Unified session created (handshake queued), session_id=${createJson['session_id']}');
 
     setState(() => _creating = false);
 

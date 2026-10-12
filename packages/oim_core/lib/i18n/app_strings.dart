@@ -1,0 +1,220 @@
+import 'dart:ui';
+import 'package:flutter/foundation.dart';
+
+/// null = follow OS locale; otherwise forces zh/en.
+final ValueNotifier<Locale?> appLocale = ValueNotifier(null);
+
+class AppStrings {
+  static bool get isZh {
+    final locale = appLocale.value ?? PlatformDispatcher.instance.locale;
+    return locale.languageCode == 'zh';
+  }
+
+  static String get appTitle => isZh ? '零海' : 'OceanTalk';
+  static String get mail => isZh ? '消息' : 'Messages';
+  static String get settings => isZh ? '设置' : 'Settings';
+  static String get me => isZh ? '我' : 'Me';
+  static String get contacts => isZh ? '通讯录' : 'Contacts';
+  static String get delete => isZh ? '删除' : 'Delete';
+  static String get cancel => isZh ? '取消' : 'Cancel';
+  static String get create => isZh ? '创建' : 'Create';
+  static String get save => isZh ? '保存' : 'Save';
+  static String get edit => isZh ? '编辑' : 'Edit';
+  static String get add => isZh ? '添加' : 'Add';
+  static String get browse => isZh ? '浏览' : 'Browse';
+  static String get done => isZh ? '完成' : 'Done';
+  static String get authorize => isZh ? '授权' : 'Authorize';
+  static String get send => isZh ? '发送' : 'Send';
+  static String get search => isZh ? '搜索' : 'Search';
+  static String get reply => isZh ? '回复' : 'Reply';
+  static String get replyAll => isZh ? '回复全部' : 'Reply All';
+  static String get forward => isZh ? '转发' : 'Forward';
+  static String get conversation => isZh ? '会话' : 'Conversation';
+  static String get emailDetail => isZh ? '邮件详情' : 'Email Detail';
+
+  // Email list
+  static String get noEmails => isZh ? '暂无邮件' : 'No emails';
+  static String get noConversations => isZh ? '暂无会话' : 'No conversations';
+  static String get inbox => isZh ? '收件箱' : 'Inbox';
+  static String get sent => isZh ? '已发送' : 'Sent';
+  static String get unknownAccount => isZh ? '未知邮箱' : 'Unknown';
+  static String get noSubject => isZh ? '无主题' : 'No Subject';
+  static String get andMore => isZh ? '人' : ' more';
+
+  // Settings
+  static String get account => isZh ? '账户' : 'Account';
+  static String get accountManagement => isZh ? '账户管理' : 'Account Management';
+  static String get accountManagementDesc => isZh ? '添加、编辑或删除邮箱账户' : 'Add, edit or remove email accounts';
+  static String get username => isZh ? '用户名' : 'Username';
+  static String get appearance => isZh ? '外观' : 'Appearance';
+  static String get themeMode => isZh ? '主题' : 'Theme';
+  static String get themeFollowSystem => isZh ? '跟随系统' : 'System';
+  static String get themeLight => isZh ? '浅色' : 'Light';
+  static String get themeDark => isZh ? '深色' : 'Dark';
+  static String get language => isZh ? '语言' : 'Language';
+  static String get languageChinese => isZh ? '中文' : 'Chinese';
+  static String get languageEnglish => isZh ? '英文' : 'English';
+  static String get fontSize => isZh ? '字体大小' : 'Font Size';
+  static String get fontSizeSmall => isZh ? '小' : 'Small';
+  static String get fontSizeMedium => isZh ? '中' : 'Medium';
+  static String get fontSizeLarge => isZh ? '大' : 'Large';
+  static String get noAccountsHint => isZh ? '暂无账号。添加邮箱后可设为默认发送邮箱。' : 'No accounts. Add a mailbox to set a default sender.';
+  static String get transferFailed => isZh ? '传输失败' : 'Transfer failed';
+  static String get saveFile => isZh ? '保存文件' : 'Save File';
+  static String savedTo(String p) => isZh ? '已保存到 $p' : 'Saved to $p';
+  static String get keyExchangePending => isZh ? '密钥交换尚未完成，无法发送消息' : 'Key exchange incomplete; cannot send yet';
+  static String get identityChangedTitle => isZh ? '对方的身份密钥已变化' : "Contact's identity key has changed";
+  static String get identityChangedBody => isZh
+      ? '这可能是对方重装了应用，也可能是有人在冒充对方。请通过其他渠道核对下方指纹后再继续。'
+      : 'They may have reinstalled the app, or someone may be impersonating them. Verify the fingerprint below over another channel before continuing.';
+  static String get identityChangedBlocked => isZh ? '对方身份密钥已变化，已暂停发送' : 'Identity key changed; sending is paused';
+  static String get trustNewIdentity => isZh ? '我已核对，信任新密钥' : 'Verified, trust new key';
+  static String get myFingerprint => isZh ? '我的指纹' : 'My fingerprint';
+  static String get peerFingerprint => isZh ? '对方指纹' : 'Their fingerprint';
+  static String get fileSendFailed => isZh ? '文件发送失败' : 'File send failed';
+  static String get sendFailedEnqueue => isZh ? '发送失败: 入队失败' : 'Send failed: enqueue failed';
+  static String get queuedForSend => isZh ? '已进入发送队列' : 'Queued for sending';
+  static String sendFailedWith(String e) => isZh ? '发送失败: $e' : 'Send failed: $e';
+  static String get addMemberHint => isZh ? '输入新成员邮箱' : 'Enter new member email';
+  static String addFailed(String e) => isZh ? '添加失败: $e' : 'Add failed: $e';
+  static String get keyExchanged => isZh ? '🤝 已交换密钥' : '🤝 Keys exchanged';
+  static String get notifications => isZh ? '通知' : 'Notifications';
+  static String get enableNotifications => isZh ? '启用通知' : 'Enable Notifications';
+  static String get enableNotificationsDesc => isZh ? '接收应用通知' : 'Receive app notifications';
+  static String get emailNotification => isZh ? '邮件通知' : 'Email Notifications';
+  static String get emailNotificationDesc => isZh ? '新邮件提醒' : 'New email alerts';
+  static String get messageNotification => isZh ? '消息通知' : 'Message Notifications';
+  static String get messageNotificationDesc => isZh ? '新消息提醒' : 'New message alerts';
+  static String get privacySecurity => isZh ? '隐私与安全' : 'Privacy & Security';
+  static String get privacySettings => isZh ? '隐私设置' : 'Privacy Settings';
+  static String get privacySettingsDesc => isZh ? '管理您的隐私选项' : 'Manage privacy options';
+  static String get blockedList => isZh ? '屏蔽列表' : 'Blocked List';
+  static String get blockedListDesc => isZh ? '管理屏蔽的用户' : 'Manage blocked users';
+  static String get clearData => isZh ? '清除数据' : 'Clear Data';
+  static String get clearDataDesc => isZh ? '清除本地缓存数据' : 'Clear local cached data';
+  static String get about => isZh ? '关于' : 'About';
+  static String get versionInfo => isZh ? '版本信息' : 'Version';
+  static String get autoUpdate => isZh ? '自动更新' : 'Auto Update';
+  static String get autoUpdateDesc => isZh ? '自动检查更新' : 'Check for updates automatically';
+  static String get helpFeedback => isZh ? '帮助与反馈' : 'Help & Feedback';
+  static String get helpFeedbackDesc => isZh ? '获取帮助或提供反馈' : 'Get help or send feedback';
+  static String get userAgreement => isZh ? '用户协议' : 'User Agreement';
+  static String get userAgreementDesc => isZh ? '查看用户协议' : 'View user agreement';
+  static String get followSystem => isZh ? '跟随系统' : 'System';
+
+  // Create session dialog
+  static String get newSession => isZh ? '新建会话' : 'New Session';
+  static String get sessionTitle => isZh ? '会话标题' : 'Session Title';
+  static String get enterSessionTitle => isZh ? '输入会话标题' : 'Enter session title';
+  static String get selectAccount => isZh ? '选择要使用的账户' : 'Select account to use';
+  static String get sessionMembers => isZh ? '会话成员' : 'Session Members';
+  static String get mailmanPool => isZh ? '发送邮箱池' : 'Sending Mail Pool';
+  static String get mailmanPoolHint =>
+      isZh ? '主邮箱默认发送，可勾选更多邮箱轮流发送以突破单邮箱频率限制' : 'Primary mailbox always sends; check more mailboxes to rotate sending and bypass per-mailbox rate limits';
+  static String get pinSession => isZh ? '置顶' : 'Pin to top';
+  static String get hideSession => isZh ? '隐藏会话' : 'Hide session';
+  static String get pinnedSection => isZh ? '置顶' : 'Pinned';
+  static String get hiddenSection => isZh ? '隐藏' : 'Hidden';
+  static String get enterEmail => isZh ? '输入邮箱地址' : 'Enter email address';
+  static String get noMembers => isZh ? '暂未添加成员' : 'No members added';
+  static String get pleaseEnterTitle => isZh ? '请输入会话标题' : 'Please enter session title';
+  static String get pleaseSelectAccount => isZh ? '请选择账户' : 'Please select an account';
+  static String get pleaseAddMember => isZh ? '请添加至少一个会话成员' : 'Please add at least one member';
+  static String get cannotLoadConfig => isZh ? '无法加载账户配置' : 'Cannot load account config';
+  static String get accountNotFound => isZh ? '未找到选中账户的配置' : 'Selected account config not found';
+  static String get createSessionFailed => isZh ? '创建会话失败' : 'Failed to create session';
+  static String get sessionCreatedSuccess => isZh ? '会话创建成功' : 'Session created successfully';
+  static String get emailSendFailed => isZh ? '邮件发送失败' : 'Email send failed';
+
+  // Encryption
+  static String get encryptionMethod => isZh ? '加密方式' : 'Encryption Method';
+  static String get encryptionNone => isZh ? '不加密' : 'None';
+  static String get encryptionStandard => isZh ? '普通加密' : 'Standard Encryption';
+  static String get startNewSession => isZh ? '开始一个新的会话' : 'Start a new session';
+  static String get keyExchange => isZh ? '密钥交换' : 'Key Exchange';
+
+  // Conversation view
+  static String get newConversation => isZh ? '新会话' : 'New Conversation';
+  static String get sessionCreatedWaiting => isZh ? '会话已创建，等待邮件到达' : 'Session created, waiting for emails';
+  static String get conversationMembers => isZh ? '会话成员' : 'Members';
+  static String get sendMessageHint => isZh ? '发送消息...' : 'Send a message...';
+  static String get noRecipients => isZh ? '没有可发送的收件人' : 'No recipients to send to';
+  static String get sending => isZh ? '正在发送...' : 'Sending...';
+  static String get messageSent => isZh ? '消息已发送' : 'Message sent';
+  static String get sendFailed => isZh ? '发送失败' : 'Send failed';
+  static String get attachment => isZh ? '附件' : 'Attachment';
+  static String get downloading => isZh ? '下载中...' : 'Downloading...';
+  static String get createEmailInstanceFailed => isZh ? '创建邮箱实例失败' : 'Failed to create email instance';
+  static String get exceptionLabel => isZh ? '异常' : 'Exception';
+
+  // Email detail
+  static String get emailDownloading => isZh ? '邮件内容下载中...' : 'Downloading email content...';
+  static String get noContent => isZh ? '无内容' : 'No content';
+  static String get attachmentsCount => isZh ? '个附件' : 'attachments';
+  static String get replySent => isZh ? '回复已发送' : 'Reply sent';
+
+  // Email config dialog
+  static String get emailConfig => isZh ? '邮箱配置' : 'Email Configuration';
+  static String get localDataPath => isZh ? '本地数据存储位置' : 'Local data path';
+  static String get defaultSender => isZh ? '默认发送邮箱' : 'Default sender';
+  static String get setAsDefaultSender => isZh ? '设为默认发送邮箱' : 'Set as default sender';
+  static String get defaultSenderHint =>
+      isZh ? '为默认的消息发送邮箱。切换到其他邮箱标签，点击"设为默认发送邮箱"可更改。'
+           : ' is the default sender. Switch to another account tab and tap "Set as default sender" to change.';
+  static String get emailType => isZh ? '邮箱类型' : 'Email type';
+  static String get maxAccountsReached => isZh ? '最多支持添加5个邮箱配置' : 'Maximum 5 email accounts supported';
+  static String get noEmailConfig => isZh ? '暂无邮箱配置，请选择类型并点击添加' : 'No email config, select type and click Add';
+  static String get fieldCannotBeEmpty => isZh ? '不能为空' : 'cannot be empty';
+  static String get configSaved => isZh ? '配置已保存' : 'Config saved';
+  static String get saveFailed => isZh ? '保存失败，请重试' : 'Save failed, please retry';
+  static String get authorizing => isZh ? '正在授权，请在浏览器中完成授权...' : 'Authorizing, please complete in browser...';
+  static String get createConfigFailed => isZh ? '创建邮箱配置失败' : 'Failed to create email config';
+  static String get authorizeSuccess => isZh ? '授权成功' : 'Authorization successful';
+  static String get authorizeSuccessNoEmail => isZh ? '授权成功（但未获取到邮箱地址或刷新令牌）' : 'Authorized (but no email or token received)';
+  static String get authorizeFailed => isZh ? '授权失败，请重试' : 'Authorization failed, please retry';
+  static String get authorizeException => isZh ? '授权异常' : 'Authorization exception';
+  static String get accountIndexError => isZh ? '账户索引错误' : 'Account index error';
+  static String get authorized => isZh ? '已授权' : 'Authorized';
+  static String get unauthorized => isZh ? '未授权' : 'Unauthorized';
+  static String get manualPathHint => isZh ? '请手动输入本地存储路径' : 'Please enter local storage path manually';
+
+  // Config fields
+  static String get emailAddress => isZh ? '邮箱地址' : 'Email Address';
+  static String get authCode => isZh ? '授权码' : 'Auth Code';
+  static String get smtpServer => isZh ? 'SMTP服务器' : 'SMTP Server';
+  static String get smtpPort => isZh ? 'SMTP端口' : 'SMTP Port';
+  static String get imapServer => isZh ? 'IMAP服务器' : 'IMAP Server';
+  static String get imapPort => isZh ? 'IMAP端口' : 'IMAP Port';
+  static String get accountType => isZh ? '账户类型' : 'Account Type';
+  static String get authStatus => isZh ? '授权状态' : 'Auth Status';
+
+  // Provider names
+  static String get netease163 => isZh ? '网易163邮箱' : 'NetEase 163 Mail';
+  static String get qqMail => isZh ? 'QQ邮箱' : 'QQ Mail';
+
+  // Email utils
+  static String get today => isZh ? '今天' : 'Today';
+  static String get yesterday => isZh ? '昨天' : 'Yesterday';
+  static String get unknown => isZh ? '未知' : 'Unknown';
+  static List<String> get weekdays => isZh
+      ? ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+      : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  // 163 unsafe login
+  static String get unsafeLogin163 => isZh
+      ? '163 IMAP 报告不安全登录。请在163邮箱设置中重新生成授权码。'
+      : '163 IMAP reported unsafe login. Please regenerate the auth code in 163 mail settings.';
+
+  // Contacts
+  static String get searchContacts => isZh ? '搜索联系人' : 'Search contacts';
+  static String get allContacts => isZh ? '全部联系人' : 'All Contacts';
+  static String get addContact => isZh ? '添加联系人' : 'Add Contact';
+  static String get contactName => isZh ? '姓名' : 'Name';
+  static String get contactEmail => isZh ? '邮箱' : 'Email';
+  static String get contactCategory => isZh ? '分类' : 'Category';
+  static String get contactNotes => isZh ? '备注' : 'Notes';
+  static String get enterName => isZh ? '请输入姓名' : 'Enter name';
+  static String get enterNotes => isZh ? '请输入备注' : 'Enter notes';
+  static String get selectOrInputCategory => isZh ? '选择或输入分类' : 'Select or input category';
+  static String get contactSaved => isZh ? '联系人已保存' : 'Contact saved';
+}

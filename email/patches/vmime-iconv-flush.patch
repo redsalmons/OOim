@@ -1,0 +1,18 @@
+--- a/src/vmime/charsetConverter_iconv.cpp
++++ b/src/vmime/charsetConverter_iconv.cpp
+@@
+ 		const byte_t* inPtr = breakAfterNext ? NULL : inBuffer;
+ 		size_t *ptrLength = breakAfterNext ? NULL : &inLength;
+ 		byte_t* outPtr = outBuffer;
+ 
+-		// Convert input bytes
+-		if (iconv(cd, ICONV_IN_TYPE(&inPtr), ptrLength,
++		// Convert input bytes. On flush pass a NULL inbuf itself: bionic's
++		// iconv dereferences NULL inbytesleft when inbuf is non-NULL but
++		// *inbuf is NULL (POSIX reset form), which crashes on Android.
++		if (iconv(cd,
++			      breakAfterNext
++			          ? ICONV_IN_TYPE(static_cast <const char**>(NULL))
++			          : ICONV_IN_TYPE(&inPtr),
++			      ptrLength,
+ 			      ICONV_OUT_TYPE(&outPtr), &outLength) == static_cast <size_t>(-1)) {

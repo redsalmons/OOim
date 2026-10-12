@@ -17,7 +17,13 @@ namespace keychain_store {
 
 // Returns the 32-byte SQLCipher master key as a 64-char hex string,
 // generating and persisting it on first use. Empty on failure.
+// On Android this returns the value set by inject_db_master_key_hex().
 std::string db_master_key_hex();
+
+// Android only: the Kotlin side generates the master key and wraps it with
+// AndroidKeyStore; the plaintext hex is injected here once per process,
+// before any database/vault access.
+void inject_db_master_key_hex(const char* hex);
 
 // Sets the path of the encrypted credential vault file (AES-256-GCM over a
 // JSON map, keyed by the master key). Secrets are stored there, not as

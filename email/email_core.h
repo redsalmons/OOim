@@ -137,6 +137,11 @@ void chat_messages_free(ChatMessage* messages, int count);
 // SQLite database handle (opaque pointer)
 typedef struct sqlite3 sqlite3;
 
+// Android only: inject the SQLCipher master key (64-char hex) before
+// email_db_init. The key is generated and Keystore-wrapped on the Kotlin
+// side. Returns 0 on success, negative on unsupported platforms or bad input.
+int email_set_db_master_key(const char* hex);
+
 // Initialize SQLite database for email storage. Returns 0 on success, negative on error.
 int email_db_init(const char* path);
 
@@ -260,16 +265,6 @@ int email_code_query_by_identify(const char* identify, char* outJson, int outSiz
 // Create a new session with ECC key pair generation. Returns 0 on success.
 int email_create_session(const char* account, const char* subject, const char* members, const char* message_id, int encrypt_method, int64_t localemail_rowid, char* outJson, int outSize);
 
-// Prepare encrypted data body for x_start_new=data messages.
-// Takes plaintext, recipient list (comma-separated), and sender account.
-// Returns encrypted JSON body string in outJson.
-int email_prepare_data_body(const char* plaintext, const char* recipients, const char* sender, const char* sessionUuid, char* outJson, int outSize);
-
-// Decrypt data body for x_start_new=data messages.
-// Takes encrypted JSON body and the account doing the decryption.
-// Returns plaintext in outJson.
-int email_decrypt_data_body(const char* encryptedBody, const char* account, char* outJson, int outSize);
-
 // Task table operations for queued email sending
 int email_task_insert(const char* account, const char* recipient,
                      const char* subject, const char* body,
@@ -293,7 +288,7 @@ int email_migrate_islocal();
 
 // Prepare file metadata message JSON (plaintext for encryption).
 int email_prepare_file_message(const char* fileId, const char* fileName,
-                                long long fileSize, const char* fileMd5,
+                                int64_t fileSize, const char* fileMd5,
                                 int totalChunks, int chunkSize,
                                 const char* text, const char* batchId,
                                 char* outJson, int outSize);
@@ -363,82 +358,63 @@ int addressbook_delete(int id);
 int addressbook_extract_from_header(const char* headerValue);
 int addressbook_migrate_from_emails();
 
-// --- Signal Protocol API (v1) ---
+// --- Signal Protocol API (1:1, wire format v2) ---
+// Keys: one long-lived identity key (IK) per account, one signed prekey (SPK) per
+// session. Peers are trusted on first use; a changed peer IK is rejected.
 
-// Initialize Signal identity + prekeys for an account.
-// Generates identity key, signed prekey, and one-time prekeys if not present.
-// Returns 0 on success, negative on error.
-int signal_init_account(const char* account);
-
-// Build a Prekey Bundle for an account and return as JSON.
-// Returns 0 on success, negative on error.
+// Generate a new session id (sig_xxx) with a fresh SPK and return
+// {status, session_id, prekey_bundle:{ik_pub, spk_pub, spk_sig}}.
 int signal_get_prekey_bundle(const char* account, char* outJson, int outSize);
 
-// Build a Prekey Bundle for a specific session_id (per-session keys).
-// Used by the responder to reply with keys scoped to the initiator's session.
-// Returns 0 on success, negative on error.
+// Same, for an existing session id (responder side of the bundle exchange).
 int signal_get_prekey_bundle_for_session(const char* account, const char* sessionId,
                                          char* outJson, int outSize);
 
-// Initiate a new Signal session: X3DH + first encrypted message.
-// Generates session_id, computes root key, encrypts plaintext.
-// Returns JSON with session_id + encrypted message body in outJson.
-// Returns 0 on success, negative on error.
-int signal_session_initiate(const char* account, const char* peerEmail,
-                            const char* plaintext, char* outJson, int outSize,
-                            const char* messageId,
-                            const char* inReplyTo);
+// Verify and store a peer's prekey bundle for a session.
+// Returns 0 ok, -2 invalid SPK signature, -3 peer identity key changed, -1 bad args/db.
+int signal_store_peer_prekey(const char* account, const char* peerEmail,
+                             const char* sessionId, const char* ikPub,
+                             const char* spkPub, const char* spkSig);
 
-// Initiate a Signal session with a pre-existing session_id (from PREKEY_BUNDLE exchange).
-// Same as signal_session_initiate but uses the given sessionId instead of generating a new one.
-// Returns 0 on success, negative on error.
+// Initiator: X3DH with the stored peer bundle for sessionId, Double Ratchet init,
+// and the first encrypted message. outJson: {status, session_id, message}.
 int signal_session_initiate_with_id(const char* account, const char* peerEmail,
                                     const char* sessionId,
                                     const char* plaintext, char* outJson, int outSize,
                                     const char* messageId,
                                     const char* inReplyTo);
 
-// Encrypt a message in an existing Signal session (Double Ratchet).
-// Returns JSON with encrypted message body in outJson.
-// Returns 0 on success, negative on error.
+// Encrypt a message in an existing session. outJson: {status, session_id, message}.
 int signal_session_encrypt(const char* account, const char* peerEmail,
                            const char* sessionId, const char* plaintext,
                            char* outJson, int outSize,
                            const char* messageId,
                            const char* inReplyTo);
 
-// Decrypt a received Signal message.
-// Takes the JSON body from the email, identifies the session, and decrypts.
-// If it's a SESSION_INIT (1.0.1), creates the session on the responder side.
-// Returns JSON with plaintext + session_id in outJson.
-// Returns 0 on success, negative on error.
+// Decrypt a received session_init / ratchet_msg body. A session_init creates the
+// responder-side session. outJson: {status, plaintext, session_id, x_message_id, x_reply_to}
+// or {status:"error", error}. Errors include identity_changed and bad_spk_signature.
 int signal_session_decrypt(const char* account, const char* peerEmail,
                            const char* jsonBody, char* outJson, int outSize);
 
-// Check if a Signal session exists for (account, peerEmail, sessionId).
-// If sessionId is non-empty, checks per-session; if empty, checks any session for (account, peer).
-// Returns 1 if exists, 0 if not, negative on error.
+// 1 if a ratchet session exists for (account, peerEmail, sessionId), else 0.
 int signal_session_exists(const char* account, const char* peerEmail,
                           const char* sessionId);
 
-// Check if a Signal session exists for an email session (e.g. session_491).
-// Looks up signal_session_id from the session table, then checks the Signal session.
-// Returns 1 if exists, 0 if not, negative on error.
+// Looks up signal_session_id from the email session table, then checks readiness.
 int signal_session_exists_for_email_session(const char* account,
                                              const char* emailSessionId);
 
-// Close/delete a Signal session.
-// Returns 0 on success, negative on error.
 int signal_session_close(const char* account, const char* peerEmail,
                          const char* sessionId);
 
-// Store a peer's prekey bundle (received in-band) into local cache.
-// keyScope: optional session UUID to scope the peer prekey (for per-session keys).
-// Returns 0 on success, negative on error.
-int signal_store_peer_prekey(const char* account, const char* peerEmail,
-                             const char* ikPub, const char* spkPub,
-                             const char* spkSig, const char* opkPub,
-                             const char* keyScope);
+// Hex SHA-256 fingerprints for safety-number comparison. Empty string if unknown.
+int signal_identity_fingerprint(const char* account, char* out, int outSize);
+int signal_peer_identity_fingerprint(const char* account, const char* peerEmail,
+                                     char* out, int outSize);
+
+// Forget the trusted identity key of a peer (user confirmed the key change).
+int signal_peer_identity_reset(const char* account, const char* peerEmail);
 
 // === Group messaging (MLS / RFC 9420, X-Mailer 2.0.x) ===
 // Implemented in signal/group_c_api.cpp on top of signal/mls_group.{h,cpp}.
@@ -457,6 +433,11 @@ int group_create(const char* account, const char* subject,
 int group_create_ex(const char* account, const char* subject, const char* membersJson,
                     const char* xSessionId, const char* inReplyTo,
                     char* outJson, int outSize);
+
+// Owner: invite additional members into an existing group (they answer with a
+// KeyPackage and are added by the normal flow). outJson: {status, added, task_id}.
+int group_invite_members(const char* account, const char* groupId, const char* membersJson,
+                         char* outJson, int outSize);
 
 // Get group info (members, epoch, ready). Returns 0 on success, negative on error.
 int group_get_info(const char* account, const char* groupId,
@@ -522,31 +503,38 @@ int group_after_sent(const char* account, const char* xMailer,
 // Create a new encrypted session (auto-selects Signal for 2 members, MLS for 3+).
 // membersJson: JSON array of email addresses (must include the local account).
 // pinned/hidden: 1=置顶/隐藏 at creation time.
-// outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
+// The handshake (PREKEY_BUNDLE / MLS invite) is queued in the outbox here.
+// outJson: {status, session_id, message_id, x_mailer, task_id}
 int us_create_session(const char* account, const char* subject,
                       const char* membersJson, const char* mailmenJson,
                       int pinned, int hidden,
                       char* outJson, int outSize);
 
-// Send a message in an existing session (auto-routes to Signal or MLS).
-// outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
+// Send a message in an existing session (auto-routes to Signal or MLS). The body
+// x-reply-to is resolved by the core (last x-message-id of the conversation).
+// outJson: {status, session_id, message_id, x_mailer, task_id}
 int us_send_message(const char* account, const char* sessionId,
-                    const char* plaintext, const char* inReplyTo,
-                    char* outJson, int outSize);
+                    const char* plaintext, char* outJson, int outSize);
 
-// Handle an incoming encrypted message (auto-detects protocol from xMailer).
-// outJson: {status, session_id, plaintext, sender, x_mailer}
-int us_handle_incoming(const char* account, const char* from,
-                       const char* xMailer, const char* body,
-                       const char* messageId, const char* inReplyTo,
-                       char* outJson, int outSize);
+// Queue files with a caption. filesJson: [{"path":"...","name":"..."}].
+// outJson: {status, message_id, files:[{file_id,file_name,file_size,total_chunks}],
+//           batch_id, x_mailer}
+int us_send_files(const char* account, const char* sessionId,
+                  const char* filesJson, const char* text,
+                  char* outJson, int outSize);
+
+// Displayable messages of a session, strictly by the body x-reply-to chain from the
+// session root, in reply-chain order. Returns 0, or -(needed size) when outSize is
+// too small. outJson: {status, messages:[{rowid, x_message_id, x_reply_to, sender,
+// timestamp, is_sent, x_mailer, kind:"text"|"handshake"|"file", text, batch_id,
+// files:[{file_id,file_name,file_size,total_chunks,received_chunks,transfer_status}]}]}
+int us_list_messages(const char* account, const char* sessionId,
+                     char* outJson, int outSize);
 
 // Add members to a session (triggers irreversible upgrade to MLS if Signal + >2 total).
-// inReplyTo: x_reply_to for the upgrade invite (last message id of the conversation).
 // outJson: {status, session_id, upgraded, mode, task_id}
 int us_add_members(const char* account, const char* sessionId,
-                   const char* membersJson, const char* inReplyTo,
-                   char* outJson, int outSize);
+                   const char* membersJson, char* outJson, int outSize);
 
 // List all active sessions for an account.
 // outJson: {status, sessions: [{session_id, mode, members, ...}]}
@@ -568,6 +556,10 @@ int us_set_subject(const char* sessionId, const char* subject,
 
 // Check if a session is ready for sending. Returns 1 if ready, 0 if not, negative on error.
 int us_is_ready(const char* account, const char* sessionId);
+
+// Signal sessions flagged identity_changed (status 2): drop the pinned peer key
+// and reopen the session after the user has verified the new fingerprint.
+int us_reset_peer_identity(const char* sessionId, char* outJson, int outSize);
 
 #ifdef __cplusplus
 }

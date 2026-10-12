@@ -10,13 +10,13 @@ bool SignalSessionRepo::saveSession(const SignalSessionRecord& rec) {
 
     const char* sql = "INSERT INTO signal_session "
                       "(account, peer_email, session_id, root_key, send_chain_key, recv_chain_key, "
-                      "send_n, recv_n, prev_recv_n, dh_self_priv, dh_self_pub, dh_self_password, "
+                      "send_n, recv_n, prev_send_n, dh_self_priv, dh_self_pub, dh_self_password, "
                       "dh_peer_pub, status, updated_at) "
                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime')) "
                       "ON CONFLICT(account, peer_email, session_id) DO UPDATE SET "
                       "root_key=excluded.root_key, send_chain_key=excluded.send_chain_key, "
                       "recv_chain_key=excluded.recv_chain_key, send_n=excluded.send_n, "
-                      "recv_n=excluded.recv_n, prev_recv_n=excluded.prev_recv_n, "
+                      "recv_n=excluded.recv_n, prev_send_n=excluded.prev_send_n, "
                       "dh_self_priv=excluded.dh_self_priv, dh_self_pub=excluded.dh_self_pub, "
                       "dh_self_password=excluded.dh_self_password, dh_peer_pub=excluded.dh_peer_pub, "
                       "status=excluded.status, updated_at=datetime('now','localtime');";
@@ -32,7 +32,7 @@ bool SignalSessionRepo::saveSession(const SignalSessionRecord& rec) {
     sqlite3_bind_text(stmt, 6, rec.recvChainKey.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 7, rec.sendN);
     sqlite3_bind_int(stmt, 8, rec.recvN);
-    sqlite3_bind_int(stmt, 9, rec.prevRecvN);
+    sqlite3_bind_int(stmt, 9, rec.prevSendN);
     sqlite3_bind_text(stmt, 10, rec.dhSelfPriv.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 11, rec.dhSelfPub.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 12, rec.dhSelfPassword.c_str(), -1, SQLITE_TRANSIENT);
@@ -73,7 +73,7 @@ bool SignalSessionRepo::loadSession(const std::string& account, const std::strin
     if (!db) return false;
 
     const char* sql = "SELECT id, account, peer_email, session_id, root_key, send_chain_key, "
-                      "recv_chain_key, send_n, recv_n, prev_recv_n, dh_self_priv, dh_self_pub, "
+                      "recv_chain_key, send_n, recv_n, prev_send_n, dh_self_priv, dh_self_pub, "
                       "dh_self_password, dh_peer_pub, status "
                       "FROM signal_session WHERE account = ? AND peer_email = ? AND session_id = ? LIMIT 1;";
     sqlite3_stmt* stmt;
@@ -94,7 +94,7 @@ bool SignalSessionRepo::loadSession(const std::string& account, const std::strin
         out.recvChainKey = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
         out.sendN = sqlite3_column_int(stmt, 7);
         out.recvN = sqlite3_column_int(stmt, 8);
-        out.prevRecvN = sqlite3_column_int(stmt, 9);
+        out.prevSendN = sqlite3_column_int(stmt, 9);
         out.dhSelfPriv = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
         out.dhSelfPub = sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
         out.dhSelfPassword = sqlite3_column_text(stmt, 12) ? (const char*)sqlite3_column_text(stmt, 12) : "";
@@ -113,7 +113,7 @@ bool SignalSessionRepo::loadActiveSession(const std::string& account, const std:
     if (!db) return false;
 
     const char* sql = "SELECT id, account, peer_email, session_id, root_key, send_chain_key, "
-                      "recv_chain_key, send_n, recv_n, prev_recv_n, dh_self_priv, dh_self_pub, "
+                      "recv_chain_key, send_n, recv_n, prev_send_n, dh_self_priv, dh_self_pub, "
                       "dh_self_password, dh_peer_pub, status "
                       "FROM signal_session WHERE account = ? AND peer_email = ? AND status = 0 "
                       "ORDER BY updated_at DESC LIMIT 1;";
@@ -134,7 +134,7 @@ bool SignalSessionRepo::loadActiveSession(const std::string& account, const std:
         out.recvChainKey = sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
         out.sendN = sqlite3_column_int(stmt, 7);
         out.recvN = sqlite3_column_int(stmt, 8);
-        out.prevRecvN = sqlite3_column_int(stmt, 9);
+        out.prevSendN = sqlite3_column_int(stmt, 9);
         out.dhSelfPriv = sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
         out.dhSelfPub = sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
         out.dhSelfPassword = sqlite3_column_text(stmt, 12) ? (const char*)sqlite3_column_text(stmt, 12) : "";
@@ -163,72 +163,6 @@ bool SignalSessionRepo::sessionExists(const std::string& account, const std::str
     bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
     sqlite3_finalize(stmt);
     return exists;
-}
-
-bool SignalSessionRepo::hasReceivedBySessionId(const std::string& account, const std::string& sessionId) {
-    auto& conn = DbConnection::instance();
-    sqlite3* db = conn.get();
-    if (!db || sessionId.empty()) return false;
-
-    const char* sql = "SELECT recv_n, recv_chain_key FROM signal_session "
-                      "WHERE account = ? AND session_id = ? AND status = 0 LIMIT 1;";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-
-    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
-
-    bool hasReceived = false;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        int recvN = sqlite3_column_int(stmt, 0);
-        const char* recvKey = (const char*)sqlite3_column_text(stmt, 1);
-        hasReceived = (recvN > 0) || (recvKey && recvKey[0] != '\0');
-    }
-    sqlite3_finalize(stmt);
-    return hasReceived;
-}
-
-bool SignalSessionRepo::canSendBySessionId(const std::string& account, const std::string& sessionId) {
-    auto& conn = DbConnection::instance();
-    sqlite3* db = conn.get();
-    if (!db || sessionId.empty()) return false;
-
-    const char* sql = "SELECT send_n, recv_n FROM signal_session "
-                      "WHERE account = ? AND session_id = ? AND status = 0 LIMIT 1;";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-
-    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
-
-    bool canSend = false;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        int sendN = sqlite3_column_int(stmt, 0);
-        int recvN = sqlite3_column_int(stmt, 1);
-        // Can send if: haven't sent yet (send_n == 0, e.g. responder after receiving init)
-        //          OR  peer has responded (recv_n > 0)
-        canSend = (sendN == 0) || (recvN > 0);
-    }
-    sqlite3_finalize(stmt);
-    return canSend;
-}
-
-bool SignalSessionRepo::markReceivedBySessionId(const std::string& account, const std::string& sessionId) {
-    auto& conn = DbConnection::instance();
-    sqlite3* db = conn.get();
-    if (!db || sessionId.empty()) return false;
-
-    const char* sql = "UPDATE signal_session SET recv_n = CASE WHEN recv_n < 1 THEN 1 ELSE recv_n END "
-                      "WHERE account = ? AND session_id = ? AND status = 0;";
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-
-    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
-
-    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
 }
 
 bool SignalSessionRepo::markKexDone(const std::string& account, const std::string& sessionId) {

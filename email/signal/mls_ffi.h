@@ -36,15 +36,31 @@ int mls_join_group(const char* account,
 
 int mls_export_ratchet_tree(const char* account, const char* group_id_hex, uint8_t* out, int out_len);
 
+// aad is bound to the message (the body's x_* envelope); decrypt rejects a message
+// whose AAD differs and writes the authenticated sender identity to out_sender.
 int mls_encrypt(const char* account, const char* group_id_hex,
+                const uint8_t* aad, int aad_len,
                 const uint8_t* plaintext, int pt_len, uint8_t* out, int out_len);
 
 int mls_decrypt(const char* account, const char* group_id_hex,
-                const uint8_t* ciphertext, int ct_len, uint8_t* out, int out_len);
+                const uint8_t* aad, int aad_len,
+                const uint8_t* ciphertext, int ct_len, uint8_t* out, int out_len,
+                uint8_t* out_sender, int sender_len);
+
+// Our MLS signature public key / the one inside a TLS KeyPackage (raw bytes).
+int mls_signature_key(const char* account, uint8_t* out, int out_len);
+int mls_key_package_signature_key(const uint8_t* kp, int kp_len, uint8_t* out, int out_len);
+
+// Post-compromise security. Owner refreshes its leaf and commits (also covers
+// queued proposals); members propose and the owner commits via mls_commit_pending.
+int mls_self_update(const char* account, const char* group_id_hex, uint8_t* out_commit, int commit_len);
+int mls_propose_self_update(const char* account, const char* group_id_hex, uint8_t* out, int out_len);
+int mls_commit_pending(const char* account, const char* group_id_hex, uint8_t* out_commit, int commit_len);
 
 // Last FFI error message (e.g. the OpenMLS error behind a generic rc=-4).
 int mls_last_error(uint8_t* out, int out_len);
 
+// Returns 0 for a merged Commit, 1 for a queued Proposal.
 int mls_process_commit(const char* account, const char* group_id_hex,
                        const uint8_t* commit, int commit_len);
 

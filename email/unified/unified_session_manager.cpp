@@ -1,4 +1,5 @@
 #include "unified_session_manager.h"
+#include "signal_message.h"
 #include "email_core.h"
 #include "email_core_common.h"
 #include "logger.h"
@@ -8,6 +9,7 @@
 #include "mls_group.h"
 #include "persistence/signal_session_repo.h"
 #include "persistence/session_repo.h"
+#include "session_messages.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -111,7 +113,8 @@ SendResult UnifiedSessionManager::createSignalSession_(const std::string& accoun
         return result;
     }
 
-    // Parse sig_xxx and build the PREKEY_BUNDLE body (plaintext JSON).
+    // Parse sig_xxx and build the PREKEY_BUNDLE body (plaintext JSON). The bundle is
+    // the conversation root: its body x_message_id is the session's root id.
     std::string sigId;
     std::string prekeyBody;
     try {
@@ -121,7 +124,9 @@ SendResult UnifiedSessionManager::createSignalSession_(const std::string& accoun
             return result;
         }
         sigId = resp.value("session_id", "");
-        prekeyBody = resp.dump();
+        auto& pb = resp["prekey_bundle"];
+        PrekeyBundle mine{pb.value("ik_pub", ""), pb.value("spk_pub", ""), pb.value("spk_sig", "")};
+        prekeyBody = signal_msg::encode_prekey_bundle(sigId, msgId, "", mine).dump();
     } catch (const std::exception& e) {
         result.error = std::string("parse prekey bundle failed: ") + e.what();
         return result;
@@ -150,14 +155,22 @@ SendResult UnifiedSessionManager::createSignalSession_(const std::string& accoun
         return result;
     }
 
-    LOG_INFO("[USMgr] createSignalSession_: us=%s, sig=%s, peer=%s, sending PREKEY_BUNDLE\n",
-             usId.c_str(), sigId.c_str(), peer.c_str());
+    // 创建即密钥交换：明文 PREKEY_BUNDLE 进 outbox，由后台任务循环发送。
+    static TaskRepo s_taskRepo;
+    int64_t taskId = s_taskRepo.insert(account, peer, subject, prekeyBody, "", msgId, msgId, "",
+                                       XMailer::PREKEY_BUNDLE);
+    if (taskId <= 0) {
+        result.error = "failed to enqueue PREKEY_BUNDLE";
+        return result;
+    }
+    LOG_INFO("[USMgr] createSignalSession_: us=%s, sig=%s, peer=%s, queued PREKEY_BUNDLE task=%lld\n",
+             usId.c_str(), sigId.c_str(), peer.c_str(), (long long)taskId);
 
     result.success = true;
     result.sessionId = usId;
     result.messageId = msgId;
-    result.xMailer = XMailer::PREKEY_BUNDLE;  // 创建即密钥交换
-    result.encryptedBody = prekeyBody;  // 明文 prekey bundle JSON
+    result.xMailer = XMailer::PREKEY_BUNDLE;
+    result.taskId = taskId;
     return result;
 }
 
@@ -172,7 +185,6 @@ SendResult UnifiedSessionManager::createMlsSession_(const std::string& account,
     SendResult result;
 
     std::string usId = generateSessionId();
-    std::string rootMsgId = generateMessageId(account);
 
     // Create the MLS group via the existing API.
     // We pass the members as a JSON array string.
@@ -190,14 +202,20 @@ SendResult UnifiedSessionManager::createMlsSession_(const std::string& account,
         return result;
     }
 
-    // Parse group_id from response.
+    // The invite is the conversation root: its x_message_id is the session's root id.
     std::string groupId;
+    std::string rootMsgId;
     int64_t taskId = 0;
     try {
         auto resp = json::parse(groupBuf);
         groupId = resp.value("group_id", "");
+        rootMsgId = resp.value("root_message_id", "");
         taskId = resp.value("task_id", (int64_t)0);
     } catch (...) {}
+    if (groupId.empty() || rootMsgId.empty()) {
+        result.error = "group_create returned no group/root id";
+        return result;
+    }
 
     // Persist unified session.
     UnifiedSession rec;
@@ -229,8 +247,7 @@ SendResult UnifiedSessionManager::createMlsSession_(const std::string& account,
 
 SendResult UnifiedSessionManager::sendMessage(const std::string& account,
                                                const std::string& sessionId,
-                                               const std::string& plaintext,
-                                               const std::string& inReplyTo) {
+                                               const std::string& plaintext) {
     SendResult result;
 
     UnifiedSession session;
@@ -240,6 +257,7 @@ SendResult UnifiedSessionManager::sendMessage(const std::string& account,
     }
 
     std::string msgId = generateMessageId(account);
+    const std::string inReplyTo = session_last_message_id(session);
 
     if (session.mode == SessionMode::Signal) {
         // Find the peer.
@@ -320,7 +338,6 @@ SendResult UnifiedSessionManager::sendMessage(const std::string& account,
         result.sessionId = sessionId;
         result.messageId = msgId;
         result.xMailer = XMailer::RATCHET_MSG;
-        result.encryptedBody = encryptedBody;
         LOG_INFO("[USMgr] sendMessage: enqueued outbox task=%lld for us=%s msg=%s\n",
                  (long long)taskId, sessionId.c_str(), msgId.c_str());
 
@@ -349,78 +366,11 @@ SendResult UnifiedSessionManager::sendMessage(const std::string& account,
     return result;
 }
 
-// ---------- handleIncoming ----------
-
-RecvResult UnifiedSessionManager::handleIncoming(const std::string& account,
-                                                  const std::string& from,
-                                                  const std::string& xMailer,
-                                                  const std::string& body,
-                                                  const std::string& messageId,
-                                                  const std::string& inReplyTo) {
-    RecvResult result;
-
-    // Determine protocol from X-Mailer.
-    bool isSignal = (xMailer == XMailer::PREKEY_BUNDLE ||
-                     xMailer == XMailer::SESSION_INIT ||
-                     xMailer == XMailer::RATCHET_MSG ||
-                     xMailer == XMailer::REPAIR_MSG ||
-                     xMailer == XMailer::ATTACH_META ||
-                     xMailer == XMailer::ATTACH_CHUNK);
-
-    bool isMls = XMailer::isMls(xMailer);
-
-    if (isSignal) {
-        // Route to Signal decrypt.
-        char sigBuf[65536];
-        int rc = signal_session_decrypt(account.c_str(), from.c_str(),
-                                        body.c_str(), sigBuf, sizeof(sigBuf));
-        if (rc != 0) {
-            result.error = "signal_session_decrypt failed";
-            return result;
-        }
-
-        try {
-            auto resp = json::parse(sigBuf);
-            result.success = resp.value("status", "") == "success";
-            result.plaintext = resp.value("plaintext", "");
-            result.sessionId = resp.value("session_id", "");
-            result.xMailer = xMailer;
-        } catch (...) {
-            result.error = "failed to parse signal decrypt response";
-        }
-
-    } else if (isMls) {
-        // Route to MLS group handler.
-        char gidBuf[128];
-        char ptBuf[65536];
-        int rc = group_handle_incoming(account.c_str(), from.c_str(),
-                                       xMailer.c_str(), body.c_str(),
-                                       messageId.c_str(), inReplyTo.c_str(),
-                                       gidBuf, sizeof(gidBuf),
-                                       ptBuf, sizeof(ptBuf));
-        if (rc != 0) {
-            result.error = "group_handle_incoming failed rc=" + std::to_string(rc);
-            return result;
-        }
-
-        result.success = true;
-        result.plaintext = ptBuf;
-        result.xMailer = xMailer;
-        // Try to find the unified session by mls_group_id.
-        // (For now, we leave sessionId empty; the caller can resolve it.)
-    } else {
-        result.error = "unknown X-Mailer: " + xMailer;
-    }
-
-    return result;
-}
-
 // ---------- addMembers ----------
 
 SendResult UnifiedSessionManager::addMembers(const std::string& account,
                                               const std::string& sessionId,
-                                              const std::vector<std::string>& newMembers,
-                                              const std::string& inReplyTo) {
+                                              const std::vector<std::string>& newMembers) {
     SendResult result;
 
     UnifiedSession session;
@@ -439,16 +389,23 @@ SendResult UnifiedSessionManager::addMembers(const std::string& account,
 
     if (session.mode == SessionMode::Signal && allMembers.size() > 2) {
         // Upgrade to MLS (irreversible).
-        result = upgradeToMls_(account, session, newMembers, inReplyTo);
+        result = upgradeToMls_(account, session, newMembers, session_last_message_id(session));
     } else if (session.mode == SessionMode::Mls) {
-        // Normal MLS addMembers.
-        json kpJson = json::array();
-        for (auto& m : newMembers) {
-            // We need their KeyPackages; for now, queue invites.
-            (void)m; // KeyPackages will arrive via the invite flow.
+        // Invite the new members; the owner adds each one when its KeyPackage arrives.
+        json membersJson(newMembers);
+        char buf[65536];
+        int rc = group_invite_members(account.c_str(), session.mlsGroupId.c_str(),
+                                      membersJson.dump().c_str(), buf, sizeof(buf));
+        if (rc != 0) {
+            result.error = "group_invite_members failed";
+            try { result.error += ": " + json::parse(buf).value("error", ""); } catch (...) {}
+            return result;
         }
-
-        // Update the member list in the unified session.
+        try {
+            auto resp = json::parse(buf);
+            result.taskId = resp.value("task_id", (int64_t)0);
+            result.messageId = resp.value("message_id", "");
+        } catch (...) {}
         repo_.updateMembers(sessionId, allMembers);
 
         result.success = true;
@@ -520,6 +477,46 @@ SendResult UnifiedSessionManager::upgradeToMls_(const std::string& account,
     result.taskId = taskId;
     result.upgraded = true;
     return result;
+}
+
+// ---------- sendFiles ----------
+
+std::string UnifiedSessionManager::sendFiles(const std::string& account, const std::string& sessionId,
+                                             const std::string& filesJson, const std::string& text) {
+    auto err = [](const std::string& e) { return json{{"status", "error"}, {"error", e}}.dump(); };
+    UnifiedSession session;
+    if (!repo_.load(sessionId, session)) return err("session not found");
+
+    const std::string parent = session_last_message_id(session);
+    const std::string batchId = "batch_" + std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    // 1:1 sends 1.0.4/1.0.5 (Double Ratchet per task); 1:n sends 2.0.4/2.0.5 (MLS per task).
+    std::vector<char> buf(1 << 20);
+    const char* xMailer;
+    if (session.mode == SessionMode::Signal) {
+        std::string peer;
+        for (auto& m : session.members) if (m != account) { peer = m; break; }
+        if (peer.empty()) return err("cannot determine peer");
+        email_file_split_and_send_multi(filesJson.c_str(), account.c_str(), peer.c_str(),
+                                        sessionId.c_str(), parent.c_str(), session.subject.c_str(),
+                                        text.c_str(), batchId.c_str(), buf.data(), (int)buf.size());
+        xMailer = XMailer::ATTACH_META;
+    } else {
+        group_send_file_multi(account.c_str(), sessionId.c_str(), filesJson.c_str(), parent.c_str(),
+                              session.subject.c_str(), text.c_str(), batchId.c_str(),
+                              buf.data(), (int)buf.size());
+        xMailer = XMailer::MLS_FILE_META;
+    }
+    try {
+        auto resp = json::parse(buf.data());
+        resp["batch_id"] = batchId;
+        resp["x_mailer"] = xMailer;
+        return resp.dump();
+    } catch (const std::exception& e) {
+        return err(std::string("bad response: ") + e.what());
+    }
 }
 
 // ---------- signalEncrypt ----------
@@ -624,7 +621,7 @@ bool UnifiedSessionManager::isReady(const std::string& account, const std::strin
         // holds a subset, so those members' keys are not exchanged yet and sending must
         // stay blocked until the last one joins.
         if (!mls::isReady(account, session.mlsGroupId)) return false;
-        std::vector<std::string> tree = mls::members(account, session.mlsGroupId);
+        std::vector<std::string> tree = mls::memberEmails(account, session.mlsGroupId);
         size_t peers = 0;
         for (auto& m : session.members) {
             if (m == account || m.empty()) continue;

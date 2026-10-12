@@ -4,15 +4,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
-import '../../native/email_core.dart' as native;
-import '../../native/unified_session.dart';
-import '../../native/email_background_service.dart';
+import 'package:oim_core/native/email_core.dart' as native;
+import 'package:oim_core/native/unified_session.dart';
+import 'package:oim_core/native/email_background_service.dart';
 import 'email_utils.dart';
 import 'email_module_base.dart';
 import 'email_list_view.dart';
 import 'conversation_view.dart';
-import 'eml_parser.dart';
-import '../../i18n/app_strings.dart';
+import 'package:oim_core/i18n/app_strings.dart';
 
 export 'email_module_base.dart';
 
@@ -35,10 +34,10 @@ class EmailModuleState extends State<EmailModule>
   List<UnifiedSessionInfo> _unifiedSessions = [];
   String? _selectedUnifiedSessionId;
   bool _showUnifiedMembers = false;
-  List<native.EmailMessage> _unifiedMessages = [];
+  List<SessionMessage> _unifiedMessages = [];
   // Outbox "sending..." bubbles: optimistic entries shown right after enqueue,
   // removed once the real message lands in localemail or the task failed.
-  List<native.EmailMessage> _pendingUnifiedMessages = [];
+  final Map<String, List<SessionMessage>> _pendingBySession = {};
 
   final Set<String> _collapsedSections = {};
   final Set<String> _collapsedGroups = {};
@@ -99,11 +98,11 @@ class EmailModuleState extends State<EmailModule>
   set selectedUnifiedSessionId(String? v) => _selectedUnifiedSessionId = v;
   bool get showUnifiedMembers => _showUnifiedMembers;
   set showUnifiedMembers(bool v) => _showUnifiedMembers = v;
-  List<native.EmailMessage> get unifiedMessages => _unifiedMessages;
-  List<native.EmailMessage> get pendingUnifiedMessages => _pendingUnifiedMessages;
+  List<SessionMessage> get unifiedMessages => _unifiedMessages;
+  List<SessionMessage> pendingMessagesFor(String sessionId) => _pendingBySession[sessionId] ?? const [];
 
-  void addPendingUnifiedMessage(native.EmailMessage msg) {
-    setState(() => _pendingUnifiedMessages.add(msg));
+  void addPendingUnifiedMessage(String sessionId, SessionMessage msg) {
+    setState(() => _pendingBySession.putIfAbsent(sessionId, () => []).add(msg));
   }
 
   void loadUnifiedSessions() {
@@ -161,131 +160,24 @@ class EmailModuleState extends State<EmailModule>
       return;
     }
     final us = session.first;
-    final messages = <native.EmailMessage>[];
-
-    // Only load messages for the session's own account (account isolation)
-    final accountsToQuery = us.account.isNotEmpty ? [us.account] : _configAccounts();
-    for (final account in accountsToQuery) {
-      try {
-        final result = native.EmailCore.queryLocalemail(account);
-        final json = jsonDecode(result);
-        if (json['status'] == 'success') {
-          final emails = json['emails'] as List;
-
-          // Discover the legacy session_id from the root email (Signal sessions and
-          // Signal->MLS upgraded sessions both keep history under the legacy sid).
-          String? legacySessionId;
-          if (us.rootMessageId.isNotEmpty) {
-            for (final e in emails) {
-              final mid = e['message_id']?.toString() ?? '';
-              if (mid == us.rootMessageId) {
-                legacySessionId = e['session_id']?.toString() ?? '';
-                break;
-              }
-            }
-          }
-
-          // Fallback: if rootMessageId didn't find the root email, discover
-          // legacySessionId by finding any SESSION_INIT email from the peer.
-          if (legacySessionId == null && us.mode == 'signal') {
-            final peer = us.members.where((m) => m != us.account).firstOrNull ?? '';
-            if (peer.isNotEmpty) {
-              for (final e in emails) {
-                final xMailer = e['x_mailer']?.toString() ?? '';
-                final fromAddr = e['from']?.toString() ?? e['from_addr']?.toString() ?? e['sender']?.toString() ?? '';
-                if (xMailer == '1.0.1' && fromAddr.toLowerCase().contains(peer.toLowerCase())) {
-                  legacySessionId = e['session_id']?.toString() ?? '';
-                  break;
-                }
-              }
-            }
-          }
-
-          for (final e in emails) {
-            // File chunks (1.0.5 / 2.0.5) are transport pieces, not displayable messages.
-            final xMailer = e['x_mailer']?.toString() ?? '';
-            if (xMailer == native.XMailer.attachChunk || xMailer == native.XMailer.mlsFileChunk) continue;
-            final sessionId = e['session_id']?.toString() ?? '';
-            final messageId = e['message_id']?.toString() ?? '';
-            final inReplyTo = e['in_reply_to']?.toString() ?? '';
-            bool match = false;
-            // 1. Match root email by message_id
-            if (us.rootMessageId.isNotEmpty && messageId == us.rootMessageId) {
-              match = true;
-            }
-            // 2. Match by legacy session_id (discovered from root email)
-            if (!match && legacySessionId != null && legacySessionId.isNotEmpty && sessionId == legacySessionId) {
-              match = true;
-            }
-            // 3. Match by in_reply_to chain to root
-            if (!match && us.rootMessageId.isNotEmpty && inReplyTo == us.rootMessageId) {
-              match = true;
-            }
-            // 4. Match by signalSessionId (only if non-empty)
-            if (!match && us.signalSessionId.isNotEmpty) {
-              final groupId = e['group_id']?.toString() ?? '';
-              match = groupId == us.signalSessionId;
-            }
-            // 5. MLS: match by group_xxx session pattern (only if mlsGroupId is non-empty)
-            if (!match && us.mlsGroupId.isNotEmpty) {
-              match = sessionId == 'group_${us.mlsGroupId}';
-            }
-            if (match) {
-              final flags = (e['flags'] is String && (e['flags'] as String).isNotEmpty) ? jsonDecode(e['flags']) : (e['flags'] is List ? e['flags'] : []);
-              final isAnswered = flags is List && flags.any((f) => f == '\\Answered');
-              messages.add(native.EmailMessage(
-                sender: e['from'] ?? e['from_addr'] ?? e['sender'] ?? '',
-                recipient: account,
-                subject: e['subject'] ?? '',
-                body: e['bodystructure'] ?? '',
-                timestamp: e['date'] ?? '',
-                uuid: e['uuid']?.toString() ?? '',
-                flags: flags is List ? flags.cast<String>() : [],
-                isAnswered: isAnswered,
-                inReplyTo: e['in_reply_to']?.toString() ?? '',
-                messageId: e['message_id']?.toString() ?? '',
-                folder: e['folder']?.toString() ?? 'INBOX',
-                isLocal: e['islocal'] is int ? e['islocal'] : (int.tryParse(e['islocal']?.toString() ?? '0') ?? 0),
-                sessionId: sessionId,
-                rowid: e['rowid'] is int ? e['rowid'] : (int.tryParse(e['rowid']?.toString() ?? '0') ?? 0),
-                toAddr: e['to_addr']?.toString() ?? '',
-                file: e['file']?.toString() ?? '',
-                account: e['account']?.toString() ?? '',
-                groupId: e['group_id']?.toString() ?? '',
-                xMailer: e['x_mailer']?.toString() ?? '',
-                isSent: e['is_sent'] is int ? e['is_sent'] : (int.tryParse(e['is_sent']?.toString() ?? '0') ?? 0),
-              ));
-            }
-          }
-        }
-      } catch (e) {
-        native.EmailCore.logWrite('[Unified] loadUnifiedSessionMessages error: $e');
-      }
-    }
+    final messages = UnifiedSessionManager.listMessages(us.account, us.sessionId);
     refreshSessionReady();
 
     // Resolve outbox "sending..." bubbles for this session: drop one once its
-    // real message has landed in localemail, or once the task failed permanently.
-    final pendingDone = <native.EmailMessage>[];
-    for (final p in _pendingUnifiedMessages) {
-      if (p.sessionId != unifiedSessionId) continue;
-      final landed = messages.any((m) => m.messageId.isNotEmpty && m.messageId == p.messageId);
-      if (landed) {
-        pendingDone.add(p);
-        continue;
-      }
+    // real message is stored, or once the task failed permanently.
+    final pending = _pendingBySession[unifiedSessionId];
+    pending?.removeWhere((p) {
+      if (messages.any((m) => m.messageId == p.messageId)) return true;
       try {
         final st = jsonDecode(native.EmailCore.taskStatus(us.account, p.messageId));
-        if (st['task_status'] == 'failed') pendingDone.add(p);
+        return st['task_status'] == 'failed';
       } catch (e) {
         native.EmailCore.logWrite('[Unified] taskStatus check error: $e');
+        return false;
       }
-    }
-    if (pendingDone.isNotEmpty) {
-      setState(() => _pendingUnifiedMessages.removeWhere((p) => pendingDone.contains(p)));
-    }
+    });
 
-    setState(() => _unifiedMessages = sortByReplyChain(messages));
+    setState(() => _unifiedMessages = messages);
   }
 
   List<String> _configAccounts() {
@@ -373,7 +265,6 @@ class EmailModuleState extends State<EmailModule>
     _logToFile('_initLibemail START');
 
     // Clear EML cache to force fresh parsing with updated decryption logic
-    clearEmlCache();
     _logToFile('Cleared EML cache');
 
     // Clear memory data to force reload from database with file field
@@ -399,16 +290,14 @@ class EmailModuleState extends State<EmailModule>
         switch (msg.type) {
           case 'new_emails':
             _logToFile('Background: new emails for ${msg.account}, count=${msg.data?['count']}');
-            clearEmlCache();
-            await _loadEmailsFromDb();
+                    await _loadEmailsFromDb();
             if (_selectedUnifiedSessionId != null) {
               loadUnifiedSessionMessages(_selectedUnifiedSessionId!);
             }
             break;
           case 'email_sent':
             _logToFile('Background: email sent for ${msg.account}, message_id=${msg.data?['message_id']}');
-            clearEmlCache();
-            await _loadEmailsFromDb();
+                    await _loadEmailsFromDb();
             if (_selectedUnifiedSessionId != null) {
               loadUnifiedSessionMessages(_selectedUnifiedSessionId!);
             }
@@ -439,8 +328,7 @@ class EmailModuleState extends State<EmailModule>
                 _logToFile('Background: file download complete, file_id=${fc['file_id']}');
               }
             }
-            clearEmlCache();
-            await _loadEmailsFromDb();
+                    await _loadEmailsFromDb();
             if (_selectedUnifiedSessionId != null) {
               loadUnifiedSessionMessages(_selectedUnifiedSessionId!);
             }

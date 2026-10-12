@@ -141,7 +141,8 @@ std::string joinGroup(const std::string& account, const std::string& groupId,
     return hex;
 }
 
-bool encrypt(const std::string& account, const std::string& groupId, const std::string& plaintext, std::string& outCipherB64) {
+bool encrypt(const std::string& account, const std::string& groupId, const std::string& aad,
+             const std::string& plaintext, std::string& outCipherB64) {
     std::lock_guard<std::mutex> lk(g_mutex);
     if (!ensureLocked(account)) return false;
     std::string gid = mlsGid(groupId);
@@ -151,6 +152,7 @@ bool encrypt(const std::string& account, const std::string& groupId, const std::
     // adds only a few KB, so plaintext+64K is a safe upper bound.
     std::vector<uint8_t> ct(plaintext.size() + 64 * 1024);
     int rc = mls_encrypt(account.c_str(), gid.c_str(),
+                         (const uint8_t*)aad.data(), (int)aad.size(),
                          (const uint8_t*)plaintext.data(), (int)plaintext.size(),
                          ct.data(), (int)ct.size());
     if (rc < 0) {
@@ -165,7 +167,8 @@ bool encrypt(const std::string& account, const std::string& groupId, const std::
     return true;
 }
 
-bool decrypt(const std::string& account, const std::string& groupId, const std::string& cipherB64, std::string& outPlaintext) {
+bool decrypt(const std::string& account, const std::string& groupId, const std::string& aad,
+             const std::string& cipherB64, std::string& outPlaintext, std::string& outSender) {
     std::lock_guard<std::mutex> lk(g_mutex);
     if (!ensureLocked(account)) return false;
     std::string gid = mlsGid(groupId);
@@ -175,8 +178,11 @@ bool decrypt(const std::string& account, const std::string& groupId, const std::
     // first attempt — a buffer-too-small retry hits SecretReuseError. Plaintext is
     // always smaller than the AEAD ciphertext, so ct_len+64K always fits.
     std::vector<uint8_t> pt(ct.size() + 64 * 1024);
-    int rc = mls_decrypt(account.c_str(), gid.c_str(), ct.data(), (int)ct.size(),
-                         pt.data(), (int)pt.size());
+    std::vector<uint8_t> sender(512, 0);
+    int rc = mls_decrypt(account.c_str(), gid.c_str(),
+                         (const uint8_t*)aad.data(), (int)aad.size(),
+                         ct.data(), (int)ct.size(), pt.data(), (int)pt.size(),
+                         sender.data(), (int)sender.size());
     if (rc < 0) {
         std::vector<uint8_t> eb(4096);
         int el = mls_last_error(eb.data(), (int)eb.size());
@@ -186,24 +192,86 @@ bool decrypt(const std::string& account, const std::string& groupId, const std::
     pt.resize((size_t)rc);
     persist(account);
     outPlaintext.assign(pt.begin(), pt.end());
+    outSender.assign((const char*)sender.data());
     return true;
 }
 
-bool processCommit(const std::string& account, const std::string& groupId, const std::string& commitB64) {
+int processHandshake(const std::string& account, const std::string& groupId, const std::string& messageB64) {
     std::lock_guard<std::mutex> lk(g_mutex);
-    if (!ensureLocked(account)) return false;
+    if (!ensureLocked(account)) return -1;
     std::string gid = mlsGid(groupId);
-    if (gid.empty()) return false;
-    auto c = base64_decode(commitB64);
+    if (gid.empty()) return -1;
+    auto c = base64_decode(messageB64);
     int rc = mls_process_commit(account.c_str(), gid.c_str(), c.data(), (int)c.size());
-    if (rc != 0) { LOG_INFO("[MLS] process_commit failed rc=%d group=%s\n", rc, groupId.c_str()); return false; }
+    if (rc < 0) {
+        std::vector<uint8_t> eb(4096);
+        int el = mls_last_error(eb.data(), (int)eb.size());
+        LOG_INFO("[MLS] process handshake failed rc=%d group=%s err=%.*s\n", rc, groupId.c_str(), el, eb.data());
+        return rc;
+    }
     persist(account);
-    LOG_INFO("[MLS] commit applied group=%s epoch=%d\n", groupId.c_str(), mls_get_epoch(account.c_str(), gid.c_str()));
-    return true;
+    LOG_INFO("[MLS] %s applied group=%s epoch=%d\n", rc == 0 ? "commit" : "proposal", groupId.c_str(),
+             mls_get_epoch(account.c_str(), gid.c_str()));
+    return rc;
 }
 
-std::vector<std::string> members(const std::string& account, const std::string& groupId) {
-    std::vector<std::string> out;
+// Owner-side commits / member proposals; the result is persisted immediately
+// because the new epoch secrets live in the Rust state.
+static std::string commitLike(const char* what, const std::string& account, const std::string& groupId,
+                              int (*fn)(const char*, const char*, uint8_t*, int)) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!ensureLocked(account)) return "";
+    std::string gid = mlsGid(groupId);
+    if (gid.empty()) return "";
+    std::vector<uint8_t> out(256 * 1024);
+    int rc = fn(account.c_str(), gid.c_str(), out.data(), (int)out.size());
+    if (rc < 0) {
+        std::vector<uint8_t> eb(4096);
+        int el = mls_last_error(eb.data(), (int)eb.size());
+        LOG_INFO("[MLS] %s failed rc=%d group=%s err=%.*s\n", what, rc, groupId.c_str(), el, eb.data());
+        return "";
+    }
+    out.resize((size_t)rc);
+    persist(account);
+    LOG_INFO("[MLS] %s group=%s epoch=%d\n", what, groupId.c_str(), mls_get_epoch(account.c_str(), gid.c_str()));
+    return b64(out);
+}
+
+std::string selfUpdate(const std::string& account, const std::string& groupId) {
+    return commitLike("self_update", account, groupId, mls_self_update);
+}
+std::string proposeSelfUpdate(const std::string& account, const std::string& groupId) {
+    return commitLike("propose_self_update", account, groupId, mls_propose_self_update);
+}
+std::string commitPending(const std::string& account, const std::string& groupId) {
+    return commitLike("commit_pending", account, groupId, mls_commit_pending);
+}
+
+static std::string hexOf(const std::vector<uint8_t>& v) {
+    static const char* d = "0123456789abcdef";
+    std::string h;
+    for (uint8_t b : v) { h += d[b >> 4]; h += d[b & 0xF]; }
+    return h;
+}
+
+std::string signatureKeyHex(const std::string& account) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!ensureLocked(account)) return "";
+    std::vector<uint8_t> k;
+    int rc = callOut([&](uint8_t* o, int n) { return mls_signature_key(account.c_str(), o, n); }, k);
+    return rc < 0 ? "" : hexOf(k);
+}
+
+std::string keyPackageSignatureKeyHex(const std::string& keyPackageB64) {
+    auto kp = base64_decode(keyPackageB64);
+    if (kp.empty()) return "";
+    std::vector<uint8_t> k;
+    int rc = callOut([&](uint8_t* o, int n) { return mls_key_package_signature_key(kp.data(), (int)kp.size(), o, n); }, k);
+    return rc < 0 ? "" : hexOf(k);
+}
+
+std::vector<Member> members(const std::string& account, const std::string& groupId) {
+    std::vector<Member> out;
     std::lock_guard<std::mutex> lk(g_mutex);
     if (!ensureLocked(account)) return out;
     std::string gid = mlsGid(groupId);
@@ -212,8 +280,15 @@ std::vector<std::string> members(const std::string& account, const std::string& 
     int rc = callOut([&](uint8_t* o, int n) { return mls_get_members(account.c_str(), gid.c_str(), o, n); }, buf);
     if (rc < 0) return out;
     try {
-        for (auto& m : json::parse(std::string(buf.begin(), buf.end()))) out.push_back(m.value("identity", ""));
+        for (auto& m : json::parse(std::string(buf.begin(), buf.end())))
+            out.push_back({m.value("identity", ""), m.value("signature_key", "")});
     } catch (...) {}
+    return out;
+}
+
+std::vector<std::string> memberEmails(const std::string& account, const std::string& groupId) {
+    std::vector<std::string> out;
+    for (auto& m : members(account, groupId)) out.push_back(m.identity);
     return out;
 }
 

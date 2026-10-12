@@ -37,14 +37,33 @@ AddResult addMembers(const std::string& account, const std::string& groupId,
 std::string joinGroup(const std::string& account, const std::string& groupId,
                       const std::string& welcomeB64, const std::string& treeB64);
 
-// Application messages. Ciphertext is base64 of the TLS MlsMessage.
-bool encrypt(const std::string& account, const std::string& groupId, const std::string& plaintext, std::string& outCipherB64);
-bool decrypt(const std::string& account, const std::string& groupId, const std::string& cipherB64, std::string& outPlaintext);
+// Application messages. Ciphertext is base64 of the TLS MlsMessage. `aad` is the
+// canonical body envelope; decrypt fails when it does not match and reports the
+// sender authenticated by the MLS tree.
+bool encrypt(const std::string& account, const std::string& groupId, const std::string& aad,
+             const std::string& plaintext, std::string& outCipherB64);
+bool decrypt(const std::string& account, const std::string& groupId, const std::string& aad,
+             const std::string& cipherB64, std::string& outPlaintext, std::string& outSender);
 
-bool processCommit(const std::string& account, const std::string& groupId, const std::string& commitB64);
+// Commit -> 0 (merged), Proposal -> 1 (queued), error -> negative.
+int processHandshake(const std::string& account, const std::string& groupId, const std::string& messageB64);
 
-// Members currently in the MLS tree (identities = emails). Empty if group not joined yet.
-std::vector<std::string> members(const std::string& account, const std::string& groupId);
+// Post-compromise security (see mls_ffi.h). Outputs are base64 TLS messages.
+std::string selfUpdate(const std::string& account, const std::string& groupId);
+std::string proposeSelfUpdate(const std::string& account, const std::string& groupId);
+std::string commitPending(const std::string& account, const std::string& groupId);
+
+// Identity binding material.
+std::string signatureKeyHex(const std::string& account);
+std::string keyPackageSignatureKeyHex(const std::string& keyPackageB64);
+
+struct Member {
+    std::string identity;      // email
+    std::string signatureKey;  // hex
+};
+// Members currently in the MLS tree. Empty if group not joined yet.
+std::vector<Member> members(const std::string& account, const std::string& groupId);
+std::vector<std::string> memberEmails(const std::string& account, const std::string& groupId);
 
 // A group is "ready" when the account has a joined MLS group for it.
 bool isReady(const std::string& account, const std::string& groupId);

@@ -79,3 +79,78 @@ std::string MlsRepo::findGroupIdByMlsGroupId(const std::string& account, const s
     sqlite3_finalize(stmt);
     return r;
 }
+
+static std::string col_text(sqlite3_stmt* st, int i) {
+    const unsigned char* t = sqlite3_column_text(st, i);
+    return t ? (const char*)t : "";
+}
+
+bool MlsRepo::upsertBinding(const std::string& groupId, const Binding& b) {
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return false;
+    const char* sql = "INSERT INTO mls_member_binding (group_id, email, ik_pub, mls_key, sig) VALUES (?, ?, ?, ?, ?) "
+                      "ON CONFLICT(group_id, email) DO UPDATE SET ik_pub=excluded.ik_pub, mls_key=excluded.mls_key, sig=excluded.sig;";
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, groupId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, b.email.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, b.ikPub.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 4, b.mlsKey.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 5, b.sig.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool MlsRepo::loadBinding(const std::string& groupId, const std::string& email, Binding& out) {
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return false;
+    const char* sql = "SELECT email, ik_pub, mls_key, sig FROM mls_member_binding WHERE group_id=? AND email=? LIMIT 1;";
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, groupId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, email.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = sqlite3_step(st) == SQLITE_ROW;
+    if (found) out = {col_text(st, 0), col_text(st, 1), col_text(st, 2), col_text(st, 3)};
+    sqlite3_finalize(st);
+    return found;
+}
+
+std::vector<MlsRepo::Binding> MlsRepo::listBindings(const std::string& groupId) {
+    std::vector<Binding> out;
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return out;
+    const char* sql = "SELECT email, ik_pub, mls_key, sig FROM mls_member_binding WHERE group_id=? ORDER BY email;";
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return out;
+    sqlite3_bind_text(st, 1, groupId.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(st) == SQLITE_ROW) out.push_back({col_text(st, 0), col_text(st, 1), col_text(st, 2), col_text(st, 3)});
+    sqlite3_finalize(st);
+    return out;
+}
+
+int64_t MlsRepo::lastUpdateAt(const std::string& groupId) {
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return 0;
+    const char* sql = "SELECT last_update_at FROM mls_group_meta WHERE group_id=? LIMIT 1;";
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, groupId.c_str(), -1, SQLITE_TRANSIENT);
+    int64_t ts = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
+    sqlite3_finalize(st);
+    return ts;
+}
+
+bool MlsRepo::setLastUpdateAt(const std::string& groupId, int64_t ts) {
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return false;
+    const char* sql = "INSERT INTO mls_group_meta (group_id, last_update_at) VALUES (?, ?) "
+                      "ON CONFLICT(group_id) DO UPDATE SET last_update_at=excluded.last_update_at;";
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, groupId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, ts);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}

@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import '../../native/email_core.dart' as native;
-import '../../i18n/app_strings.dart';
+import 'package:oim_core/native/email_core.dart' as native;
+import 'package:oim_core/i18n/app_strings.dart';
+
 
 Future<String> fetchEmailsInIsolate(Map<String, dynamic> params) async {
   final email = params['email'] as String;
@@ -153,51 +154,6 @@ Color avatarColor(String name) {
     hash = hash * 31 + name.codeUnitAt(i);
   }
   return colors[hash.abs() % colors.length];
-}
-
-/// Orders messages by following the reply chain: each message's `inReplyTo` points
-/// to the (locally generated) `messageId` of the previous message. Roots are messages
-/// whose parent is empty or not present in [messages]. A message becomes eligible only
-/// after its parent has been emitted; among all eligible messages the lowest rowid goes
-/// first (topological order). This keeps every reply below its parent even when mail
-/// delivery is out of order, while branches (e.g. several members replying to the same
-/// handshake root) interleave by arrival order instead of one subtree blocking siblings.
-List<native.EmailMessage> sortByReplyChain(List<native.EmailMessage> messages) {
-  final byId = <String, native.EmailMessage>{};
-  for (final m in messages) {
-    if (m.messageId.isNotEmpty) byId.putIfAbsent(m.messageId, () => m);
-  }
-
-  final children = <String, List<native.EmailMessage>>{};
-  final eligible = <native.EmailMessage>[];
-  for (final m in messages) {
-    final parent = m.inReplyTo;
-    if (parent.isNotEmpty && byId.containsKey(parent) && byId[parent] != m) {
-      children.putIfAbsent(parent, () => []).add(m);
-    } else {
-      eligible.add(m);
-    }
-  }
-
-  int byRowid(native.EmailMessage a, native.EmailMessage b) => a.rowid.compareTo(b.rowid);
-  eligible.sort(byRowid);
-
-  final ordered = <native.EmailMessage>[];
-  final emitted = <native.EmailMessage>{};
-  while (eligible.isNotEmpty) {
-    final m = eligible.removeAt(0);
-    if (!emitted.add(m)) continue;
-    ordered.add(m);
-    final cs = children[m.messageId];
-    if (cs == null || cs.isEmpty) continue;
-    eligible.addAll(cs);
-    eligible.sort(byRowid);
-  }
-  // Safety net: anything unreachable (cycles) keeps rowid order at the end
-  for (final m in messages) {
-    if (!emitted.contains(m)) ordered.add(m);
-  }
-  return ordered;
 }
 
 String previewFor(native.EmailMessage email) {

@@ -16,6 +16,16 @@ if(WIN32)
     endif()
     set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/${MLS_RUST_TARGET}/release/mls_ffi.lib")
     set(MLS_CARGO_TARGET_ARGS --target ${MLS_RUST_TARGET})
+elseif(ANDROID)
+    if(ANDROID_ABI STREQUAL "arm64-v8a")
+        set(MLS_RUST_TARGET "aarch64-linux-android")
+    elseif(ANDROID_ABI STREQUAL "x86_64")
+        set(MLS_RUST_TARGET "x86_64-linux-android")
+    else()
+        message(FATAL_ERROR "unsupported ANDROID_ABI: ${ANDROID_ABI}")
+    endif()
+    set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/${MLS_RUST_TARGET}/release/libmls_ffi.a")
+    set(MLS_CARGO_TARGET_ARGS --target ${MLS_RUST_TARGET})
 else()
     set(MLS_FFI_LIB "${MLS_FFI_DIR}/target/release/libmls_ffi.a")
     set(MLS_CARGO_TARGET_ARGS "")
@@ -25,9 +35,14 @@ if(DEFINED ENV{CARGO_HTTP_PROXY})
 else()
     set(_cargo_proxy "")
 endif()
+# Re-run cargo whenever the Rust sources change (otherwise the staticlib goes stale).
+file(GLOB_RECURSE MLS_FFI_SOURCES CONFIGURE_DEPENDS ${MLS_FFI_DIR}/src/*.rs)
+list(APPEND MLS_FFI_SOURCES ${MLS_FFI_DIR}/Cargo.toml)
+
 if(APPLE)
     add_custom_command(
         OUTPUT ${MLS_FFI_LIB}
+        DEPENDS ${MLS_FFI_SOURCES}
         COMMAND ${_cargo_proxy} cargo build --release --target aarch64-apple-darwin --manifest-path ${MLS_FFI_DIR}/Cargo.toml
         COMMAND ${_cargo_proxy} cargo build --release --target x86_64-apple-darwin --manifest-path ${MLS_FFI_DIR}/Cargo.toml
         COMMAND lipo -create ${MLS_FFI_DIR}/target/aarch64-apple-darwin/release/libmls_ffi.a ${MLS_FFI_DIR}/target/x86_64-apple-darwin/release/libmls_ffi.a -output ${MLS_FFI_LIB}
@@ -35,9 +50,24 @@ if(APPLE)
         COMMENT "Building Rust MLS FFI static library (universal)"
         VERBATIM
     )
+elseif(ANDROID)
+    # Cargo needs the NDK linker for the Android target.
+    string(REPLACE "-" "_" _mls_env "${MLS_RUST_TARGET}")
+    string(TOUPPER "${_mls_env}" _mls_env)
+    add_custom_command(
+        OUTPUT ${MLS_FFI_LIB}
+        DEPENDS ${MLS_FFI_SOURCES}
+        COMMAND ${CMAKE_COMMAND} -E env ${_cargo_proxy}
+            "CARGO_TARGET_${_mls_env}_LINKER=${CMAKE_C_COMPILER}"
+            cargo build --release ${MLS_CARGO_TARGET_ARGS} --manifest-path ${MLS_FFI_DIR}/Cargo.toml
+        WORKING_DIRECTORY ${MLS_FFI_DIR}
+        COMMENT "Building Rust MLS FFI static library (${MLS_RUST_TARGET})"
+        VERBATIM
+    )
 else()
     add_custom_command(
         OUTPUT ${MLS_FFI_LIB}
+        DEPENDS ${MLS_FFI_SOURCES}
         COMMAND ${_cargo_proxy} cargo build --release ${MLS_CARGO_TARGET_ARGS} --manifest-path ${MLS_FFI_DIR}/Cargo.toml
         WORKING_DIRECTORY ${MLS_FFI_DIR}
         COMMENT "Building Rust MLS FFI static library"
@@ -58,7 +88,6 @@ if(WIN32)
     find_path(SQLCIPHER_INCLUDE_ROOT NAMES sqlcipher/sqlite3.h REQUIRED)
     set(_sqlite_include_dir "${SQLCIPHER_INCLUDE_ROOT}/sqlcipher")
     find_package(OpenSSL REQUIRED)
-    find_package(CURL REQUIRED)
     find_package(ZLIB REQUIRED)
     find_package(nlohmann_json REQUIRED)
 
@@ -79,11 +108,28 @@ if(WIN32)
     set(GSASL_INCLUDE_DIRS "${GSASL_INCLUDE_DIR}")
     set(GSASL_LIBRARIES "${GSASL_LIBRARY}")
     set(GSASL_FOUND TRUE)
+elseif(ANDROID)
+    # Android: deps cross-compiled per ABI into deps/android/<abi> by
+    # build_android_deps.sh (OpenSSL, gsasl, vmime with OpenSSL TLS backend).
+    set(_android_deps "${CMAKE_CURRENT_SOURCE_DIR}/deps/android/${ANDROID_ABI}")
+    if(NOT EXISTS "${_android_deps}/lib/libcrypto.a")
+        message(FATAL_ERROR
+            "Android deps missing for ${ANDROID_ABI}; run email/build_android_deps.sh ${ANDROID_ABI}")
+    endif()
+    set(OPENSSL_SSL_LIBRARY "${_android_deps}/lib/libssl.a")
+    set(OPENSSL_CRYPTO_LIBRARY "${_android_deps}/lib/libcrypto.a")
+    set(OPENSSL_INCLUDE_DIR "${_android_deps}/include")
+    set(VMIME_INCLUDE_DIRS "${_android_deps}/include")
+    set(VMIME_LIBRARIES "${_android_deps}/lib/libvmime.a")
+    set(VMIME_FOUND TRUE)
+    set(GSASL_INCLUDE_DIRS "${_android_deps}/include")
+    set(GSASL_LIBRARIES "${_android_deps}/lib/libgsasl.a")
+    set(GSASL_FOUND TRUE)
+    set(_sqlite_include_dir "${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg")
 else()
-    # macOS: Find SQLite3, libcurl via system; native deps are universal
-    # (arm64 + x86_64) fat libraries staged under deps/univ-libs.
+    # macOS: native deps are universal (arm64 + x86_64) fat libraries
+    # staged under deps/univ-libs.
     find_package(SQLite3 REQUIRED)
-    find_package(CURL REQUIRED)
 
     set(_univ_libs "${CMAKE_CURRENT_SOURCE_DIR}/deps/univ-libs")
 
@@ -92,9 +138,9 @@ else()
     set(OPENSSL_CRYPTO_LIBRARY "${_univ_libs}/lib/libcrypto.a")
     set(OPENSSL_INCLUDE_DIR "${_univ_libs}/include")
 
-    # Universal vmime (GnuTLS TLS backend + gsasl)
-    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-univ-install/include")
-    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-univ-install/lib/libvmime.dylib")
+    # Universal static vmime (OpenSSL TLS backend + gsasl), see build_macos_vmime.sh
+    set(VMIME_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-univ-ossl-install/include")
+    set(VMIME_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/vmime-univ-ossl-install/lib/libvmime.a")
     set(VMIME_FOUND TRUE)
 
     # Universal gsasl
@@ -126,6 +172,13 @@ add_library(EmailComm STATIC
     libemail/crypto_aes.cpp
     libemail/crypto_utils.cpp
     libemail/message_id.cpp
+    libemail/https_client.cpp
+)
+target_compile_definitions(EmailComm PUBLIC
+    VMIME_STATIC
+    PRIVATE
+    CPPHTTPLIB_OPENSSL_SUPPORT
+    $<$<PLATFORM_ID:Darwin>:CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN>
 )
 
 target_include_directories(EmailComm PUBLIC
@@ -136,12 +189,12 @@ target_include_directories(EmailComm PUBLIC
     ${VMIME_INCLUDE_DIRS}
     ${GSASL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
+    ${_sqlite_include_dir}
 )
 if(WIN32)
     target_compile_definitions(EmailComm PUBLIC
         WIN32_LEAN_AND_MEAN
         NOMINMAX
-        VMIME_STATIC
         _WIN32_WINNT=0x0A00
         _CRT_SECURE_NO_WARNINGS
     )
@@ -157,9 +210,9 @@ endif()
 
 if(WIN32)
     target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} ${GSASL_LIBRARIES}
-        OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
+        OpenSSL::SSL OpenSSL::Crypto)
 else()
-    target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY} CURL::libcurl)
+    target_link_libraries(EmailComm PUBLIC ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY})
 endif()
 
 # Email core library (static, used by example executable)
@@ -198,6 +251,7 @@ add_library(email_core STATIC
     unified/unified_session_repo.cpp
     unified/unified_session_manager.cpp
     unified/unified_session_c_api.cpp
+    unified/session_messages.cpp
 )
 
 # Email core shared library (used by Flutter via dart:ffi)
@@ -236,6 +290,7 @@ add_library(email_core_shared SHARED
     unified/unified_session_repo.cpp
     unified/unified_session_manager.cpp
     unified/unified_session_c_api.cpp
+    unified/session_messages.cpp
 )
 set_target_properties(email_core_shared PROPERTIES
     OUTPUT_NAME email_core
@@ -250,13 +305,19 @@ set_target_properties(email_core_shared PROPERTIES
 #   macOS:   amalgamation compiled directly into each target (CommonCrypto
 #            provider, no extra dylib, builds for every CMAKE_OSX_ARCHITECTURES
 #            slice automatically).
+#   Android: amalgamation compiled into each target, OpenSSL crypto provider.
 #   Windows: vcpkg sqlcipher port (OpenSSL provider), linked below.
-if(APPLE)
+if(APPLE OR ANDROID)
     set(_sqlite_include_dir "${CMAKE_CURRENT_SOURCE_DIR}/deps/sqlcipher-amalg")
     target_sources(email_core PRIVATE deps/sqlcipher-amalg/sqlite3.c)
     target_sources(email_core_shared PRIVATE deps/sqlcipher-amalg/sqlite3.c)
+    if(APPLE)
+        set(_sqlcipher_crypto "SQLCIPHER_CRYPTO_CC")
+    else()
+        set(_sqlcipher_crypto "SQLCIPHER_CRYPTO_OPENSSL")
+    endif()
     set_source_files_properties(deps/sqlcipher-amalg/sqlite3.c PROPERTIES
-        COMPILE_DEFINITIONS "SQLITE_HAS_CODEC;SQLCIPHER_CRYPTO_CC;SQLITE_TEMP_STORE=2;SQLITE_THREADSAFE=1;SQLITE_EXTRA_INIT=sqlcipher_extra_init;SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
+        COMPILE_DEFINITIONS "SQLITE_HAS_CODEC;${_sqlcipher_crypto};SQLITE_TEMP_STORE=2;SQLITE_THREADSAFE=1;SQLITE_EXTRA_INIT=sqlcipher_extra_init;SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
 endif()
 
 # Include directories
@@ -300,6 +361,11 @@ if(WIN32)
     set(_keychain_libs advapi32 crypt32 bcrypt shell32 ole32)
     target_link_libraries(email_core PUBLIC sqlcipher::sqlcipher EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} Iconv::Iconv ${_keychain_libs})
     target_link_libraries(email_core_shared PUBLIC sqlcipher::sqlcipher EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} ZLIB::ZLIB Iconv::Iconv ${_keychain_libs})
+elseif(ANDROID)
+    # z is in bionic. iconv uses the statically linked GNU libiconv (bionic's
+    # only supports UTF-*/ASCII and crashes on the NULL-inbuf flush form).
+    target_link_libraries(email_core PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} "${_android_deps}/lib/libiconv.a")
+    target_link_libraries(email_core_shared PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} "${_android_deps}/lib/libiconv.a" z)
 else()
     target_link_libraries(email_core PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} iconv)
     target_link_libraries(email_core_shared PUBLIC EmailComm ${VMIME_LIBRARIES} ${GSASL_LIBRARIES} z iconv)
@@ -314,6 +380,13 @@ if(WIN32)
         ws2_32 crypt32 ncrypt userenv secur32
         bcrypt advapi32 ntdll
     )
+elseif(ANDROID)
+    target_link_libraries(email_core_shared PUBLIC
+        ${MLS_FFI_LIB}
+        log dl m
+    )
+    # Google Play requires 16 KB page size support in native libraries.
+    target_link_options(email_core_shared PRIVATE "-Wl,-z,max-page-size=16384")
 else()
     # macOS system libs that the Rust staticlib depends on
     target_link_libraries(email_core_shared PUBLIC
@@ -329,4 +402,20 @@ if(APPLE)
         COMMAND codesign --force --sign - $<TARGET_FILE:email_core_shared>
         COMMENT "Ad-hoc signing libemail_core.dylib"
     )
+endif()
+
+# Protocol tests (desktop only): link the shared library and run against an
+# in-memory SQLite database, so no Keychain / account state is touched.
+if(APPLE AND NOT ANDROID)
+    add_executable(signal_roundtrip_test tests/signal_roundtrip_test.cpp)
+    target_link_libraries(signal_roundtrip_test PRIVATE email_core_shared)
+    target_include_directories(signal_roundtrip_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/persistence
+        ${CMAKE_CURRENT_SOURCE_DIR}/signal
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    enable_testing()
+    add_test(NAME signal_roundtrip COMMAND signal_roundtrip_test)
 endif()

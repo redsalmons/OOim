@@ -1,11 +1,20 @@
 // C API + protocol orchestration for 1:n group sessions over MLS (RFC 9420).
 //
 // Wire format (X-Mailer 2.0.x, body = JSON):
-//   2.0.0  type=mls_invite       owner -> all members   {x_session_id, x_message_id, x_reply_to:"", subject, members, owner}
-//   2.0.0  type=mls_key_package  member -> owner        {x_session_id, x_message_id, x_reply_to:<last>, key_package}
-//   2.0.1  type=mls_welcome      owner -> new member    {x_session_id, x_message_id, x_reply_to:<last>, welcome, ratchet_tree}
-//   2.0.2  type=mls_commit       owner -> old members   {x_session_id, x_message_id, x_reply_to:<last>, commit}
-//   2.0.3  (application)         member -> members      {x_session_id, x_message_id, x_reply_to:<last>, sender, ciphertext}
+//   2.0.0  type=mls_invite          owner -> members   {x_session_id, x_message_id, x_reply_to, subject, members, owner, binding}
+//   2.0.0  type=mls_key_package     member -> owner    {x_session_id, x_message_id, x_reply_to, key_package, binding}
+//   2.0.1  type=mls_welcome         owner -> new member{x_session_id, x_message_id, x_reply_to, welcome, ratchet_tree, bindings:[...]}
+//   2.0.2  type=mls_commit          owner -> members   {x_session_id, x_message_id, x_reply_to, commit, binding?}
+//   2.0.2  type=mls_update_proposal member -> members  {x_session_id, x_message_id, x_reply_to, proposal}
+//   2.0.3  type=mls_app             member -> members  {x_session_id, x_message_id, x_reply_to, sender, ciphertext}
+//
+// Authentication: there is no MLS authentication service, so every leaf is bound
+// to the sender's long-lived account identity key (the same IK as the 1:1 path):
+//   binding = {email, ik_pub, mls_key, sig = ECDSA(IK, "oim-mls-binding-v1\n"+email+"\n"+mls_key)}
+// Receivers verify the signature, pin the IK (TOFU, shared with Signal) and only
+// trust a tree whose leaves are all covered by verified bindings. Application
+// messages carry the x_* envelope as MLS AAD; the sender is taken from the MLS
+// credential, never from the body.
 //
 // Session rules:
 //   - x_session_id is created with the group (value = root invite's x_message_id) and
@@ -22,6 +31,8 @@
 #include "email_body_repo.h"
 #include "task_repo.h"
 #include "unified/unified_session_repo.h"
+#include "mls_repo.h"
+#include "signal_protocol.h"
 #include "persistence/file_transfer_repo.h"
 #include "file_chunk_util.h"
 #include "x_mailer.h"
@@ -97,6 +108,135 @@ void copyOut(char* out, int size, const std::string& s) {
     snprintf(out, size, "%s", s.c_str());
 }
 
+MlsRepo g_mlsRepo;
+UnifiedSessionRepo g_usRepo;
+
+// ─── identity bindings ───────────────────────────────────────────────────────
+
+std::string bindingPayload(const std::string& email, const std::string& mlsKey) {
+    return "oim-mls-binding-v1\n" + email + "\n" + mlsKey;
+}
+
+json bindingJson(const MlsRepo::Binding& b) {
+    return {{"email", b.email}, {"ik_pub", b.ikPub}, {"mls_key", b.mlsKey}, {"sig", b.sig}};
+}
+
+// Our own binding: account IK signs our MLS signature key.
+bool makeOwnBinding(const std::string& account, MlsRepo::Binding& out) {
+    if (!ensure_identity_key(account)) return false;
+    out.email = account;
+    out.ikPub = identity_public_key(account);
+    out.mlsKey = mls::signatureKeyHex(account);
+    out.sig = sign_with_identity_key(account, bindingPayload(out.email, out.mlsKey));
+    return !out.ikPub.empty() && !out.mlsKey.empty() && !out.sig.empty();
+}
+
+// Verify a received binding and pin the identity. 0 ok, -1 malformed, -2 bad
+// signature / not our key for our own entry, -3 identity key changed.
+int verifyBinding(const std::string& account, const json& j, MlsRepo::Binding& out) {
+    if (!j.is_object()) return -1;
+    out = {j.value("email", ""), j.value("ik_pub", ""), j.value("mls_key", ""), j.value("sig", "")};
+    if (out.email.empty() || out.ikPub.empty() || out.mlsKey.empty() || out.sig.empty()) return -1;
+    if (!verify_with_ecc_public_key(out.ikPub, bindingPayload(out.email, out.mlsKey), out.sig)) return -2;
+    if (out.email == account) {
+        return (out.ikPub == identity_public_key(account) && out.mlsKey == mls::signatureKeyHex(account)) ? 0 : -2;
+    }
+    return pin_peer_identity(account, out.email, out.ikPub);
+}
+
+void flagIdentityChanged(const std::string& account, const std::string& groupId) {
+    UnifiedSession us;
+    if (g_usRepo.loadByMlsGroupId(account, groupId, us)) {
+        g_usRepo.setStatus(us.sessionId, kSessionIdentityChanged);
+        LOG_INFO("[MLS] identity changed in group=%s, flagged us=%s\n", groupId.c_str(), us.sessionId.c_str());
+    }
+}
+
+// Verify + store a binding for a group; identity changes flag the session.
+int acceptBinding(const std::string& account, const std::string& groupId, const json& j) {
+    MlsRepo::Binding b;
+    int rc = verifyBinding(account, j, b);
+    if (rc == 0) g_mlsRepo.upsertBinding(groupId, b);
+    else {
+        LOG_INFO("[MLS] binding for %s in group=%s rejected rc=%d\n", j.value("email", "?").c_str(), groupId.c_str(), rc);
+        if (rc == -3) flagIdentityChanged(account, groupId);
+    }
+    return rc;
+}
+
+// Every leaf of the tree must be covered by a verified binding with the same
+// signature key. Returns the emails of uncovered leaves.
+std::vector<std::string> uncoveredLeaves(const std::string& account, const std::string& groupId) {
+    std::vector<std::string> bad;
+    for (auto& m : mls::members(account, groupId)) {
+        MlsRepo::Binding b;
+        if (!g_mlsRepo.loadBinding(groupId, m.identity, b) || b.mlsKey != m.signatureKey) bad.push_back(m.identity);
+    }
+    return bad;
+}
+
+bool treeVerified(const std::string& account, const std::string& groupId) {
+    auto bad = uncoveredLeaves(account, groupId);
+    if (bad.empty()) return true;
+    std::string list;
+    for (auto& e : bad) list += (list.empty() ? "" : ",") + e;
+    LOG_INFO("[MLS] group=%s has unverified leaves [%s]\n", groupId.c_str(), list.c_str());
+    flagIdentityChanged(account, groupId);
+    return false;
+}
+
+json bindingsJson(const std::string& groupId) {
+    json arr = json::array();
+    for (auto& b : g_mlsRepo.listBindings(groupId)) arr.push_back(bindingJson(b));
+    return arr;
+}
+
+// Canonical AAD of an application message: the envelope fields outside the ciphertext.
+std::string appAad(const json& body) {
+    return json{{"type", body.value("type", "")},
+                {"x_session_id", body.value("x_session_id", "")},
+                {"x_message_id", body.value("x_message_id", "")},
+                {"x_reply_to", body.value("x_reply_to", "")},
+                {"sender", body.value("sender", "")}}.dump();
+}
+
+int64_t nowSecs() {
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// ─── post-compromise security ────────────────────────────────────────────────
+// A leaf is refreshed at most once per interval, right before the member sends.
+// Owner: self-update commit to everyone. Member: update proposal to everyone; the
+// owner commits it (single committer, no forks) in onHandshake.
+constexpr int64_t kLeafRefreshInterval = 24 * 3600;
+
+void queueHandshake(const std::string& account, const GroupSessionRecord& rec, const char* type,
+                    const char* field, const std::string& payloadB64, const json& extra = json::object()) {
+    std::string recipients = joinRecipients(mls::memberEmails(account, rec.groupId), account);
+    if (recipients.empty()) return;
+    std::string id = newMessageId(account);
+    json body = {{"type", type}, {"x_session_id", rec.xSessionId}, {"x_message_id", id},
+                 {"x_reply_to", rec.xReplyId}, {field, payloadB64}};
+    for (auto& [k, v] : extra.items()) body[k] = v;
+    int64_t tid = g_taskRepo.insert(account, recipients, rec.subject, body.dump(), rec.xReplyId, id, "", "", XMailer::MLS_COMMIT);
+    LOG_INFO("[MLS] queued %s group=%s to=[%s] task=%lld\n", type, rec.groupId.c_str(), recipients.c_str(), (long long)tid);
+}
+
+void maybeRefreshLeaf(const std::string& account, const GroupSessionRecord& rec) {
+    int64_t last = g_mlsRepo.lastUpdateAt(rec.groupId);
+    if (nowSecs() - last < kLeafRefreshInterval) return;
+    if (rec.owner == account) {
+        std::string commit = mls::selfUpdate(account, rec.groupId);
+        if (commit.empty()) return;
+        queueHandshake(account, rec, "mls_commit", "commit", commit);
+    } else {
+        std::string prop = mls::proposeSelfUpdate(account, rec.groupId);
+        if (prop.empty()) return;
+        queueHandshake(account, rec, "mls_update_proposal", "proposal", prop);
+    }
+    g_mlsRepo.setLastUpdateAt(rec.groupId, nowSecs());
+}
+
 // ─── receive handlers ────────────────────────────────────────────────────────
 
 // 2.0.0 mls_invite: create the local group and answer with our KeyPackage.
@@ -149,11 +289,20 @@ int onInvite(const std::string& account, const std::string& from, const json& bo
         }
     }
 
+    // The owner's leaf must be bound to its identity key before we hand over a KeyPackage.
+    if (acceptBinding(account, groupId, body.value("binding", json())) != 0) return -13;
+
+    MlsRepo::Binding mine;
+    if (!makeOwnBinding(account, mine)) return -14;
+    g_mlsRepo.upsertBinding(groupId, mine);
+    g_mlsRepo.setLastUpdateAt(groupId, nowSecs());
+
     std::string kp = mls::generateKeyPackage(account);
     if (kp.empty()) return -11;
     std::string kpMsgId = newMessageId(account);
     json kpBody = {{"type", "mls_key_package"}, {"x_session_id", rec.xSessionId},
-                   {"x_message_id", kpMsgId}, {"x_reply_to", msgId}, {"key_package", kp}};
+                   {"x_message_id", kpMsgId}, {"x_reply_to", msgId}, {"key_package", kp},
+                   {"binding", bindingJson(mine)}};
     int64_t tid = g_taskRepo.insert(account, rec.owner, rec.subject, kpBody.dump(), msgId, kpMsgId, "", "", XMailer::MLS_KEY_PACKAGE);
     LOG_INFO("[MLS] invite from %s -> group=%s, queued KeyPackage to owner task=%lld\n", from.c_str(), groupId.c_str(), (long long)tid);
     return tid > 0 ? 0 : -12;
@@ -168,21 +317,36 @@ int onKeyPackage(const std::string& account, const std::string& from, const json
     if (!g_groupRepo.loadGroup(groupId, rec)) return -21;
     if (rec.owner != account) { LOG_INFO("[MLS] key_package received by non-owner, ignored\n"); return 0; }
 
-    std::vector<std::string> before = mls::members(account, groupId);
-    auto r = mls::addMembers(account, groupId, {body.value("key_package", "")});
+    std::string kp = body.value("key_package", "");
+    MlsRepo::Binding b;
+    int brc = verifyBinding(account, body.value("binding", json()), b);
+    if (brc != 0 || b.email != from || b.mlsKey != mls::keyPackageSignatureKeyHex(kp)) {
+        LOG_INFO("[MLS] key_package from %s rejected: binding rc=%d email=%s\n", from.c_str(), brc, b.email.c_str());
+        if (brc == -3) flagIdentityChanged(account, groupId);
+        return -24;
+    }
+    for (auto& m : mls::memberEmails(account, groupId)) {
+        if (m == from) { LOG_INFO("[MLS] key_package: %s already in the tree, ignored\n", from.c_str()); return 0; }
+    }
+    g_mlsRepo.upsertBinding(groupId, b);
+
+    std::vector<std::string> before = mls::memberEmails(account, groupId);
+    auto r = mls::addMembers(account, groupId, {kp});
     if (!r.ok) return -22;
 
     std::string wId = newMessageId(account);
     json welcome = {{"type", "mls_welcome"}, {"x_session_id", rec.xSessionId},
                     {"x_message_id", wId}, {"x_reply_to", msgId},
-                    {"welcome", r.welcomeB64}, {"ratchet_tree", r.treeB64}};
+                    {"welcome", r.welcomeB64}, {"ratchet_tree", r.treeB64},
+                    {"bindings", bindingsJson(groupId)}};
     int64_t t1 = g_taskRepo.insert(account, from, rec.subject, welcome.dump(), msgId, wId, "", "", XMailer::MLS_WELCOME);
 
     std::string others = joinRecipients(before, account);
     if (!others.empty()) {
         std::string cId = newMessageId(account);
         json commit = {{"type", "mls_commit"}, {"x_session_id", rec.xSessionId},
-                       {"x_message_id", cId}, {"x_reply_to", msgId}, {"commit", r.commitB64}};
+                       {"x_message_id", cId}, {"x_reply_to", msgId}, {"commit", r.commitB64},
+                       {"binding", bindingJson(b)}};
         int64_t t2 = g_taskRepo.insert(account, others, rec.subject, commit.dump(), msgId, cId, "", "", XMailer::MLS_COMMIT);
         LOG_INFO("[MLS] queued Commit to [%s] task=%lld\n", others.c_str(), (long long)t2);
     }
@@ -196,18 +360,40 @@ int onWelcome(const std::string& account, const json& body, const std::string& p
     groupId = resolveGroup(account, parentId, xSessionId);
     if (groupId.empty()) { LOG_INFO("[MLS] welcome: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
     if (mls::isReady(account, groupId)) { LOG_INFO("[MLS] welcome: group=%s already joined\n", groupId.c_str()); return 0; }
+    for (auto& bj : body.value("bindings", json::array())) {
+        if (acceptBinding(account, groupId, bj) != 0) return -32;
+    }
     std::string gid = mls::joinGroup(account, groupId, body.value("welcome", ""), body.value("ratchet_tree", ""));
-    return gid.empty() ? -30 : 0;
+    if (gid.empty()) return -30;
+    g_mlsRepo.setLastUpdateAt(groupId, nowSecs());
+    return treeVerified(account, groupId) ? 0 : -31;
 }
 
-// 2.0.2 mls_commit (member side): advance epoch. Retry if we have not joined yet.
-int onCommit(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId, std::string& groupId) {
+// 2.0.2 mls_commit / mls_update_proposal: advance the epoch or queue the proposal.
+// Returns 1 (retry later) while the group is not joined or the message is out of order.
+int onHandshake(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId, std::string& groupId) {
     groupId = resolveGroup(account, parentId, xSessionId);
-    if (groupId.empty()) { LOG_INFO("[MLS] commit: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
-    if (!mls::isReady(account, groupId)) { LOG_INFO("[MLS] commit before welcome for group=%s, retry later\n", groupId.c_str()); return 1; }
-    if (!mls::processCommit(account, groupId, body.value("commit", ""))) return 1;
+    if (groupId.empty()) { LOG_INFO("[MLS] handshake: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
+    if (!mls::isReady(account, groupId)) { LOG_INFO("[MLS] handshake before welcome for group=%s, retry later\n", groupId.c_str()); return 1; }
+    const bool isProposal = body.value("type", "") == "mls_update_proposal";
+    if (!isProposal && body.contains("binding")) {
+        // Add commit: the new leaf must be bound before it enters our tree.
+        if (acceptBinding(account, groupId, body["binding"]) != 0) return -33;
+    }
+    int rc = mls::processHandshake(account, groupId, body.value(isProposal ? "proposal" : "commit", ""));
+    if (rc < 0) return 1;
+    GroupSessionRecord rec;
+    if (!g_groupRepo.loadGroup(groupId, rec)) return -21;
+    if (rc == 1) {
+        // Proposal queued; the owner commits it for everyone.
+        if (rec.owner == account) {
+            std::string commit = mls::commitPending(account, groupId);
+            if (!commit.empty()) { queueHandshake(account, rec, "mls_commit", "commit", commit); g_groupRepo.incrementEpoch(groupId); }
+        }
+        return 0;
+    }
     g_groupRepo.incrementEpoch(groupId);
-    return 0;
+    return treeVerified(account, groupId) ? 0 : -31;
 }
 
 // 2.0.3 application message.
@@ -216,7 +402,17 @@ int onAppMessage(const std::string& account, const json& body, const std::string
     groupId = resolveGroup(account, parentId, xSessionId);
     if (groupId.empty()) { LOG_INFO("[MLS] app msg: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
     if (!mls::isReady(account, groupId)) return 1;
-    return mls::decrypt(account, groupId, body.value("ciphertext", ""), plaintext) ? 0 : -40;
+    // A session flagged identity_changed is not listed as active: hold its mail.
+    UnifiedSession us;
+    if (!g_usRepo.loadByMlsGroupId(account, groupId, us)) { LOG_INFO("[MLS] app msg: group=%s not active, held\n", groupId.c_str()); return 1; }
+    std::string sender;
+    if (!mls::decrypt(account, groupId, appAad(body), body.value("ciphertext", ""), plaintext, sender)) return -40;
+    if (sender != body.value("sender", "")) {
+        LOG_INFO("[MLS] app msg: body sender %s != authenticated %s, rejected\n", body.value("sender", "").c_str(), sender.c_str());
+        plaintext.clear();
+        return -41;
+    }
+    return 0;
 }
 
 } // namespace
@@ -240,10 +436,15 @@ int groupCreateInternal(const std::string& account, const std::string& subject,
     rec.xSessionId = xSessionIdOverride.empty() ? rec.xReplyId : xSessionIdOverride;
     if (!g_groupRepo.createGroup(rec)) return fail(outJson, outSize, -3, "createGroup failed");
     if (mls::createGroup(account, rec.groupId).empty()) return fail(outJson, outSize, -4, "mls createGroup failed");
+    MlsRepo::Binding mine;
+    if (!makeOwnBinding(account, mine)) return fail(outJson, outSize, -6, "identity binding failed");
+    g_mlsRepo.upsertBinding(rec.groupId, mine);
+    g_mlsRepo.setLastUpdateAt(rec.groupId, nowSecs());
 
     json invite = {{"type", "mls_invite"}, {"x_session_id", rec.xSessionId},
                    {"x_message_id", rec.xReplyId}, {"x_reply_to", inReplyTo},
-                   {"subject", rec.subject}, {"members", rec.members}, {"owner", rec.owner}};
+                   {"subject", rec.subject}, {"members", rec.members}, {"owner", rec.owner},
+                   {"binding", bindingJson(mine)}};
     std::string recipients = joinRecipients(rec.members, rec.account);
     int64_t tid = g_taskRepo.insert(account, recipients, rec.subject, invite.dump(), inReplyTo, rec.xReplyId, "", "", XMailer::MLS_KEY_PACKAGE);
     if (tid <= 0) return fail(outJson, outSize, -5, "queue invite failed");
@@ -274,6 +475,41 @@ extern "C" int group_create_ex(const char* account, const char* subject, const c
                                outJson, outSize);
 }
 
+// Owner adds members to an existing group: each new member gets an invite carrying
+// the current x_session_id; their KeyPackage reply then flows through onKeyPackage.
+extern "C" int group_invite_members(const char* account, const char* groupId, const char* membersJson,
+                                    char* outJson, int outSize) {
+    if (!account || !groupId || !membersJson) return -1;
+    GroupSessionRecord rec;
+    if (!g_groupRepo.loadGroup(groupId, rec)) return fail(outJson, outSize, -2, "group not found");
+    if (rec.owner != account) return fail(outJson, outSize, -3, "only the owner can add members");
+    std::vector<std::string> added;
+    try {
+        for (auto& m : json::parse(membersJson)) {
+            if (!m.is_string()) continue;
+            std::string e = m.get<std::string>();
+            if (std::find(rec.members.begin(), rec.members.end(), e) == rec.members.end()) { rec.members.push_back(e); added.push_back(e); }
+        }
+    } catch (...) { return fail(outJson, outSize, -4, "invalid membersJson"); }
+    if (added.empty()) return reply(outJson, outSize, {{"status", "success"}, {"added", 0}});
+    g_groupRepo.updateMembers(rec.groupId, rec.members);
+
+    MlsRepo::Binding mine;
+    if (!g_mlsRepo.loadBinding(rec.groupId, account, mine) && !makeOwnBinding(account, mine)) {
+        return fail(outJson, outSize, -6, "identity binding failed");
+    }
+    std::string recipients = joinRecipients(added, account);
+    std::string id = newMessageId(account);
+    json invite = {{"type", "mls_invite"}, {"x_session_id", rec.xSessionId},
+                   {"x_message_id", id}, {"x_reply_to", rec.xReplyId},
+                   {"subject", rec.subject}, {"members", rec.members}, {"owner", rec.owner},
+                   {"binding", bindingJson(mine)}};
+    int64_t tid = g_taskRepo.insert(account, recipients, rec.subject, invite.dump(), rec.xReplyId, id, "", "", XMailer::MLS_KEY_PACKAGE);
+    if (tid <= 0) return fail(outJson, outSize, -5, "queue invite failed");
+    LOG_INFO("[MLS] group_invite_members: group=%s to=[%s] task=%lld\n", rec.groupId.c_str(), recipients.c_str(), (long long)tid);
+    return reply(outJson, outSize, {{"status", "success"}, {"added", (int)added.size()}, {"task_id", tid}, {"message_id", id}});
+}
+
 extern "C" int group_get_info(const char* account, const char* groupId, char* outJson, int outSize) {
     if (!account || !groupId) return -1;
     GroupSessionRecord rec;
@@ -281,7 +517,7 @@ extern "C" int group_get_info(const char* account, const char* groupId, char* ou
     return reply(outJson, outSize, {{"status", "success"}, {"group_id", rec.groupId}, {"group_email", rec.groupEmail},
                                     {"x_reply_id", rec.xReplyId}, {"x_session_id", rec.xSessionId},
                                     {"subject", rec.subject}, {"owner", rec.owner},
-                                    {"members", rec.members}, {"joined", mls::members(account, groupId)},
+                                    {"members", rec.members}, {"joined", mls::memberEmails(account, groupId)},
                                     {"epoch", mls::epoch(account, groupId)}, {"status_code", rec.status},
                                     {"ready", mls::isReady(account, groupId)}});
 }
@@ -304,9 +540,10 @@ extern "C" int group_send_message(const char* account, const char* groupId, cons
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return fail(outJson, outSize, -2, "group not found");
     if (!mls::isReady(account, groupId)) return fail(outJson, outSize, -3, "group not ready");
+    maybeRefreshLeaf(account, rec);
     std::string parent = inReplyTo ? inReplyTo : "";
     if (parent.empty()) parent = rec.xReplyId;
-    std::vector<std::string> tree = mls::members(account, groupId);
+    std::vector<std::string> tree = mls::memberEmails(account, groupId);
     std::string recipients = joinRecipients(tree, account);
     if (recipients.empty()) return fail(outJson, outSize, -4, "no other member has joined yet");
 
@@ -340,7 +577,8 @@ extern "C" int group_send_file(const char* account, const char* unifiedSessionId
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return fail(outJson, outSize, -3, "group not found");
     if (!mls::isReady(account, groupId)) return fail(outJson, outSize, -4, "group not ready");
-    std::vector<std::string> tree = mls::members(account, groupId);
+    maybeRefreshLeaf(account, rec);
+    std::vector<std::string> tree = mls::memberEmails(account, groupId);
     std::string recipients = joinRecipients(tree, account);
     if (recipients.empty()) return fail(outJson, outSize, -5, "no other member has joined yet");
 
@@ -433,7 +671,8 @@ extern "C" int group_send_file_multi(const char* account, const char* unifiedSes
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return fail(outJson, outSize, -3, "group not found");
     if (!mls::isReady(account, groupId)) return fail(outJson, outSize, -4, "group not ready");
-    std::vector<std::string> tree = mls::members(account, groupId);
+    maybeRefreshLeaf(account, rec);
+    std::vector<std::string> tree = mls::memberEmails(account, groupId);
     std::string recipients = joinRecipients(tree, account);
     if (recipients.empty()) return fail(outJson, outSize, -5, "no other member has joined yet");
 
@@ -541,13 +780,17 @@ extern "C" int group_handle_incoming(const char* account, const char* fromAddr, 
     std::string groupId, plaintext;
     int rc;
 
-    if (xm == XMailer::MLS_KEY_PACKAGE && type == "mls_invite")           rc = onInvite(acc, from, body, msgId, groupId);
-    else if (xm == XMailer::MLS_KEY_PACKAGE && type == "mls_key_package") rc = onKeyPackage(acc, from, body, msgId, parent, xSessionId, groupId);
-    else if (xm == XMailer::MLS_WELCOME)                                  rc = onWelcome(acc, body, parent, xSessionId, groupId);
-    else if (xm == XMailer::MLS_COMMIT)                                   rc = onCommit(acc, body, parent, xSessionId, groupId);
-    else if (xm == XMailer::MLS_APP_MSG || xm == XMailer::MLS_FILE_META || xm == XMailer::MLS_FILE_CHUNK)
-                                                                     rc = onAppMessage(acc, body, parent, xSessionId, groupId, plaintext);
-    else { LOG_INFO("[MLS] unknown message xmailer=%s type=%s\n", xMailer, type.c_str()); return -3; }
+    // Dispatch on the body type (authenticated for application messages); the
+    // X-Mailer header is only transport routing and must agree with it.
+    if (type == "mls_invite" && xm == XMailer::MLS_KEY_PACKAGE)              rc = onInvite(acc, from, body, msgId, groupId);
+    else if (type == "mls_key_package" && xm == XMailer::MLS_KEY_PACKAGE)    rc = onKeyPackage(acc, from, body, msgId, parent, xSessionId, groupId);
+    else if (type == "mls_welcome" && xm == XMailer::MLS_WELCOME)            rc = onWelcome(acc, body, parent, xSessionId, groupId);
+    else if ((type == "mls_commit" || type == "mls_update_proposal") && xm == XMailer::MLS_COMMIT)
+                                                                              rc = onHandshake(acc, body, parent, xSessionId, groupId);
+    else if ((type == "mls_app" && xm == XMailer::MLS_APP_MSG) ||
+             (type == "mls_file_meta" && xm == XMailer::MLS_FILE_META) ||
+             (type == "mls_file_chunk" && xm == XMailer::MLS_FILE_CHUNK))   rc = onAppMessage(acc, body, parent, xSessionId, groupId, plaintext);
+    else { LOG_INFO("[MLS] body type %s does not match X-Mailer %s, dropped\n", type.c_str(), xMailer); return -3; }
 
     copyOut(outGroupId, gidSize, groupId);
     copyOut(outPlaintext, ptSize, plaintext);
@@ -571,11 +814,15 @@ extern "C" int group_prepare_outgoing(const char* account, const char* xMailer, 
                                        j.value("x_session_id", ""));
     if (groupId.empty()) { LOG_INFO("[MLS] outgoing: cannot resolve group for session=%s parent=%s\n",
                                     j.value("x_session_id", "").c_str(), j.value("x_reply_to", "").c_str()); return -3; }
-    std::string ct;
-    if (!mls::encrypt(account, groupId, j.value("plaintext", ""), ct)) return -4;
-    json wire = {{"x_session_id", j.value("x_session_id", "")},
+    const std::string xm(xMailer);
+    const char* type = xm == XMailer::MLS_FILE_META ? "mls_file_meta"
+                     : xm == XMailer::MLS_FILE_CHUNK ? "mls_file_chunk" : "mls_app";
+    json wire = {{"type", type}, {"x_session_id", j.value("x_session_id", "")},
                  {"x_message_id", j.value("x_message_id", "")}, {"x_reply_to", j.value("x_reply_to", "")},
-                 {"sender", j.value("sender", account)}, {"ciphertext", ct}};
+                 {"sender", account}};
+    std::string ct;
+    if (!mls::encrypt(account, groupId, appAad(wire), j.value("plaintext", ""), ct)) return -4;
+    wire["ciphertext"] = ct;
     std::string s = wire.dump();
     if ((int)s.size() >= outSize) return -5;
     copyOut(outBody, outSize, s);

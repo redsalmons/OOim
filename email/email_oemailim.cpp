@@ -104,7 +104,12 @@ int oemailim_system_open(const char* dataDir, const char* configDir, const char*
     return systemOpen_c(dataDir, configDir, logDir);
 }
 
+// Defined in email_handler_c.cpp; stores the C-style notification callback
+// that systemOpen_c dispatches to at call time.
+extern "C" void set_c_notification_callback(void* callback);
+
 void oemailim_set_callback(void* callback) {
+    set_c_notification_callback(callback);
 }
 
 extern "C" int oemailim_open_new_email(const char* email_id) {
@@ -477,6 +482,8 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 std::string prekeySessionId;
                 std::string bodyReplyTo;
                 std::string bodyMsgId;
+                // 0 = verified and stored; anything else means the bundle is not usable.
+                int bundleRc = -1;
                 try {
                     vmime::shared_ptr<vmime::message> msg = vmime::make_shared<vmime::message>();
                     msg->parse(emlContent);
@@ -491,25 +498,21 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     std::string ikPub = pb.value("ik_pub", "");
                     std::string spkPub = pb.value("spk_pub", "");
                     std::string spkSig = pb.value("spk_sig", "");
-                    std::string opkPub = pb.value("opk_pub", "");
                     prekeySessionId = bodyJson.value("session_id", "");
                     // x_reply_to is the bundle this one answers ("" for the conversation root).
                     bodyMsgId = bodyJson.value("x_message_id", "");
                     bodyReplyTo = bodyJson.value("x_reply_to", "");
 
-                    if (!ikPub.empty() && !spkPub.empty()) {
-                        int rc = signal_store_peer_prekey(
-                            accountStr.c_str(),
-                            eml_from.c_str(),
-                            ikPub.c_str(),
-                            spkPub.c_str(),
-                            spkSig.c_str(),
-                            opkPub.c_str(),
-                            prekeySessionId.c_str()
-                        );
-                        LOG_INFO("[DB] download_pending: signal_store_peer_prekey rc=%d\n", rc);
+                    if (bodyJson.value("version", 0) != 2) {
+                        LOG_INFO("[DB] download_pending: PREKEY_BUNDLE unsupported version, skipping\n");
+                    } else if (ikPub.empty() || spkPub.empty() || spkSig.empty() || prekeySessionId.empty()) {
+                        LOG_INFO("[DB] download_pending: PREKEY_BUNDLE missing ik_pub/spk_pub/spk_sig/session_id, skipping\n");
                     } else {
-                        LOG_INFO("[DB] download_pending: PREKEY_BUNDLE missing ik_pub or spk_pub, skipping\n");
+                        // Verifies the SPK signature and pins / checks the peer identity key.
+                        bundleRc = signal_store_peer_prekey(
+                            accountStr.c_str(), eml_from.c_str(), prekeySessionId.c_str(),
+                            ikPub.c_str(), spkPub.c_str(), spkSig.c_str());
+                        LOG_INFO("[DB] download_pending: signal_store_peer_prekey rc=%d\n", bundleRc);
                     }
                 } catch (const std::exception& e) {
                     LOG_INFO("[DB] download_pending: failed to parse PREKEY_BUNDLE body: %s\n", e.what());
@@ -545,8 +548,19 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                 s_emailRepo.setIslocal(pe, accountStr, 2);
                 LOG_INFO("[DB] download_pending: set islocal=2 for PREKEY_BUNDLE uuid=%s\n", pe.c_str());
 
+                if (bundleRc == -3) {
+                    // Peer identity key changed: flag the session the bundle belongs to.
+                    static UnifiedSessionRepo s_usRepoFlag;
+                    UnifiedSession flagged;
+                    if (s_usRepoFlag.loadBySignalSessionId(accountStr, prekeySessionId, flagged)) {
+                        s_usRepoFlag.setStatus(flagged.sessionId, kSessionIdentityChanged);
+                        LOG_INFO("[DB] download_pending: PREKEY_BUNDLE identity changed, flagged us=%s\n",
+                                 flagged.sessionId.c_str());
+                    }
+                }
+
                 // Create session on receiver side for PREKEY_BUNDLE (same as SESSION_INIT)
-                {
+                if (bundleRc == 0) {
                     std::string existingSessionId;
                     // Try by reply_to from body first (most reliable for threading)
                     if (!bodyReplyTo.empty()) {
@@ -649,19 +663,23 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                                     accountStr.c_str(), prekeySessionId.c_str(),
                                     replyPrekeyBuf, sizeof(replyPrekeyBuf));
                                 if (replyRc == 0) {
-                                    std::string replyBody(replyPrekeyBuf);
+                                    // Body ids only: the reply bundle's x_reply_to is the root
+                                    // bundle's body x_message_id.
+                                    std::string replyMsgId = generate_x_message_id(accountStr);
+                                    std::string replyBody;
                                     try {
-                                        auto rj = json::parse(replyBody);
-                                        rj["x_reply_to"] = message_id;
-                                        replyBody = rj.dump();
+                                        auto rj = json::parse(replyPrekeyBuf);
+                                        auto& pb = rj["prekey_bundle"];
+                                        PrekeyBundle mine{pb.value("ik_pub", ""), pb.value("spk_pub", ""), pb.value("spk_sig", "")};
+                                        replyBody = signal_msg::encode_prekey_bundle(
+                                            rj.value("session_id", ""), replyMsgId, bodyMsgId, mine).dump();
                                     } catch (...) {}
 
                                     std::string replySubject = eml_subject;
-                                    std::string replyMsgId = generate_x_message_id(accountStr);
 
-                                    int64_t taskId = s_taskRepo.insert(
+                                    int64_t taskId = replyBody.empty() ? 0 : s_taskRepo.insert(
                                         accountStr, eml_from, replySubject, replyBody,
-                                        message_id, replyMsgId, "", "",
+                                        bodyMsgId, replyMsgId, replyMsgId, "",
                                         XMailer::PREKEY_BUNDLE);
                                     if (taskId > 0) {
                                         LOG_INFO("[DB] download_pending: queued symmetric PREKEY_BUNDLE reply to %s, session=%s, task=%lld\n",
@@ -674,7 +692,6 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                             } else {
                                 // === 我是发起方（A）：收到 B 的回复，自动续发 SESSION_INIT ===
                                 static SignalSessionRepo s_signalSessionRepo;
-                                s_signalSessionRepo.markReceivedBySessionId(accountStr, prekeySessionId);
 
                                 // 找到对应的 unified_session（创建时 signalSessionId=sigA）
                                 static UnifiedSessionRepo s_usRepo;
@@ -888,6 +905,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
             std::string signalInReplyTo;
             std::string signalMessageId;
             std::string signalSessionIdFromDecrypt;
+            bool signalDecryptOk = false;
             // Body 明文 from 是身份键：信封 from 只是邮差，不参与身份判定（无回退）
             std::string signalFromBody;
             try {
@@ -903,6 +921,13 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                     signal_msg::ParsedSignalMessage envParsed;
                     if (signal_msg::decode_signal_message_str(bodyText, envParsed) && !envParsed.fromAccount.empty()) {
                         signalFromBody = envParsed.fromAccount;
+                    }
+                    // The body type is authoritative; the X-Mailer route must agree with it.
+                    const char* expected = x_session_chart == XMailer::SESSION_INIT ? "session_init" : "ratchet_msg";
+                    if (envParsed.type != expected) {
+                        LOG_INFO("[DB] download_pending: body type %s does not match X-Mailer %s, dropped\n",
+                                 envParsed.type.c_str(), x_session_chart.c_str());
+                        throw std::runtime_error("body type / X-Mailer mismatch");
                     }
                 }
 
@@ -923,6 +948,7 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         signalInReplyTo = resp.value("x_reply_to", "");
                         signalMessageId = resp.value("x_message_id", "");
                         if (resp.value("status", "") == "success") {
+                            signalDecryptOk = true;
                             std::string plaintext = resp.value("plaintext", "");
                             signalSessionIdFromDecrypt = resp.value("session_id", "");
                             LOG_INFO("[DB] download_pending: Signal decrypt success, session_id=%s, plaintext_len=%zu, body message_id=%s, in_reply_to=%s\n",
@@ -968,23 +994,38 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         LOG_INFO("[DB] download_pending: failed to parse signal decrypt response JSON: %s\n", e.what());
                     }
                 } else {
-                    // Even on decrypt failure, try to extract fields from raw body for session matching
+                    // The error response still carries the (unauthenticated) body ids for
+                    // chain bookkeeping; the plaintext is never produced.
                     try {
-                        auto rawJson = json::parse(bodyText);
-                        signalInReplyTo = rawJson.value("x_reply_to", "");
-                        signalMessageId = rawJson.value("x_message_id", "");
-                        signalSessionIdFromDecrypt = rawJson.value("session_id", "");
-                        LOG_INFO("[DB] download_pending: signal_session_decrypt failed, rc=%d, extracted body message_id=%s, in_reply_to=%s, session_id=%s from raw body\n", rc, signalMessageId.c_str(), signalInReplyTo.c_str(), signalSessionIdFromDecrypt.c_str());
+                        auto resp = json::parse(std::string(outBuf.data()));
+                        signalInReplyTo = resp.value("x_reply_to", "");
+                        signalMessageId = resp.value("x_message_id", "");
+                        signalSessionIdFromDecrypt = resp.value("session_id", "");
+                        std::string err = resp.value("error", "");
+                        LOG_INFO("[DB] download_pending: signal_session_decrypt failed rc=%d error=%s session=%s message_id=%s\n",
+                                 rc, err.c_str(), signalSessionIdFromDecrypt.c_str(), signalMessageId.c_str());
+                        if (err == "identity_changed" && !signalSessionIdFromDecrypt.empty()) {
+                            static UnifiedSessionRepo s_usRepoFlag;
+                            UnifiedSession flagged;
+                            if (s_usRepoFlag.loadBySignalSessionId(accountStr, signalSessionIdFromDecrypt, flagged)) {
+                                s_usRepoFlag.setStatus(flagged.sessionId, kSessionIdentityChanged);
+                                LOG_INFO("[DB] download_pending: identity changed, flagged us=%s\n", flagged.sessionId.c_str());
+                            }
+                        }
                     } catch (...) {
-                        LOG_INFO("[DB] download_pending: signal_session_decrypt failed, rc=%d, could not extract body fields\n", rc);
+                        LOG_INFO("[DB] download_pending: signal_session_decrypt failed rc=%d, unparseable response\n", rc);
                     }
                 }
             } catch (const std::exception& e) {
                 LOG_INFO("[DB] download_pending: failed to decrypt Signal message: %s\n", e.what());
             }
 
-            // SESSION_INIT: create or reuse session on receiver side
-            if (x_session_chart == XMailer::SESSION_INIT) {
+            // SESSION_INIT: create or reuse session on receiver side — only when the
+            // handshake actually decrypted; a failed/forged INIT must not create a session.
+            if (x_session_chart == XMailer::SESSION_INIT && !signalDecryptOk) {
+                LOG_INFO("[DB] download_pending: SESSION_INIT skipped, decrypt failed (uuid=%s)\n", pe.c_str());
+            }
+            if (x_session_chart == XMailer::SESSION_INIT && signalDecryptOk) {
                 LOG_INFO("[DB] download_pending: SESSION_INIT, creating session on receiver side\n");
                 try {
                     std::string existingSessionId;
@@ -1538,6 +1579,22 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
         } else if (subType == vmime::mediaTypes::TEXT_HTML && htmlBody.empty()) {
             htmlBody = content;
         }
+    }
+}
+
+bool parse_stored_body_text(int64_t emailId, std::string& textBody, std::string& htmlBody) {
+    std::string content = s_bodyRepo.get(emailId);
+    if (content.empty()) return false;
+    try {
+        auto msg = vmime::make_shared<vmime::message>();
+        msg->parse(content);
+        json attachments = json::array();
+        bool hasAttachment = false;
+        extractParts(msg, textBody, htmlBody, attachments, hasAttachment);
+        return true;
+    } catch (const std::exception& e) {
+        LOG_INFO("parse_stored_body_text: id=%lld: %s\n", (long long)emailId, e.what());
+        return false;
     }
 }
 

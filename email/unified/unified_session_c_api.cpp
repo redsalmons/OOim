@@ -6,8 +6,10 @@
 #include "email_core_common.h"
 #include "unified_session.h"
 #include "unified_session_manager.h"
+#include "session_messages.h"
 #include "logger.h"
 #include <nlohmann/json.hpp>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -46,6 +48,23 @@ static json sessionToJson(const UnifiedSession& s) {
     j["status"] = s.status;
     j["created_at"] = s.createdAt;
     j["updated_at"] = s.updatedAt;
+    if (s.mode == SessionMode::Signal) {
+        // Safety number material: own and (pinned) peer identity fingerprints.
+        char fp[128];
+        signal_identity_fingerprint(s.account.c_str(), fp, sizeof(fp));
+        j["identity_fp"] = fp;
+        std::string peer;
+        for (auto& m : s.members) if (m != s.account) { peer = m; break; }
+        signal_peer_identity_fingerprint(s.account.c_str(), peer.c_str(), fp, sizeof(fp));
+        j["peer_identity_fp"] = fp;
+    }
+    return j;
+}
+
+static json sendResultToJson(const SendResult& r) {
+    json j = {{"status", r.success ? "success" : "error"}, {"session_id", r.sessionId},
+              {"message_id", r.messageId}, {"x_mailer", r.xMailer}, {"task_id", r.taskId}};
+    if (!r.error.empty()) j["error"] = r.error;
     return j;
 }
 
@@ -54,7 +73,6 @@ extern "C" {
 // Create a new encrypted session.
 // membersJson: JSON array of email addresses (must include the local account).
 // Auto-selects Signal (2 members) or MLS (3+ members).
-// outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
 int us_create_session(const char* account, const char* subject,
                       const char* membersJson, const char* mailmenJson,
                       int pinned, int hidden,
@@ -73,16 +91,7 @@ int us_create_session(const char* account, const char* subject,
     auto result = s_manager.createSession(account, subject ? subject : "", members, mailmen,
                                           pinned, hidden);
 
-    json resp;
-    resp["status"] = result.success ? "success" : "error";
-    resp["session_id"] = result.sessionId;
-    resp["message_id"] = result.messageId;
-    resp["x_mailer"] = result.xMailer;
-    resp["task_id"] = result.taskId;
-    resp["encrypted_body"] = result.encryptedBody;
-    if (!result.error.empty()) resp["error"] = result.error;
-
-    snprintf(outJson, outSize, "%s", resp.dump().c_str());
+    snprintf(outJson, outSize, "%s", sendResultToJson(result).dump().c_str());
     LOG_INFO("[US] us_create_session: account=%s members=%zu -> session=%s mode=%s\n",
              account, members.size(), result.sessionId.c_str(), result.xMailer.c_str());
     return result.success ? 0 : -3;
@@ -90,59 +99,45 @@ int us_create_session(const char* account, const char* subject,
 
 // Send a message in an existing session.
 // Auto-routes to Signal or MLS based on the session's mode.
-// outJson: {status, session_id, message_id, x_mailer, task_id, encrypted_body}
 int us_send_message(const char* account, const char* sessionId,
-                    const char* plaintext, const char* inReplyTo,
-                    char* outJson, int outSize) {
+                    const char* plaintext, char* outJson, int outSize) {
     if (!account || !sessionId || !plaintext || !outJson || outSize <= 0) return -1;
 
-    auto result = s_manager.sendMessage(account, sessionId, plaintext,
-                                        inReplyTo ? inReplyTo : "");
-
-    json resp;
-    resp["status"] = result.success ? "success" : "error";
-    resp["session_id"] = result.sessionId;
-    resp["message_id"] = result.messageId;
-    resp["x_mailer"] = result.xMailer;
-    resp["task_id"] = result.taskId;
-    resp["encrypted_body"] = result.encryptedBody;
-    if (!result.error.empty()) resp["error"] = result.error;
-
-    snprintf(outJson, outSize, "%s", resp.dump().c_str());
+    auto result = s_manager.sendMessage(account, sessionId, plaintext);
+    snprintf(outJson, outSize, "%s", sendResultToJson(result).dump().c_str());
     return result.success ? 0 : -3;
 }
 
-// Handle an incoming encrypted message.
-// Auto-detects protocol from xMailer and routes to the correct decryptor.
-// outJson: {status, session_id, plaintext, sender, x_mailer}
-int us_handle_incoming(const char* account, const char* from,
-                       const char* xMailer, const char* body,
-                       const char* messageId, const char* inReplyTo,
-                       char* outJson, int outSize) {
-    if (!account || !from || !xMailer || !body || !outJson || outSize <= 0) return -1;
+int us_send_files(const char* account, const char* sessionId,
+                  const char* filesJson, const char* text,
+                  char* outJson, int outSize) {
+    if (!account || !sessionId || !filesJson || !outJson || outSize <= 0) return -1;
+    std::string resp = s_manager.sendFiles(account, sessionId, filesJson, text ? text : "");
+    snprintf(outJson, outSize, "%s", resp.c_str());
+    return resp.find("\"status\":\"success\"") != std::string::npos ? 0 : -3;
+}
 
-    auto result = s_manager.handleIncoming(account, from, xMailer, body,
-                                           messageId ? messageId : "",
-                                           inReplyTo ? inReplyTo : "");
-
+int us_list_messages(const char* account, const char* sessionId,
+                     char* outJson, int outSize) {
+    if (!account || !sessionId || !outJson || outSize <= 0) return -1;
+    auto session = s_manager.getSession(sessionId);
     json resp;
-    resp["status"] = result.success ? "success" : "error";
-    resp["session_id"] = result.sessionId;
-    resp["plaintext"] = result.plaintext;
-    resp["sender"] = result.sender;
-    resp["x_mailer"] = result.xMailer;
-    if (!result.error.empty()) resp["error"] = result.error;
-
-    snprintf(outJson, outSize, "%s", resp.dump().c_str());
-    return result.success ? 0 : -3;
+    if (session.sessionId.empty() || session.account != account) {
+        resp = {{"status", "error"}, {"error", "session_not_found"}};
+    } else {
+        resp = {{"status", "success"}, {"messages", session_list_messages(session)}};
+    }
+    std::string s = resp.dump();
+    if ((int)s.size() >= outSize) return -(int)(s.size() + 1);
+    memcpy(outJson, s.c_str(), s.size() + 1);
+    return 0;
 }
 
 // Add members to an existing session.
 // If the session is Signal and total members > 2, triggers an irreversible upgrade to MLS.
 // outJson: {status, session_id, upgraded, mode, task_id}
 int us_add_members(const char* account, const char* sessionId,
-                   const char* membersJson, const char* inReplyTo,
-                   char* outJson, int outSize) {
+                   const char* membersJson, char* outJson, int outSize) {
     if (!account || !sessionId || !membersJson || !outJson || outSize <= 0) return -1;
 
     auto newMembers = parseMembersJson(membersJson);
@@ -152,8 +147,7 @@ int us_add_members(const char* account, const char* sessionId,
         return -2;
     }
 
-    auto result = s_manager.addMembers(account, sessionId, newMembers,
-                                       inReplyTo ? inReplyTo : "");
+    auto result = s_manager.addMembers(account, sessionId, newMembers);
 
     json resp;
     resp["status"] = result.success ? "success" : "error";
@@ -244,6 +238,28 @@ int us_set_subject(const char* sessionId, const char* subject,
     if (!ok) resp["error"] = "update_failed";
     snprintf(outJson, outSize, "%s", resp.dump().c_str());
     return ok ? 0 : -2;
+}
+
+// The user verified the peer's new identity: forget the pinned key and reopen
+// the session. The next bundle/init from the peer pins the new key.
+int us_reset_peer_identity(const char* sessionId, char* outJson, int outSize) {
+    if (!sessionId || !outJson || outSize <= 0) return -1;
+
+    static UnifiedSessionRepo s_usRepo;
+    UnifiedSession s;
+    if (!s_usRepo.load(sessionId, s) || s.mode != SessionMode::Signal) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"not_a_signal_session"})");
+        return -2;
+    }
+    std::string peer;
+    for (auto& m : s.members) if (m != s.account) { peer = m; break; }
+    bool ok = signal_peer_identity_reset(s.account.c_str(), peer.c_str()) == 0 &&
+              s_usRepo.setStatus(s.sessionId, kSessionActive);
+    LOG_INFO("[US] us_reset_peer_identity: session=%s peer=%s ok=%d\n", sessionId, peer.c_str(), ok ? 1 : 0);
+    json resp = {{"status", ok ? "success" : "error"}};
+    if (!ok) resp["error"] = "reset_failed";
+    snprintf(outJson, outSize, "%s", resp.dump().c_str());
+    return ok ? 0 : -3;
 }
 
 // Check if a session is ready for sending.

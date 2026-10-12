@@ -97,6 +97,26 @@ std::vector<TaskRecord> TaskRepo::queryPending(const std::string& account, int l
     return result;
 }
 
+std::vector<std::pair<std::string, std::string>> TaskRepo::queryOutboxLinks() {
+    std::vector<std::pair<std::string, std::string>> result;
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return result;
+    const char* sql =
+        "SELECT message_id, COALESCE(in_reply_to, '') FROM task "
+        "WHERE status = 0 AND message_id IS NOT NULL AND message_id != '' "
+        "AND x_session_chart NOT IN (?, ?) ORDER BY id ASC;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
+    sqlite3_bind_text(stmt, 1, XMailer::ATTACH_CHUNK, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, XMailer::MLS_FILE_CHUNK, -1, SQLITE_STATIC);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        result.emplace_back((const char*)sqlite3_column_text(stmt, 0),
+                            (const char*)sqlite3_column_text(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 bool TaskRepo::queryByMessageId(const std::string& account, const std::string& messageId, TaskRecord& out) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();

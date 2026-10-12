@@ -1,4 +1,3 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "email_opt_outlook_impl.h"
 #include "email_core.h"
 #include "email_core_common.h"
@@ -29,6 +28,7 @@
 #include <vmime/net/fetchAttributes.hpp>
 #include <vmime/net/messageSet.hpp>
 #include <httplib.h>
+#include "https_client.h"
 #include <nlohmann/json.hpp>
 #include <openssl/sha.h>
 #include <fstream>
@@ -47,7 +47,6 @@
 #include <fcntl.h>
 #include <algorithm>
 #include <cctype>
-#include <curl/curl.h>
 #include <vmime/header.hpp>
 #include <vmime/message.hpp>
 #include <vmime/utility/inputStreamStringAdapter.hpp>
@@ -187,6 +186,7 @@ bool EmailOptOutlookImpl::connect_() {
         session_->getProperties()["connection.timeout"] = "30";
         session_->getProperties()["imap.timeout"] = "30";
 
+#if VMIME_TLS_SUPPORT_LIB_IS_GNUTLS
         // GnuTLS default cipher suite includes %SSL3_RECORD_VERSION, which
         // causes Outlook IMAPS connections to reset. Set a plain "NORMAL"
         // priority string to let GnuTLS and the server negotiate naturally.
@@ -194,6 +194,7 @@ bool EmailOptOutlookImpl::connect_() {
             vmime::make_shared<vmime::net::tls::TLSProperties>();
         tlsProps->setCipherSuite("NORMAL");
         session_->setTLSProperties(tlsProps);
+#endif
 
         // Set authentication properties on the SESSION.
         // vmime's defaultAuthenticator reads properties with the service prefix:
@@ -501,39 +502,17 @@ bool EmailOptOutlookImpl::refresh_token() {
                                "&refresh_token=" + url_encode(refresh_token_) +
                                "&grant_type=refresh_token" +
                                "&scope=" + url_encode(OUTLOOK_SCOPE);
-        
-        // Use system curl command to perform HTTPS POST
-        std::string command = "curl -s -X POST \"" + token_url + "\" " +
-                             "-H \"Content-Type: application/x-www-form-urlencoded\" " +
-                             "-d \"" + post_data + "\"";
 
-        FILE* pipe = 
-        #ifdef _WIN32
-                            _popen
-        #else
-                            popen
-        #endif
-                            (command.c_str(), "r");
-        if (!pipe) {
-            last_error_ = "Failed to execute curl command";
-            LOG_INFO("Outlook refresh_token: Failed to execute curl command\n");
+        https::Response http = https::request("POST", token_url, {}, post_data,
+                                              "application/x-www-form-urlencoded");
+        if (http.status == 0) {
+            last_error_ = "Token request failed: " + http.error;
+            LOG_INFO("Outlook refresh_token: %s\n", last_error_.c_str());
             return false;
         }
+        std::string response = std::move(http.body);
 
-        char buffer[4096];
-        std::string response;
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            response += buffer;
-        }
-        
-        #ifdef _WIN32
-                            _pclose
-        #else
-                            pclose
-        #endif
-                            (pipe);
-
-        LOG_INFO("Outlook refresh_token: Token response body received (length: %zu)\n", response.length());
+        LOG_INFO("Outlook refresh_token: Token response body received (status=%d, length: %zu)\n", http.status, response.length());
 
         if (response.empty()) {
             last_error_ = "Empty response from server";
@@ -598,39 +577,18 @@ bool EmailOptOutlookImpl::refresh_graph_token() {
                                "&grant_type=refresh_token" +
                                "&scope=" + url_encode(GRAPH_SCOPE);
 
-        LOG_INFO("Outlook refresh_graph_token: Using curl to POST to %s\n", token_url.c_str());
+        LOG_INFO("Outlook refresh_graph_token: POST to %s\n", token_url.c_str());
 
-        std::string command = "curl -s -X POST \"" + token_url + "\" " +
-                             "-H \"Content-Type: application/x-www-form-urlencoded\" " +
-                             "-d \"" + post_data + "\"";
-
-        FILE* pipe = 
-        #ifdef _WIN32
-                            _popen
-        #else
-                            popen
-        #endif
-                            (command.c_str(), "r");
-        if (!pipe) {
-            last_error_ = "Failed to execute curl command";
-            LOG_INFO("Outlook refresh_graph_token: Failed to execute curl command\n");
+        https::Response http = https::request("POST", token_url, {}, post_data,
+                                              "application/x-www-form-urlencoded");
+        if (http.status == 0) {
+            last_error_ = "Graph token request failed: " + http.error;
+            LOG_INFO("Outlook refresh_graph_token: %s\n", last_error_.c_str());
             return false;
         }
+        std::string response = std::move(http.body);
 
-        char buffer[4096];
-        std::string response;
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            response += buffer;
-        }
-        
-        #ifdef _WIN32
-                            _pclose
-        #else
-                            pclose
-        #endif
-                            (pipe);
-
-        LOG_INFO("Outlook refresh_graph_token: Token response body received (length: %zu)\n", response.length());
+        LOG_INFO("Outlook refresh_graph_token: Token response body received (status=%d, length: %zu)\n", http.status, response.length());
 
         if (response.empty()) {
             last_error_ = "Empty response from server";
@@ -1007,54 +965,6 @@ std::string EmailOptOutlookImpl::get_email(const std::string& folder, const std:
     return mime;
 }
 
-// Upload context for libcurl callback
-struct upload_status {
-    const char* data;
-    size_t bytes_read;
-    size_t total_size;
-};
-
-// XOAUTH2 authentication context
-struct xoauth2_context {
-    std::string user;
-    std::string token;
-};
-
-// Callback function to provide email content to libcurl
-static size_t payload_source(char *ptr, size_t size, size_t nmemb, void *userp) {
-    struct upload_status *upload_ctx = (struct upload_status *)userp;
-    
-    size_t max_buffer = size * nmemb;
-    if (max_buffer < 1 || upload_ctx->bytes_read >= upload_ctx->total_size) {
-        return 0; // EOF: data finished
-    }
-    
-    size_t copy_len = upload_ctx->total_size - upload_ctx->bytes_read;
-    if (copy_len > max_buffer) {
-        copy_len = max_buffer;
-    }
-    
-    memcpy(ptr, upload_ctx->data + upload_ctx->bytes_read, copy_len);
-    upload_ctx->bytes_read += copy_len;
-    
-    return copy_len;
-}
-
-// SASL callback for XOAUTH2 authentication
-static CURLcode xoauth2_auth(void *clientp, const char *prompt, char *buffer, size_t buflen) {
-    struct xoauth2_context *ctx = (struct xoauth2_context *)clientp;
-    
-    // Build XOAUTH2 string: user={email}\x01auth=Bearer {token}\x01\x01
-    std::string xoauth2_str = "user=" + ctx->user + "\x01auth=Bearer " + ctx->token + "\x01\x01";
-    
-    if (xoauth2_str.length() >= buflen) {
-        return CURLE_OUT_OF_MEMORY;
-    }
-    
-    strcpy(buffer, xoauth2_str.c_str());
-    return CURLE_OK;
-}
-
 bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::string& content) {
     // Check if we have access token, if not try to refresh
     if (access_token_.empty()) {
@@ -1120,27 +1030,6 @@ bool EmailOptOutlookImpl::send_email(const std::string& folder, const std::strin
     }
 
     LOG_INFO("Outlook send_email_via_graph_api: using session_id=%s\n", sid.c_str());
-
-    // Legacy encryption disabled — all encryption handled by Signal protocol
-    bool needsEncryption = false;
-
-    // PREKEY_BUNDLE (1.0.0) is plaintext JSON built by the transport layer: stamp
-    // x_message_id / x_reply_to into the body. Both send paths receive body_str.
-    if (x_session_chart_str == XMailer::PREKEY_BUNDLE) {
-        if (message_id_str.empty()) {
-            message_id_str = "<" + generate_random_string(24) + "@outlook.com>";
-        } else if (message_id_str.front() != '<') {
-            message_id_str = "<" + message_id_str + ">";
-        }
-        try {
-            auto bodyJson = nlohmann::json::parse(body_str);
-            bodyJson["x_message_id"] = message_id_str;
-            bodyJson["x_reply_to"] = in_reply_to_str;
-            body_str = bodyJson.dump();
-        } catch (...) {
-            LOG_INFO("Outlook send_email: PREKEY_BUNDLE body is not JSON, ids not injected\n");
-        }
-    }
 
     // Choose sending method based on account type
     LOG_INFO("Outlook send_email: session_id=%s\n", session_id_str.c_str());
@@ -1269,45 +1158,19 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     // Single sendMail call with injected Message-ID via extended property
     // The server will use our Message-ID instead of generating its own
     std::string graph_url = "https://graph.microsoft.com/v1.0/me/sendMail";
-    std::string command = "curl -s -X POST \"" + graph_url + "\" " +
-                         "-H \"Authorization: Bearer " + graph_access_token_ + "\" " +
-                         "-H \"Content-Type: application/json\" " +
-                         "-d '" + json_body + "'";
-    
+
     LOG_INFO("Outlook send_email_via_graph_api: sending via Graph API sendMail (injected msg_id=%s)\n", msg_id.c_str());
-    
-    FILE* pipe = 
-    #ifdef _WIN32
-                        _popen
-    #else
-                        popen
-    #endif
-                        (command.c_str(), "r");
-    if (!pipe) {
-        last_error_ = "send_email_via_graph_api: failed to execute curl command";
+
+    https::Response http = https::request("POST", graph_url,
+                                          {{"Authorization", "Bearer " + graph_access_token_}},
+                                          json_body, "application/json");
+    if (http.status == 0) {
+        last_error_ = "send_email_via_graph_api: request failed: " + http.error;
         LOG_INFO("Outlook send_email_via_graph_api: %s\n", last_error_.c_str());
         return false;
     }
-    
-    char buffer[4096];
-    std::string response;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        response += buffer;
-    }
-    int exit_code = 
-    #ifdef _WIN32
-                            _pclose
-    #else
-                            pclose
-    #endif
-                            (pipe);
-    
-    if (exit_code != 0) {
-        last_error_ = "send_email_via_graph_api: curl command failed with exit code " + std::to_string(exit_code);
-        LOG_INFO("Outlook send_email_via_graph_api: %s\n", last_error_.c_str());
-        LOG_INFO("Outlook send_email_via_graph_api: response: %s\n", response.c_str());
-        return false;
-    }
+    std::string response = std::move(http.body);
+    LOG_INFO("Outlook send_email_via_graph_api: HTTP status=%d\n", http.status);
 
     // Graph API returns 202 Accepted with empty body on success.
     // On error it returns a JSON body with an "error" field — check for it.
@@ -1819,15 +1682,11 @@ std::string EmailOptOutlookImpl::find_sent_folder() {
 bool EmailOptOutlookImpl::launch_browser(const std::string& url) {
     LOG_INFO("=== launch_browser called ===\n");
     LOG_INFO("URL: %s\n", url.c_str());
-    
-    // Use system command to open browser directly
-    std::string command = "open \"" + url + "\"";
-    LOG_INFO("Executing command: %s\n", command.c_str());
-    int result = system(command.c_str());
-    LOG_INFO("Command result: %d\n", result);
-    
-    LOG_INFO("=== launch_browser completed ===\n");
-    return result == 0;
+
+    nlohmann::json json_obj;
+    json_obj["url"] = url;
+    email_handler_->notify(nullptr, NOTIFICATION_MESSAGE_BROWSER_LAUNCH, json_obj.dump());
+    return true;
 }
 
 std::string EmailOptOutlookImpl::get_authorization_url(const std::string& redirect_uri,
@@ -1861,43 +1720,20 @@ bool EmailOptOutlookImpl::exchange_code_for_token(const std::string& code,
                                "&scope=" + url_encode(OUTLOOK_SCOPE);
         LOG_INFO("Outlook authority: Post data length: %zu\n", post_data.length());
 
-        // Use system curl command to perform HTTPS POST
-        std::string command = "curl -s -X POST \"" + token_url + "\" " +
-                             "-H \"Content-Type: application/x-www-form-urlencoded\" " +
-                             "-d \"" + post_data + "\"";
-
-        LOG_INFO("Outlook authority: Executing curl command...\n");
-        FILE* pipe = 
-        #ifdef _WIN32
-                            _popen
-        #else
-                            popen
-        #endif
-                            (command.c_str(), "r");
-        if (!pipe) {
-            last_error_ = "Failed to execute curl command";
-            LOG_INFO("Outlook authority: Failed to execute curl command\n");
+        https::Response http = https::request("POST", token_url, {}, post_data,
+                                              "application/x-www-form-urlencoded");
+        if (http.status == 0) {
+            last_error_ = "Token exchange request failed: " + http.error;
+            LOG_INFO("Outlook authority: %s\n", last_error_.c_str());
             return false;
         }
-
-        char buffer[4096];
-        std::string response;
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            response += buffer;
-        }
-        
-        #ifdef _WIN32
-                            _pclose
-        #else
-                            pclose
-        #endif
-                            (pipe);
+        std::string response = std::move(http.body);
 
         LOG_INFO("Outlook authority: Token response body: %s\n", response.c_str());
 
         if (response.empty()) {
-            last_error_ = "Empty response from curl";
-            LOG_INFO("Outlook authority: Empty response from curl\n");
+            last_error_ = "Empty token response";
+            LOG_INFO("Outlook authority: Empty token response\n");
             return false;
         }
 
@@ -2037,46 +1873,16 @@ bool EmailOptOutlookImpl::ensure_graph_token() {
 
 std::string EmailOptOutlookImpl::graph_request(const std::string& url, const std::string& method, const std::string& body) {
     LOG_INFO("Outlook graph_request: %s %s\n", method.c_str(), url.c_str());
-    std::string header = "Authorization: Bearer " + graph_access_token_;
-    std::string escaped_url;
-    for (char c : url) {
-        if (c == '$' || c == '\\' || c == '"' || c == '`') {
-            escaped_url += '\\';
-        }
-        escaped_url += c;
-    }
-    std::string cmd = "curl -s --connect-timeout 10 --max-time 30 -X " + method + " \"" + escaped_url + "\" " +
-                      "-H \"" + header + "\" " +
-                      "-H \"Accept: application/json\"";
-    if (!body.empty()) {
-        cmd += " -H \"Content-Type: application/json\" -d '\"" + body + "\"'";
-    }
-
-    FILE* pipe = 
-    #ifdef _WIN32
-                        _popen
-    #else
-                        popen
-    #endif
-                        (cmd.c_str(), "r");
-    if (!pipe) {
-        LOG_INFO("Outlook graph_request: failed to run curl\n");
+    https::Response http = https::request(method, url,
+                                          {{"Authorization", "Bearer " + graph_access_token_},
+                                           {"Accept", "application/json"}},
+                                          body, body.empty() ? "" : "application/json");
+    if (http.status == 0) {
+        LOG_INFO("Outlook graph_request: request failed: %s\n", http.error.c_str());
         return "";
     }
-    char buffer[8192];
-    std::string response;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        response += buffer;
-    }
-    
-    #ifdef _WIN32
-                        _pclose
-    #else
-                        pclose
-    #endif
-                        (pipe);
-    LOG_INFO("Outlook graph_request: response length=%zu\n", response.length());
-    return response;
+    LOG_INFO("Outlook graph_request: status=%d response length=%zu\n", http.status, http.body.length());
+    return std::move(http.body);
 }
 
 std::vector<std::string> EmailOptOutlookImpl::graph_delta_query(const std::string& folder) {
@@ -2492,42 +2298,14 @@ static std::string url_encode_path(const std::string& value) {
 
 std::string EmailOptOutlookImpl::graph_get_message_mime(const std::string& id) {
     std::string url = "https://graph.microsoft.com/v1.0/me/messages/" + url_encode_path(id) + "/$value";
-    std::string escaped_url;
-    for (char c : url) {
-        if (c == '$' || c == '\\' || c == '"' || c == '`') {
-            escaped_url += '\\';
-        }
-        escaped_url += c;
-    }
-    std::string header = "Authorization: Bearer " + graph_access_token_;
-    std::string cmd = "curl -s --connect-timeout 10 --max-time 30 -X GET \"" + escaped_url + "\" " +
-                      "-H \"" + header + "\" " +
-                      "-H \"Accept: text/plain\"";
-
-    FILE* pipe = 
-    #ifdef _WIN32
-                        _popen
-    #else
-                        popen
-    #endif
-                        (cmd.c_str(), "r");
-    if (!pipe) {
-        LOG_INFO("Outlook graph_get_message_mime: failed to run curl\n");
+    https::Response http = https::request("GET", url,
+                                          {{"Authorization", "Bearer " + graph_access_token_},
+                                           {"Accept", "text/plain"}});
+    if (http.status == 0) {
+        LOG_INFO("Outlook graph_get_message_mime: request failed: %s\n", http.error.c_str());
         return "";
     }
-    char buffer[65536];
-    std::string mime;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        mime += buffer;
-    }
-    
-    #ifdef _WIN32
-                        _pclose
-    #else
-                        pclose
-    #endif
-                        (pipe);
-    return mime;
+    return std::move(http.body);
 }
 
 std::string EmailOptOutlookImpl::parse_mime_to_json(const std::string& mime, const std::string& id) {

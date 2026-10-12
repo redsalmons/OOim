@@ -25,6 +25,26 @@ use openmls_traits::OpenMlsProvider;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+// Email delivery reorders freely and a message may arrive after the commit that
+// closes its epoch, so keep several past epochs and a wide sender-ratchet window.
+const MAX_PAST_EPOCHS: usize = 8;
+const OUT_OF_ORDER_TOLERANCE: u32 = 200;
+const MAX_FORWARD_DISTANCE: u32 = 5000;
+
+fn create_config() -> MlsGroupCreateConfig {
+    MlsGroupCreateConfig::builder()
+        .max_past_epochs(MAX_PAST_EPOCHS)
+        .sender_ratchet_configuration(SenderRatchetConfiguration::new(OUT_OF_ORDER_TOLERANCE, MAX_FORWARD_DISTANCE))
+        .build()
+}
+
+fn join_config() -> MlsGroupJoinConfig {
+    MlsGroupJoinConfig::builder()
+        .max_past_epochs(MAX_PAST_EPOCHS)
+        .sender_ratchet_configuration(SenderRatchetConfiguration::new(OUT_OF_ORDER_TOLERANCE, MAX_FORWARD_DISTANCE))
+        .build()
+}
+
 // Error codes shared by every entry point
 const ERR_BAD_ARG: c_int = -1;
 const ERR_NO_ACCOUNT: c_int = -2;
@@ -225,7 +245,7 @@ pub extern "C" fn mls_create_group(account: *const c_char, out_gid: *mut u8, gid
     report(
         "mls_create_group",
         with_account(&account, true, |st| {
-            let group = MlsGroup::new(&st.provider, &st.signer, &MlsGroupCreateConfig::default(), st.credential.clone())
+            let group = MlsGroup::new(&st.provider, &st.signer, &create_config(), st.credential.clone())
                 .map_err(|e| format!("create group: {e:?}"))?;
             let gid_hex = hex_encode(group.group_id().as_slice());
             st.groups.insert(gid_hex.clone(), group);
@@ -301,7 +321,7 @@ pub extern "C" fn mls_join_group(
             let msg = MlsMessageIn::tls_deserialize_exact(welcome).map_err(|e| format!("welcome decode: {e:?}"))?;
             let MlsMessageBodyIn::Welcome(w) = msg.extract() else { return Err("not a Welcome".into()) };
             let tree = RatchetTreeIn::tls_deserialize_exact(tree).map_err(|e| format!("tree decode: {e:?}"))?;
-            let group = StagedWelcome::new_from_welcome(&st.provider, &MlsGroupJoinConfig::default(), w, Some(tree))
+            let group = StagedWelcome::new_from_welcome(&st.provider, &join_config(), w, Some(tree))
                 .map_err(|e| format!("staged welcome: {e:?}"))?
                 .into_group(&st.provider)
                 .map_err(|e| format!("into_group: {e:?}"))?;
@@ -325,21 +345,26 @@ pub extern "C" fn mls_export_ratchet_tree(account: *const c_char, group_id_hex: 
     )
 }
 
-/// Encrypt an application message. Output is a TLS-serialised MlsMessageOut.
+/// Encrypt an application message with additional authenticated data (the body's
+/// x_* envelope). Output is a TLS-serialised MlsMessageOut.
 #[no_mangle]
 pub extern "C" fn mls_encrypt(
     account: *const c_char,
     group_id_hex: *const c_char,
+    aad: *const u8,
+    aad_len: c_int,
     plaintext: *const u8,
     pt_len: c_int,
     out: *mut u8,
     out_len: c_int,
 ) -> c_int {
     let (Ok(account), Ok(gid), Ok(pt)) = (cstr(account), cstr(group_id_hex), slice(plaintext, pt_len)) else { return ERR_BAD_ARG };
+    let aad: &[u8] = if aad.is_null() || aad_len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(aad, aad_len as usize) } };
     report(
         "mls_encrypt",
         with_account(&account, false, |st| {
             let (provider, signer, group) = st.parts(&gid)?;
+            group.set_aad(aad.to_vec());
             let msg = group.create_message(provider, signer, pt).map_err(|e| format!("create_message: {e:?}"))?;
             let bytes = msg.tls_serialize_detached().map_err(|e| format!("serialise: {e:?}"))?;
             Ok(write_out(&bytes, out, out_len))
@@ -347,32 +372,130 @@ pub extern "C" fn mls_encrypt(
     )
 }
 
-/// Decrypt an application message. Returns plaintext length, or ERR_MLS for non-app messages.
+/// Decrypt an application message. The message's AAD must equal `aad` (recomputed by
+/// the caller from the received body). Writes the authenticated sender identity to
+/// `out_sender`. Returns plaintext length, or ERR_MLS for non-app messages / AAD mismatch.
 #[no_mangle]
 pub extern "C" fn mls_decrypt(
     account: *const c_char,
     group_id_hex: *const c_char,
+    aad: *const u8,
+    aad_len: c_int,
     ciphertext: *const u8,
     ct_len: c_int,
     out: *mut u8,
     out_len: c_int,
+    out_sender: *mut u8,
+    sender_len: c_int,
 ) -> c_int {
     let (Ok(account), Ok(gid), Ok(ct)) = (cstr(account), cstr(group_id_hex), slice(ciphertext, ct_len)) else { return ERR_BAD_ARG };
+    let aad: &[u8] = if aad.is_null() || aad_len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(aad, aad_len as usize) } };
     report(
         "mls_decrypt",
         with_account(&account, false, |st| {
             let pm = protocol_message(ct)?;
             let (provider, _, group) = st.parts(&gid)?;
             let processed = group.process_message(provider, pm).map_err(|e| format!("process_message: {e:?}"))?;
+            if processed.aad() != aad {
+                return Err("aad mismatch: envelope was modified".into());
+            }
+            let sender = BasicCredential::try_from(processed.credential().clone())
+                .map(|b| String::from_utf8_lossy(b.identity()).into_owned())
+                .map_err(|e| format!("credential: {e:?}"))?;
             match processed.into_content() {
-                ProcessedMessageContent::ApplicationMessage(m) => Ok(write_out(&m.into_bytes(), out, out_len)),
+                ProcessedMessageContent::ApplicationMessage(m) => {
+                    if write_out(sender.as_bytes(), out_sender, sender_len) < 0 {
+                        return Err("sender buffer too small".into());
+                    }
+                    Ok(write_out(&m.into_bytes(), out, out_len))
+                }
                 other => Err(format!("not an application message: {:?}", std::mem::discriminant(&other))),
             }
         }),
     )
 }
 
-/// Process a Commit from another member and merge it (advances the epoch). Returns 0.
+/// Our MLS signature public key (binds the MLS leaf to the account identity key).
+#[no_mangle]
+pub extern "C" fn mls_signature_key(account: *const c_char, out: *mut u8, out_len: c_int) -> c_int {
+    let Ok(account) = cstr(account) else { return ERR_BAD_ARG };
+    report("mls_signature_key", with_account(&account, true, |st| Ok(write_out(st.signer.public(), out, out_len))))
+}
+
+/// Signature public key carried by a TLS-serialised KeyPackage.
+#[no_mangle]
+pub extern "C" fn mls_key_package_signature_key(kp: *const u8, kp_len: c_int, out: *mut u8, out_len: c_int) -> c_int {
+    let Ok(bytes) = slice(kp, kp_len) else { return ERR_BAD_ARG };
+    let crypto = RustCrypto::default();
+    report(
+        "mls_key_package_signature_key",
+        parse_key_package(bytes, &crypto)
+            .map(|kp| write_out(kp.leaf_node().signature_key().as_slice(), out, out_len))
+            .map_err(|e| (ERR_MLS, e)),
+    )
+}
+
+/// Owner: refresh our own leaf (post-compromise security) and commit any pending
+/// proposals. Output is the TLS-serialised Commit for the other members.
+#[no_mangle]
+pub extern "C" fn mls_self_update(account: *const c_char, group_id_hex: *const c_char, out_commit: *mut u8, commit_len: c_int) -> c_int {
+    let (Ok(account), Ok(gid)) = (cstr(account), cstr(group_id_hex)) else { return ERR_BAD_ARG };
+    report(
+        "mls_self_update",
+        with_account(&account, false, |st| {
+            let (provider, signer, group) = st.parts(&gid)?;
+            let bundle = group
+                .self_update(provider, signer, LeafNodeParameters::default())
+                .map_err(|e| format!("self_update: {e:?}"))?;
+            let bytes = bundle.commit().tls_serialize_detached().map_err(|e| format!("serialise: {e:?}"))?;
+            group.merge_pending_commit(provider).map_err(|e| format!("merge commit: {e:?}"))?;
+            Ok(write_out(&bytes, out_commit, commit_len))
+        }),
+    )
+}
+
+/// Member: propose a refresh of our own leaf. The proposal goes to the owner, who
+/// commits it (single committer keeps the group from forking). Output is the
+/// TLS-serialised Proposal.
+#[no_mangle]
+pub extern "C" fn mls_propose_self_update(account: *const c_char, group_id_hex: *const c_char, out: *mut u8, out_len: c_int) -> c_int {
+    let (Ok(account), Ok(gid)) = (cstr(account), cstr(group_id_hex)) else { return ERR_BAD_ARG };
+    report(
+        "mls_propose_self_update",
+        with_account(&account, false, |st| {
+            let (provider, signer, group) = st.parts(&gid)?;
+            let (msg, _) = group
+                .propose_self_update(provider, signer, LeafNodeParameters::default())
+                .map_err(|e| format!("propose_self_update: {e:?}"))?;
+            let bytes = msg.tls_serialize_detached().map_err(|e| format!("serialise: {e:?}"))?;
+            Ok(write_out(&bytes, out, out_len))
+        }),
+    )
+}
+
+/// Owner: commit every stored proposal. Output is the TLS-serialised Commit.
+#[no_mangle]
+pub extern "C" fn mls_commit_pending(account: *const c_char, group_id_hex: *const c_char, out_commit: *mut u8, commit_len: c_int) -> c_int {
+    let (Ok(account), Ok(gid)) = (cstr(account), cstr(group_id_hex)) else { return ERR_BAD_ARG };
+    report(
+        "mls_commit_pending",
+        with_account(&account, false, |st| {
+            let (provider, signer, group) = st.parts(&gid)?;
+            if !group.has_pending_proposals() {
+                return Err("no pending proposals".into());
+            }
+            let (commit, _welcome, _info) = group
+                .commit_to_pending_proposals(provider, signer)
+                .map_err(|e| format!("commit_to_pending_proposals: {e:?}"))?;
+            let bytes = commit.tls_serialize_detached().map_err(|e| format!("serialise: {e:?}"))?;
+            group.merge_pending_commit(provider).map_err(|e| format!("merge commit: {e:?}"))?;
+            Ok(write_out(&bytes, out_commit, commit_len))
+        }),
+    )
+}
+
+/// Process a handshake message from another member: a Commit is merged (advances
+/// the epoch, returns 0); a Proposal is queued for the next commit (returns 1).
 #[no_mangle]
 pub extern "C" fn mls_process_commit(account: *const c_char, group_id_hex: *const c_char, commit: *const u8, commit_len: c_int) -> c_int {
     let (Ok(account), Ok(gid), Ok(ct)) = (cstr(account), cstr(group_id_hex), slice(commit, commit_len)) else { return ERR_BAD_ARG };
@@ -387,7 +510,11 @@ pub extern "C" fn mls_process_commit(account: *const c_char, group_id_hex: *cons
                     group.merge_staged_commit(provider, *sc).map_err(|e| format!("merge_staged_commit: {e:?}"))?;
                     Ok(0)
                 }
-                _ => Err("not a commit".into()),
+                ProcessedMessageContent::ProposalMessage(p) => {
+                    group.store_pending_proposal(provider.storage(), *p).map_err(|e| format!("store proposal: {e:?}"))?;
+                    Ok(1)
+                }
+                _ => Err("not a commit or proposal".into()),
             }
         }),
     )
@@ -441,7 +568,8 @@ pub extern "C" fn mls_get_members(account: *const c_char, group_id_hex: *const c
                     let identity = BasicCredential::try_from(m.credential)
                         .map(|b| String::from_utf8_lossy(b.identity()).into_owned())
                         .unwrap_or_default();
-                    serde_json::json!({ "index": m.index.u32(), "identity": identity })
+                    serde_json::json!({ "index": m.index.u32(), "identity": identity,
+                                        "signature_key": hex_encode(&m.signature_key) })
                 })
                 .collect();
             Ok(write_out(serde_json::to_string(&members).unwrap().as_bytes(), out, out_len))

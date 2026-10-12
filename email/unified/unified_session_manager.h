@@ -27,31 +27,25 @@ public:
                              int hidden = 0);
 
     // Send a message in an existing session.
-    // Routes to Signal or MLS encryption based on the session's mode.
-    // inReplyTo: x_message_id of the previous message (for threading).
+    // Routes to Signal or MLS encryption based on the session's mode. The body
+    // x-reply-to is the conversation's last x-message-id, resolved here.
     SendResult sendMessage(const std::string& account,
                            const std::string& sessionId,
-                           const std::string& plaintext,
-                           const std::string& inReplyTo);
+                           const std::string& plaintext);
 
-    // Handle an incoming encrypted message.
-    // Auto-detects protocol from xMailer and routes to the correct decryptor.
-    RecvResult handleIncoming(const std::string& account,
-                              const std::string& from,
-                              const std::string& xMailer,
-                              const std::string& body,
-                              const std::string& messageId,
-                              const std::string& inReplyTo);
+    // Queue files (filesJson = [{"path","name"}]) with a caption. Routes to 1:1
+    // (1.0.4/1.0.5) or MLS (2.0.4/2.0.5). Returns the response JSON:
+    // {status, message_id, files:[...], batch_id, x_mailer, error?}
+    std::string sendFiles(const std::string& account, const std::string& sessionId,
+                          const std::string& filesJson, const std::string& text);
 
     // Add members to an existing session.
     // If the session is Signal and the total member count exceeds 2, the session
-    // is automatically (and irreversibly) upgraded to MLS.
-    // inReplyTo: x_reply_to for the upgrade invite (last message id of the
-    // conversation; pass "" when unknown).
+    // is automatically (and irreversibly) upgraded to MLS; the upgrade invite
+    // replies to the conversation's last x-message-id.
     SendResult addMembers(const std::string& account,
                           const std::string& sessionId,
-                          const std::vector<std::string>& newMembers,
-                          const std::string& inReplyTo = "");
+                          const std::vector<std::string>& newMembers);
 
     // Query all active sessions for an account.
     std::vector<UnifiedSession> listSessions(const std::string& account);

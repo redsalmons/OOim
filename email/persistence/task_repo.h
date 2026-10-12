@@ -40,6 +40,10 @@ public:
     // Query sendable tasks for a specific account (status=0 and due), ordered by id ASC
     std::vector<TaskRecord> queryPending(const std::string& account, int limit = 10);
 
+    // (message_id, in_reply_to) of every queued, non-chunk task — the not-yet-sent
+    // tail of conversations, used to continue the x-reply-to chain.
+    std::vector<std::pair<std::string, std::string>> queryOutboxLinks();
+
     // Query one task by account + message_id (for GUI outbox status)
     bool queryByMessageId(const std::string& account, const std::string& messageId, TaskRecord& out);
 

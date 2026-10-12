@@ -74,6 +74,34 @@ std::vector<EmailRecord> EmailRepo::queryByAccount(const std::string& account) {
     return result;
 }
 
+std::vector<ChainRow> EmailRepo::queryChainRows(const std::string& account) {
+    std::vector<ChainRow> result;
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return result;
+
+    const char* sql =
+        "SELECT id, message_id, COALESCE(in_reply_to, ''), COALESCE(from_addr, ''), "
+        "COALESCE(date, ''), COALESCE(x_mailer, ''), COALESCE(is_sent, 0) "
+        "FROM localemail WHERE account = ? AND message_id IS NOT NULL AND message_id != '' "
+        "ORDER BY id ASC;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ChainRow r;
+        r.rowid = sqlite3_column_int64(stmt, 0);
+        r.messageId = (const char*)sqlite3_column_text(stmt, 1);
+        r.inReplyTo = (const char*)sqlite3_column_text(stmt, 2);
+        r.fromAddr = (const char*)sqlite3_column_text(stmt, 3);
+        r.date = (const char*)sqlite3_column_text(stmt, 4);
+        r.xMailer = (const char*)sqlite3_column_text(stmt, 5);
+        r.isSent = sqlite3_column_int(stmt, 6);
+        result.push_back(std::move(r));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 bool EmailRepo::addEmailToGroupSession(const std::string& account, int64_t groupId, int64_t emailId, int encryptMethod) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();

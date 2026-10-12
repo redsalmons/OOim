@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import '../../native/email_core.dart' as native;
-import '../../native/unified_session.dart';
+import 'package:oim_core/native/email_core.dart' as native;
+import 'package:oim_core/native/unified_session.dart';
 import 'email_module_base.dart';
 import '../dialogs/email_config_dialog.dart';
 import '../dialogs/create_session_dialog.dart';
-import '../../i18n/app_strings.dart';
+import 'package:oim_core/i18n/app_strings.dart';
 import '../app_theme.dart';
 
 mixin EmailListViewMixin on State<EmailModule> {
@@ -26,7 +26,6 @@ mixin EmailListViewMixin on State<EmailModule> {
   List<UnifiedSessionInfo> get unifiedSessions;
   String? get selectedUnifiedSessionId;
   set selectedUnifiedSessionId(String? v);
-  List<native.EmailMessage> get unifiedMessages;
   void loadUnifiedSessions();
   void loadUnifiedSessionMessages(String unifiedSessionId);
 

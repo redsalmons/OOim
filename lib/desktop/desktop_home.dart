@@ -3,7 +3,7 @@ import 'modules/email_module.dart';
 import 'modules/contacts_module.dart';
 import 'modules/settings_module.dart';
 import 'app_theme.dart';
-import '../i18n/app_strings.dart';
+import 'package:oim_core/i18n/app_strings.dart';
 
 class DesktopHome extends StatefulWidget {
   const DesktopHome({super.key});

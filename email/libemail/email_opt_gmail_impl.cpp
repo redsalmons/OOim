@@ -1,4 +1,3 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "email_opt_gmail_impl.h"
 #include "email_handler.h"
 #include "email_core.h"
@@ -9,6 +8,7 @@
 #include "session_repo.h"
 #include "logger.h"
 #include <httplib.h>
+#include "https_client.h"
 #include <random>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
@@ -230,27 +230,21 @@ bool EmailOptGmailImpl::refresh_token() {
         return false;
     }
 
-    // Use httplib client to refresh token
-    httplib::SSLClient client("oauth2.googleapis.com", 443);
-
     std::string post_data = "client_id=" + client_id_ +
                            "&client_secret=" + client_secret_ +
                            "&refresh_token=" + refresh_token_ +
                            "&grant_type=refresh_token";
 
-    httplib::Headers headers = {
-        {"Content-Type", "application/x-www-form-urlencoded"}
-    };
+    https::Response res = https::request("POST", "https://oauth2.googleapis.com/token", {},
+                                         post_data, "application/x-www-form-urlencoded");
 
-    auto res = client.Post("/token", headers, post_data, "application/x-www-form-urlencoded");
-
-    if (!res || res->status != 200) {
-        last_error_ = "Token refresh failed with status: " + std::to_string(res ? res->status : 0);
+    if (res.status != 200) {
+        last_error_ = "Token refresh failed with status: " + std::to_string(res.status) + " " + res.error;
         return false;
     }
 
     // Parse JSON response to extract access token
-    std::string access_token = parse_json_field(res->body, "access_token");
+    std::string access_token = parse_json_field(res.body, "access_token");
     if (access_token.empty()) {
         last_error_ = "Failed to parse access token from response";
         return false;
@@ -573,23 +567,8 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
             msg_id = generate_x_message_id(email_);
         }
 
-        // Legacy encryption disabled — all encryption handled by Signal protocol
-        std::string bodyToSend = body;
-        bool needsEncryption = false;
-
-        // PREKEY_BUNDLE (1.0.0) is plaintext JSON built by the transport layer: stamp
-        // x_message_id / x_reply_to into the body (all other types get them from the
-        // Signal/MLS layer).
-        if (x_session_chart == XMailer::PREKEY_BUNDLE) {
-            try {
-                auto bodyJson = nlohmann::json::parse(bodyToSend);
-                bodyJson["x_message_id"] = msg_id;
-                bodyJson["x_reply_to"] = in_reply_to;
-                bodyToSend = bodyJson.dump();
-            } catch (...) {
-                LOG_INFO("Gmail send_email: PREKEY_BUNDLE body is not JSON, ids not injected\n");
-            }
-        }
+        // Protocol content is produced upstream (Signal/MLS layer); sent verbatim.
+        const std::string& bodyToSend = body;
 
         // Protocol bodies travel as a zip-packed message.oim attachment so
         // external mail clients only see the notice text.
@@ -677,7 +656,7 @@ bool EmailOptGmailImpl::send_email(const std::string& folder, const std::string&
                     }
 
                     char session_buffer[8192];
-                    int encMethod = needsEncryption ? 1 : (encrypt_method == 1 ? 1 : 0);
+                    int encMethod = encrypt_method == 1 ? 1 : 0;
                     int session_result = email_add_email_to_session(
                         sid.c_str(), email_id.c_str(), owner_account.c_str(),
                         encMethod, session_buffer, sizeof(session_buffer)
@@ -1071,29 +1050,23 @@ std::string EmailOptGmailImpl::get_authorization_url(const std::string& redirect
 
 bool EmailOptGmailImpl::exchange_code_for_token(const std::string& code,
                                                const std::string& code_verifier) {
-    // Use httplib client to exchange code for token
-    httplib::SSLClient client("oauth2.googleapis.com", 443);
-
     std::string post_data = "client_id=" + client_id_ +
                            "&client_secret=" + client_secret_ +
                            "&code=" + code +
                            "&grant_type=authorization_code" +
                            "&code_verifier=" + code_verifier;
 
-    httplib::Headers headers = {
-        {"Content-Type", "application/x-www-form-urlencoded"}
-    };
+    https::Response res = https::request("POST", "https://oauth2.googleapis.com/token", {},
+                                         post_data, "application/x-www-form-urlencoded");
 
-    auto res = client.Post("/token", headers, post_data, "application/x-www-form-urlencoded");
-
-    if (!res || res->status != 200) {
-        last_error_ = "Token exchange failed with status: " + std::to_string(res ? res->status : 0);
+    if (res.status != 200) {
+        last_error_ = "Token exchange failed with status: " + std::to_string(res.status) + " " + res.error;
         return false;
     }
 
     // Parse JSON response
-    std::string access_token = parse_json_field(res->body, "access_token");
-    std::string refresh_token = parse_json_field(res->body, "refresh_token");
+    std::string access_token = parse_json_field(res.body, "access_token");
+    std::string refresh_token = parse_json_field(res.body, "refresh_token");
 
     if (access_token.empty()) {
         last_error_ = "Failed to parse access token from response";

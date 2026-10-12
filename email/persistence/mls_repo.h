@@ -17,6 +17,21 @@ public:
     std::string getMlsGroupId(const std::string& groupId);
     // Reverse lookup: local group_id for (account, mls_group_id). Empty if none.
     std::string findGroupIdByMlsGroupId(const std::string& account, const std::string& mlsGroupIdHex);
+
+    // --- member bindings (email <-> identity key <-> MLS signature key) ---
+    struct Binding {
+        std::string email;
+        std::string ikPub;   // PEM
+        std::string mlsKey;  // hex
+        std::string sig;     // base64 ECDSA(IK, binding payload)
+    };
+    bool upsertBinding(const std::string& groupId, const Binding& b);
+    bool loadBinding(const std::string& groupId, const std::string& email, Binding& out);
+    std::vector<Binding> listBindings(const std::string& groupId);
+
+    // --- post-compromise-security bookkeeping ---
+    int64_t lastUpdateAt(const std::string& groupId);
+    bool setLastUpdateAt(const std::string& groupId, int64_t ts);
 };
 
 #endif // PERSISTENCE_MLS_REPO_H

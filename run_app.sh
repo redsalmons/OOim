@@ -45,7 +45,7 @@ cp /Users/steven/Cascade/OIM/email/build/libemail_core.dylib "$FRAMEWORKS_DIR/"
 # Copy native dependencies (universal arm64+x86_64)
 echo "Copying native dependencies..."
 UNIV_LIBS="/Users/steven/Cascade/OIM/email/deps/univ-libs/lib"
-for lib in libgnutls.30 libintl.8 libp11-kit.0 libidn2.0 libunistring.5 libtasn1.6 libhogweed.7 libnettle.9 libhogweed.6 libnettle.8 libgmp.10 libgsasl.18; do
+for lib in libintl.8 libgsasl.18; do
     src="$UNIV_LIBS/$lib.dylib"
     if [ -f "$src" ] && [ ! -f "$FRAMEWORKS_DIR/$lib.dylib" ]; then
         cp "$src" "$FRAMEWORKS_DIR/$lib.dylib"
@@ -53,11 +53,6 @@ for lib in libgnutls.30 libintl.8 libp11-kit.0 libidn2.0 libunistring.5 libtasn1
     fi
 done
 
-# Also copy libvmime (universal build)
-if [ ! -f "$FRAMEWORKS_DIR/libvmime.1.dylib" ]; then
-    cp /Users/steven/Cascade/OIM/email/deps/vmime-univ-install/lib/libvmime.1.dylib "$FRAMEWORKS_DIR/"
-    echo "  Copied libvmime.1.dylib"
-fi
 
 # Fix library paths (multiple passes to handle nested dependencies)
 echo "Fixing library paths..."

@@ -16,7 +16,7 @@ struct SignalSessionRecord {
     std::string recvChainKey;   // base64
     int sendN = 0;
     int recvN = 0;
-    int prevRecvN = 0;
+    int prevSendN = 0;         // length of the previous sending chain (header pn)
     std::string dhSelfPriv;     // encrypted PEM
     std::string dhSelfPub;      // PEM
     std::string dhSelfPassword; // password for dhSelfPriv
@@ -52,16 +52,6 @@ public:
     // Check if a session exists
     bool sessionExists(const std::string& account, const std::string& peerEmail,
                        const std::string& sessionId);
-
-    // Check if the peer has responded (recv_n > 0 or recv_chain_key not empty)
-    bool hasReceivedBySessionId(const std::string& account, const std::string& sessionId);
-
-    // Check if this side can send: DR session exists AND (send_n == 0 OR recv_n > 0)
-    bool canSendBySessionId(const std::string& account, const std::string& sessionId);
-
-    // Mark that peer has responded (set recv_n to at least 1)
-    // Used when PREKEY_BUNDLE is received (peer acknowledged the session)
-    bool markReceivedBySessionId(const std::string& account, const std::string& sessionId);
 
     // Record that the key exchange with this session's peer is complete: this side holds
     // the peer's keys and the peer provably holds ours. Set once, never cleared by the

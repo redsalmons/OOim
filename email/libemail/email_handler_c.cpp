@@ -55,14 +55,17 @@ int systemOpen_c(const char* dataDir,
         // Get singleton instance and call systemOpen with callback
         auto handler = oemailim::EmailHandler::getInstance();
         
-        // Create a lambda that calls the C-style callback
+        // Create a lambda that resolves the C-style callback at call time so
+        // Dart can register it (oemailim_set_callback) before or after init.
+        // The json is strdup'd because Dart's NativeCallable.listener receives
+        // the pointer asynchronously on another isolate; the Dart side frees it.
         oemailim::NotificationCallback callback = nullptr;
-        CNotificationCallback localCallback = g_cNotificationCallback;
-        if (localCallback) {
-            callback = [localCallback](int configIndex, int messageType, const std::string& json) {
-                localCallback(configIndex, messageType, json.c_str());
-            };
-        }
+        callback = [](int configIndex, int messageType, const std::string& json) {
+            CNotificationCallback cb = g_cNotificationCallback;
+            if (cb) {
+                cb(configIndex, messageType, strdup(json.c_str()));
+            }
+        };
         
         return handler->systemOpen(
             std::string(dataDir),
@@ -1003,7 +1006,8 @@ extern "C" int EmailGetMaxUid_c(const char* account, const char* folder, char* o
     if (!conn.get()) return -1;
     
     std::string maxUid = s_emailRepo.getMaxUid(account, folder);
-    if (!maxUid.empty() && outUid && outSize > 0) {
+    if (maxUid.empty()) maxUid = "0";
+    if (outUid && outSize > 0) {
         snprintf(outUid, outSize, "%s", maxUid.c_str());
     }
     

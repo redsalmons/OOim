@@ -332,7 +332,7 @@ std::vector<UnifiedSession> UnifiedSessionRepo::listByAccount(const std::string&
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
                       "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
-                      "FROM unified_session WHERE account=? AND status=0 "
+                      "FROM unified_session WHERE account=? AND status IN (0,2) "
                       "ORDER BY updated_at DESC;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
@@ -397,6 +397,23 @@ bool UnifiedSessionRepo::close(const std::string& sessionId) {
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
 
     sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+bool UnifiedSessionRepo::setStatus(const std::string& sessionId, int status) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return false;
+
+    const char* sql = "UPDATE unified_session SET status=?, "
+                      "updated_at=datetime('now','localtime') "
+                      "WHERE session_id=?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    sqlite3_bind_int(stmt, 1, status);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;

@@ -9,6 +9,8 @@
 // Shared global database handle and mutex
 extern sqlite3* g_db;
 extern std::mutex g_db_mutex;
+// Creates (or, on layout change, recreates) the Signal protocol tables in db.
+void email_db_create_signal_tables(sqlite3* db);
 
 // Utility functions shared across modules
 std::string generate_email_id(const char* type);
@@ -27,10 +29,10 @@ const char* oim_notice_text();
 std::vector<uint8_t> oim_zip_pack(const std::string& text);
 std::string oim_zip_unpack(const std::vector<uint8_t>& zipData); // empty on failure
 std::string compute_md5(const std::string& input);
-std::string ecc_encrypt_with_public_key(const std::string& pubPem, const std::string& plaintext);
-std::string ecc_decrypt_with_private_key(const std::string& privPem, const std::string& keyPassword, const std::string& ciphertext);
 std::vector<uint8_t> zlib_compress(const std::vector<uint8_t>& data);
 std::vector<uint8_t> zlib_decompress(const std::vector<uint8_t>& compressed);
+// text/plain and text/html parts of the stored (decrypted) body of localemail.id.
+bool parse_stored_body_text(int64_t emailId, std::string& textBody, std::string& htmlBody);
 char* trim_newline(char* s);
 void set_field(char** field, const char* value);
 

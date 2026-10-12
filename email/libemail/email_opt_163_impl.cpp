@@ -927,36 +927,6 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         LOG_INFO("163 send_email: using session_id=%s\n", sid.c_str());
 
-        // Primary recipient for Signal protocol: first non-self address in recipient list
-        std::string primaryRecipient;
-        {
-            auto trim = [](std::string& s) {
-                size_t b = s.find_first_not_of(" \t");
-                size_t e = s.find_last_not_of(" \t");
-                if (b == std::string::npos) { s.clear(); return; }
-                s = s.substr(b, e - b + 1);
-            };
-
-            std::string recStr(recipient);
-            size_t start = 0, end;
-            while ((end = recStr.find(',', start)) != std::string::npos) {
-                std::string addr = recStr.substr(start, end - start);
-                trim(addr);
-                if (!addr.empty() && addr != email_) {
-                    primaryRecipient = addr;
-                    break;
-                }
-                start = end + 1;
-            }
-            if (primaryRecipient.empty()) {
-                std::string addr = recStr.substr(start);
-                trim(addr);
-                if (!addr.empty() && addr != email_) {
-                    primaryRecipient = addr;
-                }
-            }
-        }
-
         // Generate message_id early so it can be injected into body
         std::string msg_id;
         if (!message_id.empty()) {
@@ -966,163 +936,11 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             msg_id = generate_x_message_id(email_);
         }
 
-        // For group messages, ensure all members' Sender Keys are ready before sending
-        if (XMailer::isMls(x_session_chart) && x_session_chart != XMailer::MLS_KEY_PACKAGE) {
-            // MLS messages: no pre-send validation here; the task processor handles encryption
-            // and the Rust library validates group state. Just log for visibility.
-            LOG_INFO("163 send_email: MLS message x_mailer=%s\n", x_session_chart.c_str());
-        }
-
-        // Inject x_message_id and last_message_id into body for encrypted and exchange types
-        std::string bodyToSend = body;
-
-        // PREKEY_BUNDLE (1.0.0) is sent as plaintext JSON by the transport layer, so it
-        // is the one message type whose body ids are stamped here: x_message_id (this
-        // message's identity) and x_reply_to (the bundle it answers, "" for the
-        // conversation root). Every other type has them stamped by the Signal/MLS layer.
-        if (x_session_chart == XMailer::PREKEY_BUNDLE) {
-            try {
-                auto bodyJson = nlohmann::json::parse(bodyToSend);
-                bodyJson["x_message_id"] = msg_id;
-                bodyJson["x_reply_to"] = in_reply_to;
-                bodyToSend = bodyJson.dump();
-            } catch (...) {
-                LOG_INFO("163 send_email: PREKEY_BUNDLE body is not JSON, ids not injected\n");
-            }
-        }
-
-        // Signal protocol integration
-        bool useSignal = false;
-        std::string signalSessionId;  // Signal session id (sig_xxx) from session_initiate
-
-        // Check if a Signal session already exists for (account, primaryRecipient)
-        int signalExists = 0;
-        if (!primaryRecipient.empty()) {
-            signalExists = signal_session_exists(email_.c_str(), primaryRecipient.c_str(), "");
-            LOG_INFO("163 send_email: signal_session_exists(account=%s, peer=%s) = %d\n",
-                     email_.c_str(), primaryRecipient.c_str(), signalExists);
-        }
-
-        // New encrypted session: encrypt_method=1 and no existing email session
-        // For new conversations (no session_id), always use SESSION_INIT
-        // even if a Signal session exists from a previous conversation
-        if (XMailer::isMls(x_session_chart)) {
-            // 1:n MLS messages (2.0.x) are never touched by the 1:1 Double Ratchet,
-            // even when x_reply_to points into a former 1:1 conversation (Signal->MLS
-            // upgrade invite). The task processor already produced the final body.
-            LOG_INFO("163 send_email: MLS message x_mailer=%s, skipping Signal layer\n",
-                     x_session_chart.c_str());
-        } else if (pre_encrypted) {
-            // Already a Signal envelope; mark as such so the RATCHET_MSG guard below
-            // and the local-storage logic treat it as a Signal send.
-            useSignal = true;
-            LOG_INFO("163 send_email: body pre-encrypted by unified layer, sending verbatim (x_mailer=%s)\n",
-                     x_session_chart.c_str());
-        } else if (encrypt_method == 1 && session_id.empty() && !primaryRecipient.empty()) {
-            LOG_INFO("163 send_email: using Signal session_initiate for new encrypted session\n");
-            int initRc = signal_init_account(email_.c_str());
-            LOG_INFO("163 send_email: signal_init_account rc=%d\n", initRc);
-
-            char sigBuf[65536];
-            int sigRc = signal_session_initiate(
-                email_.c_str(),
-                primaryRecipient.c_str(),
-                body.c_str(),
-                sigBuf,
-                sizeof(sigBuf),
-                msg_id.c_str(),
-                in_reply_to.c_str()
-            );
-            if (sigRc == 0) {
-                try {
-                    auto sigResp = nlohmann::json::parse(sigBuf);
-                    if (sigResp.value("status", "") == "success") {
-                        auto msgJson = sigResp["message"];
-                        signalSessionId = sigResp.value("session_id", "");
-                        LOG_INFO("163 send_email: Signal session initiated, signal_session_id=%s\n",
-                                 signalSessionId.c_str());
-                        bodyToSend = msgJson.dump();
-                        x_session_chart = XMailer::SESSION_INIT;
-                        useSignal = true;
-                    } else {
-                        LOG_INFO("163 send_email: signal_session_initiate returned error status\n");
-                    }
-                } catch (const std::exception& e) {
-                    LOG_INFO("163 send_email: failed to parse signal_session_initiate resp: %s\n", e.what());
-                }
-            } else {
-                LOG_INFO("163 send_email: signal_session_initiate failed rc=%d, peer prekey missing\n", sigRc);
-                last_error_ = "Peer prekey not available";
-                return false;
-            }
-        } else if (signalExists > 0 && !primaryRecipient.empty() && !sid.empty() &&
-                   original_x_session_chart != XMailer::PREKEY_BUNDLE) {
-            // Existing Signal session: encrypt this message via Double Ratchet
-            // Use the Signal session_id stored for this email session
-            // Skip encryption for PREKEY_BUNDLE — it should be sent as-is (unencrypted)
-            static SessionRepo s_sessionRepo;
-            std::string signalSid = s_sessionRepo.getSignalSessionId(sid);
-            LOG_INFO("163 send_email: using Signal session_encrypt for session %s, signal_session=%s\n",
-                     sid.c_str(), signalSid.c_str());
-            char sigBuf[65536];
-            int sigRc = signal_session_encrypt(
-                email_.c_str(),
-                primaryRecipient.c_str(),
-                signalSid.c_str(),
-                body.c_str(),
-                sigBuf,
-                sizeof(sigBuf),
-                msg_id.c_str(),
-                in_reply_to.c_str()
-            );
-            if (sigRc == 0) {
-                try {
-                    auto sigResp = nlohmann::json::parse(sigBuf);
-                    if (sigResp.value("status", "") == "success") {
-                        auto msgJson = sigResp["message"];
-                        bodyToSend = msgJson.dump();
-                        x_session_chart = XMailer::RATCHET_MSG;
-                        useSignal = true;
-                    } else {
-                        LOG_INFO("163 send_email: signal_session_encrypt returned error status\n");
-                    }
-                } catch (const std::exception& e) {
-                    LOG_INFO("163 send_email: failed to parse signal_session_encrypt resp: %s\n", e.what());
-                }
-            } else {
-                LOG_INFO("163 send_email: signal_session_encrypt failed rc=%d, Signal session not ready\n", sigRc);
-                last_error_ = "Signal session not ready for peer";
-                return false;
-            }
-        }
-
-        // Legacy encryption path removed — all encryption handled by Signal protocol above
-        bool needsEncryption = false;
-        bool needsInjection = false;
-        if (needsInjection) {
-            try {
-                auto bodyJson = nlohmann::json::parse(body);
-                bodyJson["x_message_id"] = msg_id;
-                bodyJson["last_message_id"] = in_reply_to;
-                bodyToSend = bodyJson.dump();
-            } catch (...) {
-                nlohmann::json bodyJson;
-                bodyJson["text"] = body;
-                bodyJson["x_message_id"] = msg_id;
-                bodyJson["last_message_id"] = in_reply_to;
-                bodyToSend = bodyJson.dump();
-            }
-        }
-        if (needsEncryption) {
-            std::vector<char> encBody(8 * 1024 * 1024);
-            int encRc = email_prepare_data_body(bodyToSend.c_str(), recipient.c_str(), email_.c_str(), sid.c_str(), encBody.data(), (int)encBody.size());
-            if (encRc == 0) {
-                bodyToSend = encBody.data();
-                LOG_INFO("163 send_email: encrypted data body, len=%zu\n", bodyToSend.size());
-            } else {
-                LOG_INFO("163 send_email: email_prepare_data_body failed, rc=%d, sending plaintext\n", encRc);
-            }
-        }
+        // The transport never touches protocol content: Signal (1:1) bodies arrive
+        // pre-encrypted, MLS (1:n) bodies are produced by the task processor, and
+        // PREKEY_BUNDLE carries its body ids from the protocol layer.
+        const std::string& bodyToSend = body;
+        const bool useSignal = pre_encrypted;
 
         if (!useSignal && original_x_session_chart == XMailer::RATCHET_MSG) {
             last_error_ = "No active Signal session for peer";
@@ -1270,15 +1088,12 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                         LOG_INFO("163 send_email: %s created session_id=%s (rowid=%s)\n", x_session_chart.c_str(), sid.c_str(), email_id.c_str());
                     }
 
-                    // Save Signal session_id mapping to email session
-                    // (moved after email_add_email_to_session below, since the session row must exist first)
-
                     // MLS group messages only borrow the SMTP channel for transport; they are
                     // associated with their group session by the task processor, never with 1:1.
                     bool isGroupMsg = XMailer::isMls(original_x_session_chart);
                     if (!isGroupMsg) {
                         char session_buffer[8192];
-                        int encMethod = needsEncryption ? 1 : (encrypt_method == 1 ? 1 : 0);
+                        int encMethod = encrypt_method == 1 ? 1 : 0;
                         int session_result = email_add_email_to_session(
                             sid.c_str(),
                             email_id.c_str(),
@@ -1295,13 +1110,6 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
                         }
                     }
 
-                    // Now save Signal session_id mapping (session row exists at this point)
-                    if (!sid.empty() && !signalSessionId.empty()) {
-                        static SessionRepo s_sessionRepo;
-                        s_sessionRepo.setSignalSessionId(sid, signalSessionId);
-                        LOG_INFO("163 send_email: saved signal_session_id=%s for email session=%s\n",
-                                 signalSessionId.c_str(), sid.c_str());
-                    }
                 }
             } catch (const std::exception& e) {
                 LOG_INFO("163 send_email: failed to parse insert response: %s\n", e.what());

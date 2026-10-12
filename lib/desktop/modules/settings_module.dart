@@ -1,12 +1,12 @@
 import 'dart:io';
 import 'dart:convert';
-import '../../native/email_core.dart' as native;
+import 'package:oim_core/native/email_core.dart' as native;
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../dialogs/email_config_dialog.dart';
-import '../../i18n/app_strings.dart';
+import 'package:oim_core/i18n/app_strings.dart';
 import '../../main.dart' show appThemeMode, appTextScale, kTextScaleSmall, kTextScaleMedium, kTextScaleLarge;
-import '../../i18n/app_strings.dart' show appLocale;
+import 'package:oim_core/i18n/app_strings.dart' show appLocale;
 import '../app_theme.dart';
 import '../user_prefs.dart';
 

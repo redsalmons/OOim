@@ -9,8 +9,8 @@ import 'desktop/desktop_home.dart';
 import 'desktop/dialogs/email_config_dialog.dart';
 import 'desktop/app_theme.dart';
 import 'desktop/user_prefs.dart';
-import 'native/email_core.dart' as native;
-import 'i18n/app_strings.dart' show AppStrings, appLocale;
+import 'package:oim_core/native/email_core.dart' as native;
+import 'package:oim_core/i18n/app_strings.dart' show AppStrings, appLocale;
 
 void main(List<String> args) {
   if (args.isNotEmpty && args[0] == 'multi_window') {

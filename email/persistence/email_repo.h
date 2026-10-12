@@ -29,6 +29,18 @@ struct EmailRecord {
     std::string xMailer;
 };
 
+// Minimal row used to rebuild conversations from the body x-message-id /
+// x-reply-to chain (localemail.message_id / in_reply_to hold the body ids).
+struct ChainRow {
+    int64_t rowid = 0;
+    std::string messageId;
+    std::string inReplyTo;
+    std::string fromAddr;
+    std::string date;
+    std::string xMailer;
+    int isSent = 0;
+};
+
 struct PendingEmail {
     std::string uuid;
     std::string folder;
@@ -39,6 +51,9 @@ class EmailRepo {
 public:
     // Query all emails for an account (with session join)
     std::vector<EmailRecord> queryByAccount(const std::string& account);
+
+    // All rows of an account that carry a body x-message-id, ordered by rowid.
+    std::vector<ChainRow> queryChainRows(const std::string& account);
 
     // Query thread roots (first email of each session for an account)
     std::vector<EmailRecord> queryThreadRoots(const std::string& account);

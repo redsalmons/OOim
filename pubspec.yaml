@@ -10,6 +10,8 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.2
+  oim_core:
+    path: packages/oim_core
   ffi: ^2.1.0
   desktop_multi_window: ^0.2.1
   path_provider: ^2.1.0

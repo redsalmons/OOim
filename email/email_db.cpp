@@ -50,6 +50,126 @@ static void set_aside_unreadable_db(const char* path) {
     LOG_INFO("[DB] unreadable database moved aside: %s\n", bakPath.c_str());
 }
 
+int email_set_db_master_key(const char* hex) {
+#if defined(__ANDROID__)
+    if (!hex || strlen(hex) != 64) return -1;
+    keychain_store::inject_db_master_key_hex(hex);
+    return 0;
+#else
+    (void)hex;
+    return -1;
+#endif
+}
+
+// Signal protocol tables (wire format v2). The layout changed incompatibly
+// (account-level IK, per-session SPK/peer bundle, TOFU peer identity, AEAD
+// sessions), so any table from the v1 layout is dropped and recreated.
+void email_db_create_signal_tables(sqlite3* db) {
+    char* err = NULL;
+    auto exec = [&](const char* sql) {
+        if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+            LOG_INFO("SQL error (signal schema): %s\n", err ? err : "?");
+        }
+        if (err) { sqlite3_free(err); err = NULL; }
+    };
+
+    int version = 0;
+    exec("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);");
+    sqlite3_stmt* st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT value FROM schema_meta WHERE key='signal_schema';", -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+            version = atoi((const char*)sqlite3_column_text(st, 0));
+        sqlite3_finalize(st);
+    }
+    if (version != 2) {
+        LOG_INFO("Signal schema %d -> 2: recreating signal tables\n", version);
+        exec("DROP TABLE IF EXISTS signal_identity;");
+        exec("DROP TABLE IF EXISTS signal_prekey;");
+        exec("DROP TABLE IF EXISTS signal_session;");
+        exec("DROP TABLE IF EXISTS signal_skipped_key;");
+        exec("DROP TABLE IF EXISTS signal_peer_prekey;");
+        exec("DROP TABLE IF EXISTS signal_peer_identity;");
+        exec("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('signal_schema', '2');");
+    }
+
+    exec("CREATE TABLE IF NOT EXISTS signal_identity ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "account TEXT NOT NULL UNIQUE,"
+         "ik_pub TEXT NOT NULL,"
+         "ik_priv TEXT NOT NULL,"
+         "ik_password TEXT,"
+         "created_at TEXT DEFAULT (datetime('now','localtime'))"
+         ");");
+
+    exec("CREATE TABLE IF NOT EXISTS signal_prekey ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "account TEXT NOT NULL,"
+         "session_uuid TEXT NOT NULL,"
+         "pub TEXT NOT NULL,"
+         "priv TEXT NOT NULL,"
+         "password TEXT,"
+         "signature TEXT NOT NULL,"
+         "created_at TEXT DEFAULT (datetime('now','localtime')),"
+         "UNIQUE(account, session_uuid)"
+         ");");
+    exec("CREATE INDEX IF NOT EXISTS idx_signal_prekey_pub ON signal_prekey(account, pub);");
+
+    exec("CREATE TABLE IF NOT EXISTS signal_session ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "account TEXT NOT NULL,"
+         "peer_email TEXT NOT NULL,"
+         "session_id TEXT NOT NULL,"
+         "root_key TEXT NOT NULL,"
+         "send_chain_key TEXT,"
+         "recv_chain_key TEXT,"
+         "send_n INTEGER DEFAULT 0,"
+         "recv_n INTEGER DEFAULT 0,"
+         "prev_send_n INTEGER DEFAULT 0,"
+         "dh_self_priv TEXT,"
+         "dh_self_pub TEXT,"
+         "dh_self_password TEXT,"
+         "dh_peer_pub TEXT,"
+         "status INTEGER DEFAULT 0,"
+         "kex_done INTEGER DEFAULT 0,"
+         "created_at TEXT DEFAULT (datetime('now','localtime')),"
+         "updated_at TEXT DEFAULT (datetime('now','localtime')),"
+         "UNIQUE(account, peer_email, session_id)"
+         ");");
+    exec("CREATE INDEX IF NOT EXISTS idx_signal_session_account ON signal_session(account, peer_email);");
+
+    exec("CREATE TABLE IF NOT EXISTS signal_skipped_key ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "session_id TEXT NOT NULL,"
+         "peer_dh_pub TEXT NOT NULL,"
+         "msg_index INTEGER NOT NULL,"
+         "message_key TEXT NOT NULL,"
+         "created_at TEXT DEFAULT (datetime('now','localtime')),"
+         "UNIQUE(session_id, peer_dh_pub, msg_index)"
+         ");");
+    exec("CREATE INDEX IF NOT EXISTS idx_signal_skipped_key_session ON signal_skipped_key(session_id);");
+
+    exec("CREATE TABLE IF NOT EXISTS signal_peer_prekey ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "account TEXT NOT NULL,"
+         "peer_email TEXT NOT NULL,"
+         "session_uuid TEXT NOT NULL,"
+         "ik_pub TEXT NOT NULL,"
+         "spk_pub TEXT NOT NULL,"
+         "spk_sig TEXT NOT NULL,"
+         "received_at TEXT DEFAULT (datetime('now','localtime')),"
+         "UNIQUE(account, peer_email, session_uuid)"
+         ");");
+
+    exec("CREATE TABLE IF NOT EXISTS signal_peer_identity ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "account TEXT NOT NULL,"
+         "peer_email TEXT NOT NULL,"
+         "ik_pub TEXT NOT NULL,"
+         "first_seen TEXT DEFAULT (datetime('now','localtime')),"
+         "UNIQUE(account, peer_email)"
+         ");");
+}
+
 int email_db_init(const char* path) {
     if (g_db != NULL) {
         // Already initialized via legacy path
@@ -166,85 +286,7 @@ int email_db_init(const char* path) {
         sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_file_chunk_file_id ON file_chunk(file_id);", NULL, NULL, &err);
         if (err) sqlite3_free(err);
 
-        // Signal protocol tables (v1)
-        sqlite3_exec(g_db, "CREATE TABLE IF NOT EXISTS signal_identity ("
-                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                           "account TEXT NOT NULL UNIQUE,"
-                           "ik_pub TEXT NOT NULL,"
-                           "ik_priv TEXT NOT NULL,"
-                           "ik_password TEXT,"
-                           "session_uuid TEXT,"
-                           "created_at TEXT DEFAULT (datetime('now','localtime'))"
-                           ");", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-
-        sqlite3_exec(g_db, "CREATE TABLE IF NOT EXISTS signal_prekey ("
-                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                           "account TEXT NOT NULL,"
-                           "key_type INTEGER NOT NULL,"
-                           "pub TEXT NOT NULL,"
-                           "priv TEXT NOT NULL,"
-                           "password TEXT,"
-                           "signature TEXT,"
-                           "used INTEGER DEFAULT 0,"
-                           "session_uuid TEXT,"
-                           "created_at TEXT DEFAULT (datetime('now','localtime'))"
-                           ");", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_prekey_account ON signal_prekey(account, key_type, used);", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-
-        sqlite3_exec(g_db, "CREATE TABLE IF NOT EXISTS signal_session ("
-                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                           "account TEXT NOT NULL,"
-                           "peer_email TEXT NOT NULL,"
-                           "session_id TEXT NOT NULL,"
-                           "root_key TEXT NOT NULL,"
-                           "send_chain_key TEXT,"
-                           "recv_chain_key TEXT,"
-                           "send_n INTEGER DEFAULT 0,"
-                           "recv_n INTEGER DEFAULT 0,"
-                           "prev_recv_n INTEGER DEFAULT 0,"
-                           "dh_self_priv TEXT,"
-                           "dh_self_pub TEXT,"
-                           "dh_self_password TEXT,"
-                           "dh_peer_pub TEXT,"
-                           "status INTEGER DEFAULT 0,"
-                           "created_at TEXT DEFAULT (datetime('now','localtime')),"
-                           "updated_at TEXT DEFAULT (datetime('now','localtime')),"
-                           "UNIQUE(account, peer_email, session_id)"
-                           ");", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_session_account ON signal_session(account, peer_email);", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-
-        sqlite3_exec(g_db, "CREATE TABLE IF NOT EXISTS signal_skipped_key ("
-                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                           "session_id TEXT NOT NULL,"
-                           "peer_dh_pub TEXT NOT NULL,"
-                           "msg_index INTEGER NOT NULL,"
-                           "message_key TEXT NOT NULL,"
-                           "created_at TEXT DEFAULT (datetime('now','localtime')),"
-                           "UNIQUE(session_id, peer_dh_pub, msg_index)"
-                           ");", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_skipped_key_session ON signal_skipped_key(session_id);", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-
-        sqlite3_exec(g_db, "CREATE TABLE IF NOT EXISTS signal_peer_prekey ("
-                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                           "account TEXT NOT NULL,"
-                           "peer_email TEXT NOT NULL,"
-                           "ik_pub TEXT NOT NULL,"
-                           "spk_pub TEXT NOT NULL,"
-                           "spk_sig TEXT,"
-                           "opk_pub TEXT,"
-                           "version INTEGER DEFAULT 1,"
-                           "session_uuid TEXT,"
-                           "received_at TEXT DEFAULT (datetime('now','localtime')),"
-                           "UNIQUE(account, peer_email)"
-                           ");", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
+        email_db_create_signal_tables(g_db);
 
         return 0;
     }
@@ -560,119 +602,7 @@ int email_db_init(const char* path) {
         if (err_msg) sqlite3_free(err_msg);
     }
 
-    // Signal protocol tables (v1)
-    const char* sql_signal_identity = "CREATE TABLE IF NOT EXISTS signal_identity ("
-                                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                      "account TEXT NOT NULL UNIQUE,"
-                                      "ik_pub TEXT NOT NULL,"
-                                      "ik_priv TEXT NOT NULL,"
-                                      "ik_password TEXT,"
-                                      "session_uuid TEXT,"
-                                      "created_at TEXT DEFAULT (datetime('now','localtime'))"
-                                      ");";
-    rc = sqlite3_exec(g_db, sql_signal_identity, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (signal_identity): %s\n", err_msg); sqlite3_free(err_msg); }
-
-    const char* sql_signal_prekey = "CREATE TABLE IF NOT EXISTS signal_prekey ("
-                                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                    "account TEXT NOT NULL,"
-                                    "key_type INTEGER NOT NULL,"  // 0=signed_prekey, 1=one_time_prekey
-                                    "pub TEXT NOT NULL,"
-                                    "priv TEXT NOT NULL,"
-                                    "password TEXT,"
-                                    "signature TEXT,"            // only for signed_prekey
-                                    "used INTEGER DEFAULT 0,"     // 0=available, 1=used (for OPK)
-                                    "session_uuid TEXT,"
-                                    "created_at TEXT DEFAULT (datetime('now','localtime'))"
-                                    ");";
-    rc = sqlite3_exec(g_db, sql_signal_prekey, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (signal_prekey): %s\n", err_msg); sqlite3_free(err_msg); }
-    else {
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_prekey_account ON signal_prekey(account, key_type, used);", NULL, NULL, &err_msg);
-        if (err_msg) sqlite3_free(err_msg);
-    }
-
-    const char* sql_signal_session = "CREATE TABLE IF NOT EXISTS signal_session ("
-                                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                     "account TEXT NOT NULL,"        // local account
-                                     "peer_email TEXT NOT NULL,"     // remote peer
-                                     "session_id TEXT NOT NULL,"     // unique session identifier
-                                     "root_key TEXT NOT NULL,"       // base64
-                                     "send_chain_key TEXT,"          // base64, nullable
-                                     "recv_chain_key TEXT,"          // base64, nullable
-                                     "send_n INTEGER DEFAULT 0,"
-                                     "recv_n INTEGER DEFAULT 0,"
-                                     "prev_recv_n INTEGER DEFAULT 0,"
-                                     "dh_self_priv TEXT,"            // current local DH private key (encrypted PEM)
-                                     "dh_self_pub TEXT,"             // current local DH public key (PEM)
-                                     "dh_self_password TEXT,"        // password for DH private key
-                                     "dh_peer_pub TEXT,"             // current peer DH public key (PEM)
-                                     "status INTEGER DEFAULT 0,"     // 0=active, 1=closed
-                                     "kex_done INTEGER DEFAULT 0,"  // peer's keys exchanged and acknowledged
-                                     "created_at TEXT DEFAULT (datetime('now','localtime')),"
-                                     "updated_at TEXT DEFAULT (datetime('now','localtime')),"
-                                     "UNIQUE(account, peer_email, session_id)"
-                                     ");";
-    rc = sqlite3_exec(g_db, sql_signal_session, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (signal_session): %s\n", err_msg); sqlite3_free(err_msg); }
-    else {
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_session_account ON signal_session(account, peer_email);", NULL, NULL, &err_msg);
-        if (err_msg) sqlite3_free(err_msg);
-
-        // A signal_session row is written the moment this side *initiates* X3DH, so row
-        // existence proves only that we hold the peer's keys. kex_done records that the
-        // peer provably holds ours too, which is what gates sending.
-        // A failing ALTER just means the column is already there.
-        if (sqlite3_exec(g_db, "ALTER TABLE signal_session ADD COLUMN kex_done INTEGER DEFAULT 0;", NULL, NULL, NULL) == SQLITE_OK) {
-            // Column is brand new, so every row present now predates the flag. Those
-            // exchanges were negotiated before this check existed and cannot be
-            // re-derived; release them so the gate only constrains new sessions.
-            sqlite3_exec(g_db, "UPDATE signal_session SET kex_done = 1;", NULL, NULL, &err_msg);
-            if (err_msg) sqlite3_free(err_msg);
-        }
-    }
-
-    const char* sql_signal_skipped_key = "CREATE TABLE IF NOT EXISTS signal_skipped_key ("
-                                         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                         "session_id TEXT NOT NULL,"
-                                         "peer_dh_pub TEXT NOT NULL,"
-                                         "msg_index INTEGER NOT NULL,"
-                                         "message_key TEXT NOT NULL,"   // base64
-                                         "created_at TEXT DEFAULT (datetime('now','localtime')),"
-                                         "UNIQUE(session_id, peer_dh_pub, msg_index)"
-                                         ");";
-    rc = sqlite3_exec(g_db, sql_signal_skipped_key, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (signal_skipped_key): %s\n", err_msg); sqlite3_free(err_msg); }
-    else {
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_signal_skipped_key_session ON signal_skipped_key(session_id);", NULL, NULL, &err_msg);
-        if (err_msg) sqlite3_free(err_msg);
-    }
-
-    // Peer prekey cache (store prekey bundles received in-band from other users)
-    const char* sql_peer_prekey = "CREATE TABLE IF NOT EXISTS signal_peer_prekey ("
-                                  "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                  "account TEXT NOT NULL,"          // local account that received it
-                                  "peer_email TEXT NOT NULL,"       // who the prekey belongs to
-                                  "ik_pub TEXT NOT NULL,"
-                                  "spk_pub TEXT NOT NULL,"
-                                  "spk_sig TEXT,"
-                                  "opk_pub TEXT,"
-                                  "version INTEGER DEFAULT 1,"
-                                  "session_uuid TEXT,"
-                                  "received_at TEXT DEFAULT (datetime('now','localtime')),"
-                                  "UNIQUE(account, peer_email)"
-                                  ");";
-    rc = sqlite3_exec(g_db, sql_peer_prekey, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) { LOG_INFO("SQL error (signal_peer_prekey): %s\n", err_msg); sqlite3_free(err_msg); }
-
-    // Migrations: add session_uuid columns to existing tables if missing
-    sqlite3_exec(g_db, "ALTER TABLE signal_identity ADD COLUMN session_uuid TEXT;", NULL, NULL, &err_msg);
-    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
-    sqlite3_exec(g_db, "ALTER TABLE signal_prekey ADD COLUMN session_uuid TEXT;", NULL, NULL, &err_msg);
-    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
-    sqlite3_exec(g_db, "ALTER TABLE signal_peer_prekey ADD COLUMN session_uuid TEXT;", NULL, NULL, &err_msg);
-    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
-    LOG_INFO("Database migrations (session_uuid columns) completed\n");
+    email_db_create_signal_tables(g_db);
 
     // Group messaging tables
     // Migrate: if group_id is not INTEGER, drop and recreate group tables
@@ -751,6 +681,28 @@ int email_db_init(const char* path) {
                                 ");";
     rc = sqlite3_exec(g_db, sql_mls_state, NULL, NULL, &err_msg);
     if (rc != SQLITE_OK) { LOG_INFO("SQL error (mls_state): %s\n", err_msg); sqlite3_free(err_msg); err_msg = NULL; }
+
+    // Verified (email, identity key, MLS signature key) bindings per group: every
+    // leaf in the ratchet tree must be covered by one before its messages count.
+    const char* sql_mls_binding = "CREATE TABLE IF NOT EXISTS mls_member_binding ("
+                                  "group_id TEXT NOT NULL,"
+                                  "email TEXT NOT NULL,"
+                                  "ik_pub TEXT NOT NULL,"
+                                  "mls_key TEXT NOT NULL,"
+                                  "sig TEXT NOT NULL,"
+                                  "created_at TEXT DEFAULT (datetime('now','localtime')),"
+                                  "UNIQUE(group_id, email)"
+                                  ");";
+    rc = sqlite3_exec(g_db, sql_mls_binding, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) { LOG_INFO("SQL error (mls_member_binding): %s\n", err_msg); sqlite3_free(err_msg); err_msg = NULL; }
+
+    // Per-group bookkeeping for post-compromise security (last own leaf refresh).
+    const char* sql_mls_meta = "CREATE TABLE IF NOT EXISTS mls_group_meta ("
+                               "group_id TEXT PRIMARY KEY,"
+                               "last_update_at INTEGER DEFAULT 0"
+                               ");";
+    rc = sqlite3_exec(g_db, sql_mls_meta, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) { LOG_INFO("SQL error (mls_group_meta): %s\n", err_msg); sqlite3_free(err_msg); err_msg = NULL; }
 
     // Legacy Sender Key tables are no longer used
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS sender_key;", NULL, NULL, &err_msg); if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }

@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import '../../i18n/app_strings.dart';
-import '../../native/email_core.dart' as native;
+import 'package:oim_core/i18n/app_strings.dart';
+import 'package:oim_core/native/email_core.dart' as native;
 import '../app_theme.dart';
 
 class ContactsModule extends StatefulWidget {

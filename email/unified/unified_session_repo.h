@@ -66,6 +66,8 @@ public:
     // Close a session (set status=1).
     bool close(const std::string& sessionId);
 
+    bool setStatus(const std::string& sessionId, int status);
+
 private:
     // Helper: serialize members vector to JSON array string.
     static std::string membersToJson(const std::vector<std::string>& members);

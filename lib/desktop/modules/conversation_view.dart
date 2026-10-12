@@ -4,12 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
-import '../../native/email_core.dart' as native;
-import '../../native/unified_session.dart';
+import 'package:oim_core/native/email_core.dart' as native;
+import 'package:oim_core/native/unified_session.dart';
 import 'email_utils.dart';
 import 'email_module_base.dart';
-import 'eml_parser.dart';
-import '../../i18n/app_strings.dart';
+import 'package:oim_core/i18n/app_strings.dart';
 import '../app_theme.dart';
 
 class DroppedFile {
@@ -261,9 +260,9 @@ mixin ConversationViewMixin on State<EmailModule> {
   set selectedUnifiedSessionId(String? v);
   bool get showUnifiedMembers;
   set showUnifiedMembers(bool v);
-  List<native.EmailMessage> get unifiedMessages;
-  List<native.EmailMessage> get pendingUnifiedMessages;
-  void addPendingUnifiedMessage(native.EmailMessage msg);
+  List<SessionMessage> get unifiedMessages;
+  List<SessionMessage> pendingMessagesFor(String sessionId);
+  void addPendingUnifiedMessage(String sessionId, SessionMessage msg);
   void loadUnifiedSessions();
   void loadUnifiedSessionMessages(String unifiedSessionId);
 
@@ -285,7 +284,7 @@ mixin ConversationViewMixin on State<EmailModule> {
 
     final messages = [
       ...unifiedMessages,
-      ...pendingUnifiedMessages.where((p) => p.sessionId == session.sessionId),
+      ...pendingMessagesFor(session.sessionId),
     ];
     final members = session.members;
     final isGroup = members.length > 2;
@@ -536,48 +535,13 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
-  EmlParsedContent? _fileMetaOf(native.EmailMessage msg) {
-    if (msg.pendingFiles.isNotEmpty) {
-      final files = msg.pendingFiles.map((pf) {
-        int received = 0, status = 0;
-        if (pf.fileId.isNotEmpty) {
-          try {
-            final st = jsonDecode(native.EmailCore.fileTransferQuery(pf.fileId));
-            if (st['status'] == 'success') {
-              received = st['received_chunks'] as int? ?? 0;
-              status = st['transfer_status'] as int? ?? 0;
-            }
-          } catch (_) {}
-        }
-        return EmlFileEntry(fileId: pf.fileId, fileName: pf.fileName, fileSize: pf.fileSize,
-            totalChunks: pf.totalChunks, receivedChunks: received, transferStatus: status);
-      }).toList();
-      return EmlParsedContent(isFileMessage: true, files: files,
-          batchId: msg.pendingFiles.first.batchId);
-    }
-    if (msg.file.isEmpty) return null;
-    final parsed = parseEmailBody(msg.rowid, account: msg.account, sessionId: msg.sessionId,
-        fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
-    return parsed.isFileMessage ? parsed : null;
-  }
-
-  Widget _buildUnifiedMessageBubble(native.EmailMessage msg, List<String> members, String myAccount) {
-    final isMe = msg.isSent == 1;
-    bool isHandshake = native.XMailer.isKeyExchange(msg.xMailer);
-    String displayBody = '';
-    EmlParsedContent? fileMeta;
-    if (msg.file.isNotEmpty) {
-      final parsed = parseEmailBody(msg.rowid, account: msg.account, sessionId: msg.sessionId, fromAddr: msg.sender, xMailer: msg.xMailer, isSent: msg.isSent);
-      isHandshake = isHandshake || parsed.isHandshakeMessage;
-      if (parsed.isFileMessage) fileMeta = parsed;
-      displayBody = parsed.textBody;
-    } else if (msg.pendingFiles.isNotEmpty) {
-      fileMeta = _fileMetaOf(msg);
-      displayBody = msg.body;
-    } else if (msg.body.isNotEmpty) {
-      // Message body is directly available from localemail table (no EML file needed)
-      displayBody = msg.body;
-    }
+  Widget _buildUnifiedMessageBubble(SessionMessage msg, List<String> members, String myAccount) {
+    final isMe = msg.isSent;
+    final Widget content = switch (msg.kind) {
+      MessageKind.handshake => const Text('🤝', style: TextStyle(fontSize: 20)),
+      MessageKind.file => _buildFileCard(msg.files, isMe, msg.text),
+      MessageKind.text => SelectableText(msg.text, style: const TextStyle(fontSize: 14)),
+    };
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -603,19 +567,13 @@ mixin ConversationViewMixin on State<EmailModule> {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: context.oim.border),
                   ),
-                  child: isHandshake
-                      ? const Text('🤝', style: TextStyle(fontSize: 20))
-                      : (fileMeta != null
-                          ? _buildFileCard(fileMeta.files, isMe, displayBody)
-                          : SelectableText(displayBody, style: const TextStyle(fontSize: 14))),
+                  child: content,
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  msg.uuid.startsWith('pending_')
-                      ? (AppStrings.isZh ? '发送中…' : 'Sending…')
-                      : msg.timestamp,
+                  msg.pending ? (AppStrings.isZh ? '发送中…' : 'Sending…') : msg.timestamp,
                   style: TextStyle(fontSize: 11,
-                      color: msg.uuid.startsWith('pending_') ? Colors.orange[400] : context.oim.textMuted),
+                      color: msg.pending ? Colors.orange[400] : context.oim.textMuted),
                 ),
               ],
             ),
@@ -637,7 +595,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
-  Widget _buildFileCard(List<EmlFileEntry> metas, bool isMe, String caption) {
+  Widget _buildFileCard(List<SessionFile> metas, bool isMe, String caption) {
     return ConstrainedBox(
       constraints: const BoxConstraints(minWidth: 220, maxWidth: 320),
       child: Column(
@@ -658,7 +616,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
-  Widget _buildFileRow(EmlFileEntry meta, bool isMe) {
+  Widget _buildFileRow(SessionFile meta, bool isMe) {
     final sizeStr = _formatBytes(meta.fileSize);
     final progress = meta.totalChunks > 0 ? meta.receivedChunks / meta.totalChunks : 0.0;
     final done = meta.transferStatus == 1;
@@ -706,7 +664,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
-  Future<void> _saveUnifiedFile(EmlFileEntry meta, bool isMe) async {
+  Future<void> _saveUnifiedFile(SessionFile meta, bool isMe) async {
     try {
       final dir = await FilePicker.getDirectoryPath(dialogTitle: AppStrings.saveFile);
       if (dir == null || dir.isEmpty) return;
@@ -726,6 +684,42 @@ mixin ConversationViewMixin on State<EmailModule> {
     }
   }
 
+  Widget _buildIdentityBanner(UnifiedSessionInfo session) {
+    final scheme = Theme.of(context).colorScheme;
+    String grouped(String fp) => fp.isEmpty
+        ? '-'
+        : [for (var i = 0; i + 4 <= fp.length; i += 4) fp.substring(i, i + 4)].join(' ');
+    return Container(
+      width: double.infinity,
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.gpp_maybe, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: 8),
+          Text(AppStrings.identityChangedTitle,
+              style: TextStyle(fontWeight: FontWeight.w600, color: scheme.onErrorContainer)),
+        ]),
+        const SizedBox(height: 4),
+        Text(AppStrings.identityChangedBody, style: TextStyle(fontSize: 12, color: scheme.onErrorContainer)),
+        const SizedBox(height: 4),
+        SelectableText('${AppStrings.myFingerprint}: ${grouped(session.identityFp)}',
+            style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+        SelectableText('${AppStrings.peerFingerprint}: ${grouped(session.peerIdentityFp)}',
+            style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            onPressed: () {
+              if (UnifiedSessionManager.resetPeerIdentity(session.sessionId)) loadUnifiedSessions();
+            },
+            child: Text(AppStrings.trustNewIdentity),
+          ),
+        ),
+      ]),
+    );
+  }
+
   Widget _buildUnifiedInputBar(UnifiedSessionInfo session) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -736,6 +730,7 @@ mixin ConversationViewMixin on State<EmailModule> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (session.identityChanged) _buildIdentityBanner(session),
           Row(
             children: [
               Expanded(
@@ -937,200 +932,48 @@ mixin ConversationViewMixin on State<EmailModule> {
     final hasFiles = droppedFiles.isNotEmpty;
     if (bodyText.isEmpty && !hasFiles) return;
 
+    if (session.identityChanged) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.identityChangedBlocked), duration: const Duration(seconds: 2)),
+      );
+      return;
+    }
     // Gate: key exchange must be completed before sending.
     if (!UnifiedSessionManager.isReady(session.account, session.sessionId)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AppStrings.isZh
-              ? AppStrings.keyExchangePending
-              : 'Key exchange in progress, cannot send yet'),
-          duration: const Duration(seconds: 2),
-        ),
+        SnackBar(content: Text(AppStrings.keyExchangePending), duration: const Duration(seconds: 2)),
       );
       return;
     }
 
-    final isSignal = session.mode == 'signal';
-
-    // File transfer: 1:1 sessions use Signal attach messages (1.0.4/1.0.5);
-    // group sessions use MLS attach messages (2.0.4/2.0.5). Strict separation.
-    if (hasFiles && !isSignal) {
-      final chain = unifiedMessages.where((m) => m.messageId.isNotEmpty).toList();
-      final inReplyTo = chain.isNotEmpty ? chain.last.messageId : '';
-      final batchId = 'batch_${DateTime.now().millisecondsSinceEpoch}';
-      // One 2.0.4 META carries every file in a "files" array; chunks chain
-      // behind it. A single pending bubble shows all rows at once.
-      final resultJson = native.EmailCore.groupSendFileMulti(
-        account: session.account,
-        unifiedSessionId: session.sessionId,
-        files: [for (final f in droppedFiles) {'path': f.path, 'name': f.name}],
-        inReplyTo: inReplyTo,
-        subject: session.subject,
-        text: bodyText,
-        batchId: batchId,
-      );
-      native.EmailCore.logWrite('[Unified] groupSendFileMulti result: $resultJson');
-      bool allOk = false;
-      try {
-        final r = jsonDecode(resultJson);
-        if (r['status'] == 'success') {
-          allOk = true;
-          final filesMeta = (r['files'] as List? ?? const []);
-          addPendingUnifiedMessage(native.EmailMessage(
-            sender: session.account,
-            recipient: session.members.where((m) => m.toLowerCase() != session.account.toLowerCase()).join(', '),
-            subject: session.subject,
-            body: bodyText,
-            timestamp: DateTime.now().toString().substring(0, 19),
-            uuid: 'pending_${r['message_id'] ?? batchId}',
-            messageId: r['message_id']?.toString() ?? '',
-            sessionId: session.sessionId,
-            account: session.account,
-            isSent: 1,
-            xMailer: native.XMailer.mlsFileMeta,
-            pendingFiles: [
-              for (final fm in filesMeta)
-                native.PendingFileInfo(
-                  fileName: fm['file_name']?.toString() ?? '',
-                  fileSize: (fm['file_size'] as num?)?.toInt() ?? 0,
-                  fileId: fm['file_id']?.toString() ?? '',
-                  batchId: batchId,
-                  totalChunks: fm['total_chunks'] is int ? fm['total_chunks'] as int : 0,
-                ),
-            ],
-          ));
-        }
-      } catch (_) {}
-      if (allOk) {
-        replyController.clear();
-        droppedFiles.clear();
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.messageSent), duration: const Duration(seconds: 1)));
-        loadUnifiedSessionMessages(session.sessionId);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.fileSendFailed), duration: const Duration(seconds: 3)));
-      }
-      return;
-    }
-
-    // Find the in_reply_to (last message's message_id)
-    final chain = unifiedMessages.where((m) => m.messageId.isNotEmpty).toList();
-    final inReplyTo = chain.isNotEmpty ? chain.last.messageId : '';
-
-    if (hasFiles) {
-      // Signal 1:1 file send: one ATTACH_META task carries all files in a
-      // "files" array; chunks chain linearly behind it and are Double-Ratchet
-      // encrypted by the task processor right before each send.
-      final recipients = session.members
-          .where((m) => m.toLowerCase() != session.account.toLowerCase())
-          .join(', ');
-      final batchId = 'batch_${DateTime.now().millisecondsSinceEpoch}';
-      final resultJson = native.EmailCore.fileSplitAndSendMulti(
-        files: [for (final f in droppedFiles) {'path': f.path, 'name': f.name}],
-        account: session.account,
-        recipient: recipients,
-        sessionId: session.sessionId,
-        inReplyTo: inReplyTo,
-        subject: session.subject,
-        text: bodyText,
-        batchId: batchId,
-      );
-      native.EmailCore.logWrite('[Unified] fileSplitAndSendMulti result: $resultJson');
-      bool allOk = false;
-      try {
-        final r = jsonDecode(resultJson);
-        if (r['status'] == 'success') {
-          allOk = true;
-          final filesMeta = (r['files'] as List? ?? const []);
-          addPendingUnifiedMessage(native.EmailMessage(
-            sender: session.account,
-            recipient: recipients,
-            subject: session.subject,
-            body: bodyText,
-            timestamp: DateTime.now().toString().substring(0, 19),
-            uuid: 'pending_${r['message_id'] ?? batchId}',
-            messageId: r['message_id']?.toString() ?? '',
-            sessionId: session.sessionId,
-            account: session.account,
-            isSent: 1,
-            xMailer: native.XMailer.attachMeta,
-            pendingFiles: [
-              for (final fm in filesMeta)
-                native.PendingFileInfo(
-                  fileName: fm['file_name']?.toString() ?? '',
-                  fileSize: (fm['file_size'] as num?)?.toInt() ?? 0,
-                  fileId: fm['file_id']?.toString() ?? '',
-                  batchId: batchId,
-                  totalChunks: fm['total_chunks'] is int ? fm['total_chunks'] as int : 0,
-                ),
-            ],
-          ));
-        }
-      } catch (_) {}
-      if (allOk) {
-        replyController.clear();
-        droppedFiles.clear();
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.messageSent), duration: const Duration(seconds: 1)));
-        loadUnifiedSessionMessages(session.sessionId);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.fileSendFailed), duration: const Duration(seconds: 3)));
-      }
-      return;
-    }
-
-    final resultJson = UnifiedSessionManager.sendMessage(session.account, session.sessionId, bodyText, inReplyTo);
-    native.EmailCore.logWrite('[Unified] sendMessage result: $resultJson');
+    // The core routes 1:1 / 1:n and threads the message onto the conversation.
+    final resultJson = hasFiles
+        ? UnifiedSessionManager.sendFiles(session.account, session.sessionId,
+            [for (final f in droppedFiles) (path: f.path, name: f.name)], bodyText)
+        : UnifiedSessionManager.sendMessage(session.account, session.sessionId, bodyText);
+    native.EmailCore.logWrite('[Unified] send result: $resultJson');
 
     try {
-      final result = jsonDecode(resultJson);
-      if (result['status'] == 'success') {
-        // Both Signal and MLS app messages are now delivered through the outbox:
-        // the per-account background loop sends them with pacing and retry.
-        // SESSION_INIT-style creation flows return task_id=0 and must fail here.
-        final taskId = result['task_id'];
-        final messageId = result['message_id']?.toString() ?? '';
-        final xMailer = result['x_mailer']?.toString() ?? '';
-        final enqueued = taskId is int && taskId > 0;
-        if (!enqueued) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(AppStrings.sendFailedEnqueue), duration: const Duration(seconds: 3)));
-          return;
-        }
-
-        replyController.clear();
-
-        // Optimistic "sending..." bubble: dropped once the real message lands in
-        // localemail (background loop refreshes after send) or the task failed.
-        final peer = session.members
-            .where((m) => m.toLowerCase() != session.account.toLowerCase())
-            .join(', ');
-        addPendingUnifiedMessage(native.EmailMessage(
-          sender: session.account,
-          recipient: peer,
-          subject: session.subject,
-          body: bodyText,
-          timestamp: DateTime.now().toString().substring(0, 19),
-          uuid: 'pending_$messageId',
-          inReplyTo: inReplyTo,
-          messageId: messageId,
-          sessionId: session.sessionId,
-          account: session.account,
-          xMailer: xMailer,
-          isSent: 1,
-        ));
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.queuedForSend), duration: const Duration(seconds: 1)));
-        loadUnifiedSessionMessages(session.sessionId);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppStrings.sendFailedWith('${result['error'] ?? 'unknown'}')), duration: const Duration(seconds: 3)));
+      final result = jsonDecode(resultJson) as Map<String, dynamic>;
+      if (result['status'] != 'success') {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(hasFiles
+                ? AppStrings.fileSendFailed
+                : AppStrings.sendFailedWith('${result['error'] ?? 'unknown'}')),
+            duration: const Duration(seconds: 3)));
+        return;
       }
+      // Optimistic "sending..." bubble: dropped once the real message is stored
+      // (background loop refreshes after send) or the task failed.
+      addPendingUnifiedMessage(session.sessionId,
+          SessionMessage.pendingFrom(result, sender: session.account, text: bodyText));
+      replyController.clear();
+      droppedFiles.clear();
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(hasFiles ? AppStrings.messageSent : AppStrings.queuedForSend),
+          duration: const Duration(seconds: 1)));
+      loadUnifiedSessionMessages(session.sessionId);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(AppStrings.sendFailedWith('$e')), duration: const Duration(seconds: 3)));
@@ -1215,11 +1058,8 @@ mixin ConversationViewMixin on State<EmailModule> {
   }
 
   void _doUnifiedAddMember(UnifiedSessionInfo session, String newMemberEmail) {
-    // x_reply_to for the upgrade invite = last message's x-message-id in this conversation
-    final chain = sortByReplyChain(unifiedMessages);
-    final inReplyTo = chain.isNotEmpty ? chain.last.messageId : '';
     final resultJson = UnifiedSessionManager.addMembers(
-        session.account, session.sessionId, [newMemberEmail], inReplyTo: inReplyTo);
+        session.account, session.sessionId, [newMemberEmail]);
     native.EmailCore.logWrite('[Unified] addMembers result: $resultJson');
 
     try {

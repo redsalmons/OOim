@@ -4,15 +4,17 @@
 #include <stdint.h>
 #include <mutex>
 
-#if defined(__APPLE__)
-#include <Security/Security.h>
-#include <CoreFoundation/CoreFoundation.h>
+#if defined(__APPLE__) || defined(__ANDROID__)
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <fstream>
 #include <filesystem>
 #include <vector>
+#endif
+#if defined(__APPLE__)
+#include <Security/Security.h>
+#include <CoreFoundation/CoreFoundation.h>
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -170,11 +172,31 @@ std::string db_master_key_hex() {
     return cached;
 }
 
+#elif defined(__ANDROID__)
+// ---------------------------------------------------------------------------
+// Android: the master key is generated and wrapped with AndroidKeyStore on
+// the Kotlin side; the plaintext hex is injected once per process before any
+// database access. Nothing is persisted from C++.
+// ---------------------------------------------------------------------------
+
+static std::string g_injectedMasterKey;
+
+void inject_db_master_key_hex(const char* hex) {
+    g_injectedMasterKey = hex ? hex : "";
+}
+
+std::string db_master_key_hex() {
+    return g_injectedMasterKey;
+}
+
+#endif
+
+#if defined(__APPLE__) || defined(__ANDROID__)
 // ---------------------------------------------------------------------------
 // Credential vault: account secrets live in a single AES-256-GCM encrypted
 // file, keyed by the same master key as the database. Only the master key
-// touches the Keychain, so keychain authorization prompts happen once per
-// signing identity instead of once per account.
+// touches the platform secret store (Keychain on macOS, AndroidKeyStore via
+// Kotlin on Android).
 // Layout: magic(4) | iv(12) | ciphertext | tag(16); plaintext is a JSON map.
 // ---------------------------------------------------------------------------
 
@@ -326,6 +348,7 @@ std::string load_secret(const std::string& account) {
         auto it = map.find(account);
         if (it != map.end() && it->is_string()) return it->get<std::string>();
     }
+#if defined(__APPLE__)
     // One-time migration: secrets written before the vault existed live as
     // individual Keychain items. Read without UI: items whose ACL already
     // trusts this signer migrate silently; anything that would prompt is
@@ -340,6 +363,9 @@ std::string load_secret(const std::string& account) {
         LOG_INFO("[keychain] migrated credential for %s into vault\n", account.c_str());
     }
     return secret;
+#else
+    return "";
+#endif
 }
 
 bool delete_secret(const std::string& account) {
@@ -350,7 +376,9 @@ bool delete_secret(const std::string& account) {
     if (vault_read(map) && map.erase(account) > 0) {
         ok = vault_write(map);
     }
+#if defined(__APPLE__)
     delete_item(kServiceCreds, account, /*noUi=*/true); // drop any pre-vault remnant too
+#endif
     return ok;
 }
 
