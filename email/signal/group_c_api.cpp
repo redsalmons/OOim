@@ -280,7 +280,10 @@ int onInvite(const std::string& account, const std::string& from, const json& bo
             usRec.mode = SessionMode::Mls;
             usRec.members = rec.members;
             usRec.mlsGroupId = groupId;
-            usRec.rootMessageId = xSessionId;
+            // Invited members never received the pre-invite chain, so the original
+            // xSessionId root is unreachable locally. Anchor the conversation at
+            // the invite itself — the first message this account actually has.
+            usRec.rootMessageId = msgId;
             usRec.status = 0;
             if (s_usRepo.create(usRec)) {
                 LOG_INFO("[MLS] invite created unified session=%s for group=%s\n",
