@@ -24,6 +24,7 @@
 #endif
 #include <windows.h>
 #include <wincrypt.h>
+#include <wincred.h>
 #include <bcrypt.h>
 #include <shlobj.h>
 #include <filesystem>
@@ -384,13 +385,71 @@ bool delete_secret(const std::string& account) {
 
 #elif defined(_WIN32)
 // ---------------------------------------------------------------------------
-// Windows: DPAPI (CryptProtectData) blobs, one file per (service, account).
-// DPAPI keys are derived from the user's logon credentials, so like the
-// ThisDeviceOnly Keychain items the blobs are only readable by this user on
-// this machine. Service name is mixed in as optional entropy so a blob from
-// one service can't be replayed as another.
-// Layout: %LOCALAPPDATA%\OceanTalk\keychain\<service>\<hex(account)>.bin
+// Windows: Credential Manager generic credentials (advapi32 CredRead/Write/
+// Delete), one item per (service, account). The vault is DPAPI-protected and
+// bound to the current logon session — like the ThisDeviceOnly Keychain items
+// it is only readable by this user on this machine, with no unlock prompt.
+// TargetName: "OceanTalk:<service>:<account>". Persist is LOCAL_MACHINE so
+// credentials never roam — equivalent to ThisDeviceOnly.
+//
+// Legacy DPAPI blob files under %LOCALAPPDATA%\OceanTalk\keychain are read as
+// a fallback and migrated into the vault on first access.
 // ---------------------------------------------------------------------------
+
+static std::wstring utf8_to_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+static std::wstring target_name(const char* service, const std::string& account) {
+    return utf8_to_wide(std::string("OceanTalk:") + service + ":" + account);
+}
+
+// --- Credential Manager primitives ---
+
+static bool cred_read(const char* service, const std::string& account, std::string& out) {
+    std::wstring tn = target_name(service, account);
+    PCREDENTIALW c = nullptr;
+    if (!CredReadW(tn.c_str(), CRED_TYPE_GENERIC, 0, &c)) return false;
+    out.assign((const char*)c->CredentialBlob, c->CredentialBlobSize);
+    CredFree(c);
+    return true;
+}
+
+static bool cred_write(const char* service, const std::string& account,
+                       const void* bytes, size_t len) {
+    if (len == 0 || len > CRED_MAX_CREDENTIAL_BLOB_SIZE) {
+        LOG_INFO("[keychain] CredWrite rejected len=%zu service=%s\n", len, service);
+        return false;
+    }
+    std::wstring tn = target_name(service, account);
+    std::wstring un = utf8_to_wide(account);
+    CREDENTIALW c = {};
+    c.Type = CRED_TYPE_GENERIC;
+    c.TargetName = (LPWSTR)tn.c_str();
+    c.CredentialBlob = (LPBYTE)bytes;
+    c.CredentialBlobSize = (DWORD)len;
+    c.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    c.UserName = (LPWSTR)un.c_str();
+    if (!CredWriteW(&c, 0)) {
+        LOG_INFO("[keychain] CredWrite failed err=%lu service=%s\n", GetLastError(), service);
+        return false;
+    }
+    return true;
+}
+
+static bool cred_delete(const char* service, const std::string& account) {
+    std::wstring tn = target_name(service, account);
+    if (CredDeleteW(tn.c_str(), CRED_TYPE_GENERIC, 0)) return true;
+    return GetLastError() == ERROR_NOT_FOUND;
+}
+
+// --- Legacy DPAPI blob files (migration path only) ---
+// Layout: %LOCALAPPDATA%\OceanTalk\keychain\<service>\<hex(account)>.bin
 
 static std::filesystem::path keychain_root() {
     static std::filesystem::path root;
@@ -410,14 +469,7 @@ static std::filesystem::path item_path(const char* service, const std::string& a
            (hex_encode((const uint8_t*)account.data(), account.size()) + ".bin");
 }
 
-static DATA_BLOB entropy_for(const char* service) {
-    DATA_BLOB e;
-    e.pbData = (BYTE*)service;
-    e.cbData = (DWORD)strlen(service);
-    return e;
-}
-
-static bool read_item(const char* service, const std::string& account, std::string& out) {
+static bool legacy_read_item(const char* service, const std::string& account, std::string& out) {
     std::ifstream f(item_path(service, account), std::ios::binary);
     if (!f) return false;
     std::vector<char> enc((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -426,11 +478,13 @@ static bool read_item(const char* service, const std::string& account, std::stri
     DATA_BLOB in;
     in.pbData = (BYTE*)enc.data();
     in.cbData = (DWORD)enc.size();
-    DATA_BLOB entropy = entropy_for(service);
+    DATA_BLOB entropy;
+    entropy.pbData = (BYTE*)service;
+    entropy.cbData = (DWORD)strlen(service);
     DATA_BLOB dec = {};
     if (!CryptUnprotectData(&in, nullptr, &entropy, nullptr, nullptr,
                             CRYPTPROTECT_UI_FORBIDDEN, &dec)) {
-        LOG_INFO("[keychain] CryptUnprotectData failed err=%lu service=%s\n",
+        LOG_INFO("[keychain] legacy CryptUnprotectData failed err=%lu service=%s\n",
                  GetLastError(), service);
         return false;
     }
@@ -440,54 +494,34 @@ static bool read_item(const char* service, const std::string& account, std::stri
     return true;
 }
 
-static bool upsert_item(const char* service, const std::string& account,
-                        const void* bytes, size_t len) {
-    DATA_BLOB in;
-    in.pbData = (BYTE*)bytes;
-    in.cbData = (DWORD)len;
-    DATA_BLOB entropy = entropy_for(service);
-    DATA_BLOB enc = {};
-    if (!CryptProtectData(&in, L"OceanTalk", &entropy, nullptr, nullptr,
-                          CRYPTPROTECT_UI_FORBIDDEN, &enc)) {
-        LOG_INFO("[keychain] CryptProtectData failed err=%lu service=%s\n",
-                 GetLastError(), service);
-        return false;
-    }
-
-    std::filesystem::path path = item_path(service, account);
+static void legacy_delete_item(const char* service, const std::string& account) {
     std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
+    std::filesystem::remove(item_path(service, account), ec);
+}
 
-    // Write to a sibling temp file then rename so a crash mid-write never
-    // leaves a truncated blob behind.
-    std::filesystem::path tmp = path;
-    tmp += L".tmp";
-    bool ok = false;
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (f) {
-            f.write((const char*)enc.pbData, enc.cbData);
-            ok = f.good();
-        }
-    }
-    LocalFree(enc.pbData);
-    if (!ok) {
-        std::filesystem::remove(tmp, ec);
-        LOG_INFO("[keychain] write failed service=%s\n", service);
-        return false;
-    }
-    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        LOG_INFO("[keychain] rename failed err=%lu service=%s\n", GetLastError(), service);
-        std::filesystem::remove(tmp, ec);
-        return false;
+// --- item API: vault first, legacy file fallback with migration ---
+
+static bool read_item(const char* service, const std::string& account, std::string& out) {
+    if (cred_read(service, account, out)) return true;
+    // One-time migration: a legacy DPAPI file is moved into the vault.
+    if (!legacy_read_item(service, account, out)) return false;
+    if (cred_write(service, account, out.data(), out.size())) {
+        legacy_delete_item(service, account);
+        LOG_INFO("[keychain] migrated %s/%s to Credential Manager\n", service, account.c_str());
     }
     return true;
 }
 
+static bool upsert_item(const char* service, const std::string& account,
+                        const void* bytes, size_t len) {
+    if (!cred_write(service, account, bytes, len)) return false;
+    legacy_delete_item(service, account);  // drop any legacy copy
+    return true;
+}
+
 static bool delete_item(const char* service, const std::string& account) {
-    std::error_code ec;
-    std::filesystem::remove(item_path(service, account), ec);
-    return !ec;
+    legacy_delete_item(service, account);
+    return cred_delete(service, account);
 }
 
 std::string db_master_key_hex() {
