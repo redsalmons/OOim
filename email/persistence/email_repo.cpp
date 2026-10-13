@@ -145,6 +145,24 @@ int64_t EmailRepo::findGroupIdByMessageId(const std::string& account, const std:
     return groupId;
 }
 
+std::unordered_set<int64_t> EmailRepo::queryGroupEmailIds(const std::string& account, int64_t groupId) {
+    std::unordered_set<int64_t> result;
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return result;
+
+    const char* sql = "SELECT email_id FROM group_session_email WHERE account = ? AND group_id = ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
+
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, groupId);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) result.insert(sqlite3_column_int64(stmt, 0));
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 std::vector<EmailRecord> EmailRepo::queryThreadRoots(const std::string& account) {
     std::vector<EmailRecord> result;
     auto& conn = DbConnection::instance();

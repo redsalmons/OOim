@@ -61,6 +61,27 @@ std::vector<ChainRow> chainRows(const UnifiedSession& us) {
         auto it = children.find(rows[i].messageId);
         if (it != children.end()) for (size_t c : it->second) eligible.push(c);
     }
+
+    // A group member only receives the subset of protocol mail addressed to it,
+    // so a stored group message can point at a parent that never arrived locally
+    // and is unreachable from the root. Rows explicitly associated with this
+    // group still belong to the session; the chain orders what it can reach.
+    if (!us.mlsGroupId.empty()) {
+        int64_t groupId = 0;
+        try { groupId = std::stoll(us.mlsGroupId); } catch (...) {}
+        if (groupId > 0) {
+            std::unordered_set<int64_t> emitted;
+            for (auto& r : ordered) emitted.insert(r.rowid);
+            std::unordered_map<int64_t, size_t> byRowid;
+            for (size_t i = 0; i < rows.size(); i++) byRowid[rows[i].rowid] = i;
+            std::vector<int64_t> orphans;
+            for (int64_t id : s_emailRepo.queryGroupEmailIds(us.account, groupId)) {
+                if (!emitted.count(id) && byRowid.count(id)) orphans.push_back(id);
+            }
+            std::sort(orphans.begin(), orphans.end());
+            for (int64_t id : orphans) ordered.push_back(rows[byRowid[id]]);
+        }
+    }
     return ordered;
 }
 

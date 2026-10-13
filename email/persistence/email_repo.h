@@ -3,6 +3,7 @@
 
 #include <string>
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 struct EmailRecord {
@@ -68,6 +69,9 @@ public:
     // Used to follow the in_reply_to chain: a reply belongs to the same group as its parent.
     // Returns 0 if not found.
     int64_t findGroupIdByMessageId(const std::string& account, const std::string& messageId);
+
+    // Localemail rowids explicitly associated with a group session.
+    std::unordered_set<int64_t> queryGroupEmailIds(const std::string& account, int64_t groupId);
 
     // Check if email exists by message_id + account, return uuid if found
     std::string findUuidByMessageId(const std::string& messageId, const std::string& account);
