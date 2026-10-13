@@ -10,11 +10,14 @@ import 'package:oim_core/native/email_core.dart' as native;
 import 'package:oim_core/native/unified_session.dart';
 
 import 'mail_service.dart';
+import 'members_page.dart';
 
 class ConversationPage extends StatefulWidget {
-  const ConversationPage({super.key, required this.session});
+  const ConversationPage(
+      {super.key, required this.session, required this.configPath});
 
   final UnifiedSessionInfo session;
+  final String configPath;
 
   @override
   State<ConversationPage> createState() => _ConversationPageState();
@@ -433,12 +436,31 @@ class _ConversationPageState extends State<ConversationPage> {
         if (!didPop) setState(() => _showEmoji = false);
       },
       child: Scaffold(
-        appBar: AppBar(title: Text(title)),
+        appBar: AppBar(
+          title: Text(title),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.more_horiz),
+              onPressed: () async {
+                await Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => MembersPage(
+                        session: session, configPath: widget.configPath),
+                  ),
+                );
+                _load();
+              },
+            ),
+          ],
+        ),
         body: Column(children: [
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.translucent,
-              onTap: () => _inputFocus.unfocus(),
+              onTap: () {
+                _inputFocus.unfocus();
+                if (_showEmoji) setState(() => _showEmoji = false);
+              },
               child: all.isEmpty
                   ? Center(
                       child: Text(
