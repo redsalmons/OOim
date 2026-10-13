@@ -362,6 +362,41 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
     g_EmailConfigIndices.push_back(email);
 }
 
+bool EmailHandler::refreshConfigForIndex(int configIndex) {
+    if (configIndex < 0 || configIndex >= static_cast<int>(g_EmailConfigIndices.size())) return false;
+    auto email = g_EmailConfigIndices[configIndex];
+    if (!email) return false;
+
+    oemail::ConfigLoader loader(configDir + "/oim.conf");
+    if (!loader.load()) return false;
+
+    const std::string addr = email->get_address();
+    for (const auto& cfg : loader.get_email_configs()) {
+        if (cfg.email != addr) continue;
+        auto delegate = email->get_delegate();
+        if (!delegate) return false;
+
+        // Re-apply mutable connection fields; an empty server falls back to
+        // the provider default inside the impl. auth_code is only applied when
+        // non-empty — the conf stores "" and the real secret lives in keychain.
+        if (auto impl163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate)) {
+            impl163->set_imap_server(cfg.imap_server, cfg.imap_port);
+            impl163->set_smtp_server(cfg.smtp_server, cfg.smtp_port);
+            if (!cfg.auth_code.empty()) impl163->set_auth_code(cfg.auth_code);
+        } else if (auto implOutlook = std::dynamic_pointer_cast<EmailComm::EmailOptOutlookImpl>(delegate)) {
+            implOutlook->set_imap_server(cfg.imap_server, cfg.imap_port);
+            implOutlook->set_smtp_server(cfg.smtp_server, cfg.smtp_port);
+        } else if (auto implGmail = std::dynamic_pointer_cast<EmailComm::EmailOptGmailImpl>(delegate)) {
+            implGmail->set_imap_server(cfg.imap_server, cfg.imap_port);
+            implGmail->set_smtp_server(cfg.smtp_server, cfg.smtp_port);
+        }
+        LOG_INFO("config refresh: account=%s imap=%s:%d smtp=%s:%d\n", addr.c_str(),
+                 cfg.imap_server.c_str(), cfg.imap_port, cfg.smtp_server.c_str(), cfg.smtp_port);
+        return true;
+    }
+    return false;
+}
+
 void EmailHandler::notify(EmailComm::Email* email, int message, const std::string& json) {
     // Find the config index for this email
     int configIndex = -1;

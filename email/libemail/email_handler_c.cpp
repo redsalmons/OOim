@@ -688,6 +688,10 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             return -3;
         }
 
+        // Hot-reload oim.conf so server/credential edits take effect without
+        // restarting this child isolate.
+        oemailim::EmailHandler::getInstance()->refreshConfigForIndex(configIndex);
+
         LOG_INFO("FetchAndStore_c: configIndex=%d, delegate type=%s", configIndex, typeid(*delegate).name());
 
         std::string folderStr = folder ? folder : "INBOX";
@@ -1099,6 +1103,9 @@ int SendEmail_c(int configIndex, const char* content) {
         if (delegateGmail) {
             delegateGmail->set_smtp_server(emailObj->get_smtp_address(), emailObj->get_smtp_port());
         }
+
+        // Hot-reload oim.conf last so it overrides the stale emailObj copy above.
+        oemailim::EmailHandler::getInstance()->refreshConfigForIndex(configIndex);
 
         bool ok = delegate->send_email("", content ? content : "");
         return ok ? 0 : -4;
