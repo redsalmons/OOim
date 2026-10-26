@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 
 // OS-backed secret storage. Two item families:
 //   service "com.redsalmon.oim.db"         — SQLCipher master key (one item)
@@ -33,6 +34,20 @@ void set_vault_path(const std::string& path);
 bool store_secret(const std::string& account, const std::string& secret);
 std::string load_secret(const std::string& account);
 bool delete_secret(const std::string& account);
+
+// Read-only backup access. Unlike load_secret(), a corrupt/locked/unreadable
+// store is an error, not an empty password. Each requested key is returned;
+// an empty string explicitly means the credential does not exist.
+// vaultPath is used on macOS/Android; Windows reads Credential Manager.
+// Does not change the active vault path, migrate secrets, or write the Keychain.
+bool snapshot_secrets(const std::string& vaultPath,
+                      const std::vector<std::string>& keys,
+                      std::map<std::string, std::string>& out);
+
+// Write a new, isolated encrypted vault for restore staging (macOS/Android).
+// Never changes the active vault or master key. Destination must not exist.
+bool stage_snapshot_secrets(const std::string& vaultPath,
+                            const std::map<std::string, std::string>& values);
 
 } // namespace keychain_store
 

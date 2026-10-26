@@ -35,6 +35,7 @@ class _ConversationPageState extends State<ConversationPage> {
 
   // Refreshed from the core on every load so status / fingerprints stay current.
   UnifiedSessionInfo? _live;
+  bool _ready = false;
   UnifiedSessionInfo get session => _live ?? widget.session;
 
   @override
@@ -111,6 +112,8 @@ class _ConversationPageState extends State<ConversationPage> {
       if (resp['status'] == 'success') {
         _live = UnifiedSessionInfo.fromJson(resp['session'] as Map<String, dynamic>);
       }
+      _ready = !session.identityChanged &&
+          UnifiedSessionManager.isReady(session.account, session.sessionId);
     } catch (_) {}
     final prevCount = _messages.length + _pending.length;
     final messages = UnifiedSessionManager.listMessages(session.account, session.sessionId);
@@ -131,9 +134,9 @@ class _ConversationPageState extends State<ConversationPage> {
   }
 
   Future<void> _pickFiles() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
-    if (result == null) return;
-    setState(() => _pickedFiles.addAll(result.files.where((f) => f.path != null)));
+    final picked = await FilePicker.pickFiles();
+    if (picked.isEmpty) return;
+    setState(() => _pickedFiles.addAll(picked.where((f) => f.path != null)));
   }
 
   void _send() {
@@ -393,7 +396,7 @@ class _ConversationPageState extends State<ConversationPage> {
                           shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(4)),
                         ),
-                        onPressed: _send,
+                        onPressed: _ready ? _send : null,
                         child: Text(AppStrings.send,
                             style: const TextStyle(
                                 fontSize: 14, fontWeight: FontWeight.w500)),

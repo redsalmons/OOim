@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Keystore keys don't survive backup/restore to another device, so the
          encrypted database and vault must not be backed up either. -->
     <application

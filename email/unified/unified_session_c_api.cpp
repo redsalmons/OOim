@@ -242,20 +242,44 @@ int us_set_subject(const char* sessionId, const char* subject,
 
 // The user verified the peer's new identity: forget the pinned key and reopen
 // the session. The next bundle/init from the peer pins the new key.
+// Reset the pinned identity for every non-self member of a session, then
+// reopen it. Signal pins live in signal_peer_identity; MLS member pins share
+// the same table (pin_peer_identity), so the reset is protocol-agnostic.
+static bool resetMembersAndReopen_(UnifiedSessionRepo& repo, UnifiedSession& s) {
+    bool ok = true;
+    for (auto& m : s.members) {
+        if (m == s.account) continue;
+        if (signal_peer_identity_reset(s.account.c_str(), m.c_str()) != 0) ok = false;
+    }
+    if (!repo.setStatus(s.sessionId, kSessionActive)) ok = false;
+    return ok;
+}
+
 int us_reset_peer_identity(const char* sessionId, char* outJson, int outSize) {
     if (!sessionId || !outJson || outSize <= 0) return -1;
 
     static UnifiedSessionRepo s_usRepo;
+
+    // "*" resets every flagged session at once (stale-flags sweep).
+    if (sessionId[0] == '*' && sessionId[1] == '\0') {
+        int cleared = 0;
+        for (auto& s : s_usRepo.listAll()) {
+            if (s.status != kSessionIdentityChanged) continue;
+            if (resetMembersAndReopen_(s_usRepo, s)) cleared++;
+        }
+        LOG_INFO("[US] us_reset_peer_identity: sweep cleared=%d\n", cleared);
+        snprintf(outJson, outSize, R"({"status":"success","cleared":%d})", cleared);
+        return 0;
+    }
+
     UnifiedSession s;
-    if (!s_usRepo.load(sessionId, s) || s.mode != SessionMode::Signal) {
-        snprintf(outJson, outSize, R"({"status":"error","error":"not_a_signal_session"})");
+    if (!s_usRepo.load(sessionId, s)) {
+        snprintf(outJson, outSize, R"({"status":"error","error":"session_not_found"})");
         return -2;
     }
-    std::string peer;
-    for (auto& m : s.members) if (m != s.account) { peer = m; break; }
-    bool ok = signal_peer_identity_reset(s.account.c_str(), peer.c_str()) == 0 &&
-              s_usRepo.setStatus(s.sessionId, kSessionActive);
-    LOG_INFO("[US] us_reset_peer_identity: session=%s peer=%s ok=%d\n", sessionId, peer.c_str(), ok ? 1 : 0);
+    bool ok = resetMembersAndReopen_(s_usRepo, s);
+    LOG_INFO("[US] us_reset_peer_identity: session=%s mode=%d ok=%d\n",
+             sessionId, (int)s.mode, ok ? 1 : 0);
     json resp = {{"status", ok ? "success" : "error"}};
     if (!ok) resp["error"] = "reset_failed";
     snprintf(outJson, outSize, "%s", resp.dump().c_str());

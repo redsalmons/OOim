@@ -76,6 +76,41 @@ else()
 endif()
 add_custom_target(mls_ffi_build DEPENDS ${MLS_FFI_LIB})
 
+# Backup container is independent from the Signal and MLS protocols.
+set(BACKUP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/backup")
+file(GLOB_RECURSE BACKUP_SOURCES CONFIGURE_DEPENDS ${BACKUP_DIR}/src/*.rs)
+list(APPEND BACKUP_SOURCES ${BACKUP_DIR}/Cargo.toml ${BACKUP_DIR}/Cargo.lock)
+if(APPLE)
+    set(BACKUP_LIB "${BACKUP_DIR}/target/universal/liboim_backup.a")
+    add_custom_command(
+        OUTPUT ${BACKUP_LIB}
+        DEPENDS ${BACKUP_SOURCES}
+        COMMAND ${CMAKE_COMMAND} -E env ${_cargo_proxy} cargo build --locked --release --target aarch64-apple-darwin --manifest-path ${BACKUP_DIR}/Cargo.toml
+        COMMAND ${CMAKE_COMMAND} -E env ${_cargo_proxy} cargo build --locked --release --target x86_64-apple-darwin --manifest-path ${BACKUP_DIR}/Cargo.toml
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${BACKUP_DIR}/target/universal
+        COMMAND lipo -create ${BACKUP_DIR}/target/aarch64-apple-darwin/release/liboim_backup.a ${BACKUP_DIR}/target/x86_64-apple-darwin/release/liboim_backup.a -output ${BACKUP_LIB}
+        VERBATIM
+    )
+else()
+    if(WIN32)
+        set(BACKUP_LIB "${BACKUP_DIR}/target/${MLS_RUST_TARGET}/release/oim_backup.lib")
+    else()
+        set(BACKUP_LIB "${BACKUP_DIR}/target/${MLS_RUST_TARGET}/release/liboim_backup.a")
+    endif()
+    set(_backup_linker_env "")
+    if(ANDROID)
+        set(_backup_linker_env "CARGO_TARGET_${_mls_env}_LINKER=${CMAKE_C_COMPILER}")
+    endif()
+    add_custom_command(
+        OUTPUT ${BACKUP_LIB}
+        DEPENDS ${BACKUP_SOURCES}
+        COMMAND ${CMAKE_COMMAND} -E env ${_cargo_proxy} ${_backup_linker_env}
+            cargo build --locked --release ${MLS_CARGO_TARGET_ARGS} --manifest-path ${BACKUP_DIR}/Cargo.toml
+        VERBATIM
+    )
+endif()
+add_custom_target(backup_build DEPENDS ${BACKUP_LIB})
+
 # ---------------------------------------------------------------------------
 # Platform-specific dependency resolution
 # ---------------------------------------------------------------------------
@@ -301,6 +336,12 @@ set_target_properties(email_core_shared PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
+foreach(_target email_core email_core_shared)
+    target_sources(${_target} PRIVATE backup/snapshot.cpp backup/recovery.cpp)
+    add_dependencies(${_target} backup_build)
+    target_link_libraries(${_target} PUBLIC ${BACKUP_LIB})
+endforeach()
+
 # SQLCipher provides sqlite3 so the whole emails.db is encrypted at rest.
 #   macOS:   amalgamation compiled directly into each target (CommonCrypto
 #            provider, no extra dylib, builds for every CMAKE_OSX_ARCHITECTURES
@@ -418,4 +459,12 @@ if(APPLE AND NOT ANDROID)
     )
     enable_testing()
     add_test(NAME signal_roundtrip COMMAND signal_roundtrip_test)
+
+    add_executable(backup_snapshot_test tests/backup_snapshot_test.cpp)
+    target_link_libraries(backup_snapshot_test PRIVATE email_core_shared)
+    target_include_directories(backup_snapshot_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/nlohmann_json-src/single_include
+    )
+    add_test(NAME backup_snapshot COMMAND backup_snapshot_test)
 endif()

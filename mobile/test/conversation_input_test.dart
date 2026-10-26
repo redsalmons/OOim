@@ -7,6 +7,7 @@ import 'package:oim_core/native/unified_session.dart';
 
 Widget _app() => MaterialApp(
       home: ConversationPage(
+        configPath: '',
         session: UnifiedSessionInfo(
           sessionId: 's1',
           account: 'a@test.com',

@@ -9,6 +9,7 @@ import '../../main.dart' show appThemeMode, appTextScale, kTextScaleSmall, kText
 import 'package:oim_core/i18n/app_strings.dart' show appLocale;
 import '../app_theme.dart';
 import '../user_prefs.dart';
+import 'package:oim_core/backup_page.dart';
 
 class SettingsModule extends StatefulWidget {
   const SettingsModule({super.key});
@@ -92,6 +93,15 @@ class _SettingsModuleState extends State<SettingsModule> {
                   _buildAccountSection(),
                   const SizedBox(height: 24),
                   _buildAppearanceSection(),
+                  const SizedBox(height: 24),
+                  Card(child: ListTile(
+                    leading: const Icon(Icons.settings_backup_restore),
+                    title: Text(AppStrings.isZh ? '备份与恢复' : 'Backup and restore'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const BackupPage()),
+                    ),
+                  )),
                 ],
               ),
             ),

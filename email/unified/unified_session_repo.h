@@ -63,6 +63,9 @@ public:
     // List all active sessions for an account.
     std::vector<UnifiedSession> listByAccount(const std::string& account);
 
+    // List all active sessions across accounts.
+    std::vector<UnifiedSession> listAll();
+
     // Close a session (set status=1).
     bool close(const std::string& sessionId);
 

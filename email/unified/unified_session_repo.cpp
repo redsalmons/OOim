@@ -348,6 +348,29 @@ std::vector<UnifiedSession> UnifiedSessionRepo::listByAccount(const std::string&
     return result;
 }
 
+std::vector<UnifiedSession> UnifiedSessionRepo::listAll() {
+    std::vector<UnifiedSession> result;
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db) return result;
+
+    const char* sql = "SELECT session_id, account, subject, mode, members, "
+                      "signal_session_id, mls_group_id, root_message_id, status, "
+                      "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
+                      "FROM unified_session WHERE status IN (0,2) "
+                      "ORDER BY updated_at DESC;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        UnifiedSession rec;
+        fillRecord(stmt, rec);
+        result.push_back(rec);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 bool UnifiedSessionRepo::updateMailmanCursor(const std::string& sessionId, int cursor) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();

@@ -3,8 +3,8 @@ import 'package:oim_core/i18n/app_strings.dart';
 import 'package:oim_core/native/session_queries.dart';
 import 'package:oim_core/native/unified_session.dart';
 
-import 'accounts_page.dart';
 import 'conversation_page.dart';
+import 'settings_page.dart';
 import 'mail_service.dart';
 
 class SessionListPage extends StatefulWidget {
@@ -80,7 +80,7 @@ class _SessionListPageState extends State<SessionListPage> {
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => AccountsPage(configPath: widget.configPath),
+                  builder: (_) => SettingsPage(configPath: widget.configPath),
                 ),
               );
               _reload();

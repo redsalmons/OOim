@@ -887,10 +887,9 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}});
                         continue;
                     } else if (mlsRc == 1) {
-                        // Retry later (e.g. Commit arrived before Welcome)
+                        // Retry later (e.g. Commit arrived before Welcome). This is
+                        // a hold, not a failure — do not consume the retry budget.
                         LOG_INFO("[DB] download_pending: MLS %s deferred (rc=1), will retry\n", x_session_chart.c_str());
-                        s_emailRepo.incrementRetryCount(pe, accountStr);
-                        // Keep islocal as-is so it is picked up again
                         continue;
                     } else {
                         LOG_INFO("[DB] download_pending: MLS %s failed rc=%d\n", x_session_chart.c_str(), mlsRc);

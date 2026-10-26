@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/crypto.h>
 #include <fstream>
 #include <filesystem>
 #include <vector>
@@ -280,32 +281,82 @@ static bool gcm_decrypt(const uint8_t key[32], const uint8_t* blob, size_t n,
 }
 
 // Caller must hold g_vaultMutex.
-static bool vault_read(nlohmann::json& map) {
+static bool vault_read_at(const std::string& path, nlohmann::json& map,
+                          bool existingKeyOnly = false) {
     map = nlohmann::json::object();
-    if (g_vaultPath.empty()) return false;
-    std::ifstream f(g_vaultPath, std::ios::binary);
+    if (path.empty()) return false;
+    std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     std::vector<uint8_t> blob((std::istreambuf_iterator<char>(f)),
                               std::istreambuf_iterator<char>());
     static const char kMagic[4] = {'O', 'T', 'V', '1'};
     if (blob.size() < 4 + 12 + 16 || memcmp(blob.data(), kMagic, 4) != 0) return false;
     uint8_t key[32];
-    if (!vault_master_key(key)) return false;
+    if (existingKeyOnly) {
+#if defined(__APPLE__)
+        CFDataRef existing = copy_query_item(kServiceDb, kAccountMaster, /*noUi=*/true);
+        if (!existing) return false;
+        std::string hex(reinterpret_cast<const char*>(CFDataGetBytePtr(existing)),
+                        CFDataGetLength(existing));
+        CFRelease(existing);
+        bool decoded = hex_decode(hex, key, sizeof(key));
+        OPENSSL_cleanse(hex.data(), hex.size());
+        if (!decoded) return false;
+#else
+        if (!vault_master_key(key)) return false; // Android: injected key, no write.
+#endif
+    } else if (!vault_master_key(key)) return false;
     std::string plain;
     bool ok = gcm_decrypt(key, blob.data() + 4, blob.size() - 4, plain);
-    memset(key, 0, sizeof(key));
+    OPENSSL_cleanse(key, sizeof(key));
     if (!ok) return false;
     try {
         map = nlohmann::json::parse(plain);
     } catch (...) {
+        OPENSSL_cleanse(plain.data(), plain.size());
         return false;
     }
+    OPENSSL_cleanse(plain.data(), plain.size());
     return map.is_object();
 }
 
+static bool vault_read(nlohmann::json& map) {
+    return vault_read_at(g_vaultPath, map);
+}
+
+bool snapshot_secrets(const std::string& vaultPath,
+                      const std::vector<std::string>& keys,
+                      std::map<std::string, std::string>& out) {
+    out.clear();
+    if (vaultPath.empty()) return false;
+    std::lock_guard<std::mutex> lk(g_vaultMutex);
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(vaultPath, ec);
+    if (ec) return false;
+    nlohmann::json map = nlohmann::json::object();
+    if (exists && !vault_read_at(vaultPath, map, true)) return false;
+    bool ok = true;
+    std::map<std::string, std::string> result;
+    for (const auto& key : keys) {
+        auto it = map.find(key);
+        if (it != map.end() && !it->is_string()) { ok = false; break; }
+        result[key] = it == map.end() ? "" : it->get<std::string>();
+    }
+    // Avoid retaining the decrypted map longer than this operation.
+    for (auto& value : map) {
+        if (value.is_string()) {
+            auto& secret = value.get_ref<std::string&>();
+            OPENSSL_cleanse(secret.data(), secret.size());
+        }
+    }
+    if (ok) out.swap(result);
+    for (auto& item : result) OPENSSL_cleanse(item.second.data(), item.second.size());
+    return ok;
+}
+
 // Caller must hold g_vaultMutex.
-static bool vault_write(const nlohmann::json& map) {
-    if (g_vaultPath.empty()) return false;
+static bool vault_write_at(const std::string& path, const nlohmann::json& map) {
+    if (path.empty()) return false;
     uint8_t key[32];
     if (!vault_master_key(key)) return false;
     std::vector<uint8_t> blob;
@@ -315,7 +366,7 @@ static bool vault_write(const nlohmann::json& map) {
     static const char kMagic[4] = {'O', 'T', 'V', '1'};
     blob.insert(blob.begin(), kMagic, kMagic + 4);
 
-    std::filesystem::path tmp = g_vaultPath + ".tmp";
+    std::filesystem::path tmp = path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;
@@ -323,13 +374,30 @@ static bool vault_write(const nlohmann::json& map) {
         if (!f.good()) return false;
     }
     std::error_code ec;
-    std::filesystem::rename(tmp, g_vaultPath, ec);
+    std::filesystem::rename(tmp, path, ec);
     if (ec) {
         std::filesystem::remove(tmp, ec);
         LOG_INFO("[keychain] vault rename failed: %s\n", ec.message().c_str());
         return false;
     }
     return true;
+}
+
+static bool vault_write(const nlohmann::json& map) {
+    return vault_write_at(g_vaultPath, map);
+}
+
+bool stage_snapshot_secrets(const std::string& path,
+                            const std::map<std::string, std::string>& values) {
+    std::lock_guard<std::mutex> lk(g_vaultMutex);
+    if (path.empty() || std::filesystem::exists(path)) return false;
+    nlohmann::json map = values;
+    bool ok = vault_write_at(path, map);
+    for (auto& value : map) {
+        auto& s = value.get_ref<std::string&>();
+        OPENSSL_cleanse(s.data(), s.size());
+    }
+    return ok;
 }
 
 bool store_secret(const std::string& account, const std::string& secret) {
@@ -568,6 +636,34 @@ bool delete_secret(const std::string& account) {
 
 // Windows stores each secret as its own DPAPI blob; no vault file needed.
 void set_vault_path(const std::string&) {}
+
+bool snapshot_secrets(const std::string&,
+                      const std::vector<std::string>& keys,
+                      std::map<std::string, std::string>& out) {
+    out.clear();
+    std::map<std::string, std::string> result;
+    bool ok = true;
+    for (const auto& key : keys) {
+        auto name = target_name(kServiceCreds, key);
+        PCREDENTIALW credential = nullptr;
+        if (!CredReadW(name.c_str(), CRED_TYPE_GENERIC, 0, &credential)) {
+            if (GetLastError() != ERROR_NOT_FOUND) { ok = false; break; }
+            result[key] = "";
+            continue;
+        }
+        result[key].assign(reinterpret_cast<const char*>(credential->CredentialBlob),
+                           credential->CredentialBlobSize);
+        CredFree(credential);
+    }
+    if (ok) out.swap(result);
+    for (auto& item : result) SecureZeroMemory(item.second.data(), item.second.size());
+    return ok;
+}
+
+bool stage_snapshot_secrets(const std::string&,
+                            const std::map<std::string, std::string>&) {
+    return false; // Credential Manager cutover is not implemented.
+}
 
 #else
 #error "keychain_store: no secret-storage backend for this platform"

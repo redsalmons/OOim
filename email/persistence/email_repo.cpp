@@ -529,7 +529,7 @@ int EmailRepo::countPendingBodies(const std::string& account) {
 
     const char* sql =
         "SELECT COUNT(*) FROM localemail WHERE account = ? AND islocal IN (0, 1) "
-        "AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3);";
+        "AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3 OR x_mailer LIKE '2.%');";
 
     sqlite3_stmt* stmt;
     int count = 0;
@@ -551,7 +551,7 @@ std::vector<PendingEmail> EmailRepo::queryPendingEmails(const std::string& accou
 
     const char* sql =
         "SELECT uuid, folder, islocal FROM localemail WHERE account = ? AND islocal IN (0, 1) "
-        "AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3) "
+        "AND uuid != '0' AND (retry_count IS NULL OR retry_count < 3 OR x_mailer LIKE '2.%') "
         "ORDER BY islocal DESC, uuid ASC LIMIT ?;";
 
     sqlite3_stmt* stmt;

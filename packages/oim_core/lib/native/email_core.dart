@@ -439,6 +439,12 @@ DynamicLibrary _loadLibrary() {
 
 final DynamicLibrary _lib = _loadLibrary();
 
+typedef _BackupActionNative = Int32 Function(Pointer<Utf8>, Pointer<Utf8>,
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _BackupActionDart = int Function(Pointer<Utf8>, Pointer<Utf8>,
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, int);
+final _backupAction = _lib.lookupFunction<_BackupActionNative, _BackupActionDart>('oim_backup_action');
+
 final _handlerCreate = _lib.lookupFunction<_HandlerCreateNative, _HandlerCreateDart>('email_handler_create');
 final _handlerDestroy = _lib.lookupFunction<_HandlerDestroyNative, _HandlerDestroyDart>('email_handler_destroy');
 final _emailAdd = _lib.lookupFunction<_EmailAddNative, _EmailAddDart>('email_add');
@@ -734,6 +740,8 @@ class EmailCore {
   }
 
   static bool initializeLibemail(String appSupportDir) {
+    final recovery = backupAction('startup', appSupportDir);
+    if (recovery['status'] != 'success') return false;
     registerNativeCallback();
     final appSupportDirPtr = appSupportDir.toNativeUtf8();
     try {
@@ -743,14 +751,50 @@ class EmailCore {
         final dbPath = '$appSupportDir/data/emails.db';
         final dbPathPtr = dbPath.toNativeUtf8();
         try {
-          _emailDbInit(dbPathPtr);
+          if (_emailDbInit(dbPathPtr) != 0) {
+            if (recovery['recovery'] == 'committed') {
+              _emailDbClose();
+              backupAction('abort', appSupportDir);
+            }
+            return false;
+          }
         } finally {
           malloc.free(dbPathPtr);
         }
       }
+      if (result >= 0 && recovery['recovery'] == 'committed') {
+        return backupAction('finish', appSupportDir)['status'] == 'success';
+      }
+      if (result < 0 && recovery['recovery'] == 'committed') {
+        _emailDbClose();
+        backupAction('abort', appSupportDir);
+      }
       return result >= 0;
     } finally {
       malloc.free(appSupportDirPtr);
+    }
+  }
+
+  /// Synchronous native backup work. UI calls via Isolate.run after pausing
+  /// all mail workers. Never log the password, payload or decrypted credentials.
+  static Map<String, dynamic> backupAction(String operation, String root,
+      {String file = '', String password = ''}) {
+    final op = operation.toNativeUtf8();
+    final appRoot = root.toNativeUtf8();
+    final path = file.toNativeUtf8();
+    final pass = password.toNativeUtf8();
+    final output = calloc<Uint8>(4096).cast<Utf8>();
+    try {
+      _backupAction(op, appRoot, path, pass, output, 4096);
+      return jsonDecode(output.toDartString()) as Map<String, dynamic>;
+    } finally {
+      final bytes = pass.cast<Uint8>().asTypedList(pass.length);
+      bytes.fillRange(0, bytes.length, 0);
+      malloc.free(op);
+      malloc.free(appRoot);
+      malloc.free(path);
+      malloc.free(pass);
+      calloc.free(output);
     }
   }
 

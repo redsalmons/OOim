@@ -36,6 +36,8 @@ void supervisorEntryPoint(SendPort mainSendPort) {
 
   String? configPath;
   bool running = false;
+  bool draining = false;
+  final childExits = <Completer<void>>{};
   final Map<String, Isolate> childIsolates = {};
   final Map<String, SendPort> childSendPorts = {};
   final Map<String, bool> childAlive = {};
@@ -69,6 +71,9 @@ void supervisorEntryPoint(SendPort mainSendPort) {
     final childReceivePort = ReceivePort();
     final exitPort = ReceivePort();
     final errorPort = ReceivePort();
+    final exited = Completer<void>();
+    childExits.add(exited);
+    childAlive[childKey] = true; // Includes pending spawn/SendPort handshakes.
     final isolate = Isolate.spawn(
       (SendPort supervisorPort) => childEntryPoint(supervisorPort),
       childReceivePort.sendPort,
@@ -89,6 +94,8 @@ void supervisorEntryPoint(SendPort mainSendPort) {
         exitPort.close();
         errorPort.close();
         childReceivePort.close();
+        if (!exited.isCompleted) exited.complete();
+        childExits.remove(exited);
         // stopChild() removes the map entry before killing; a different isolate
         // under the same key means this one was already superseded.
         final unexpected = identical(childIsolates[childKey], iso);
@@ -107,6 +114,10 @@ void supervisorEntryPoint(SendPort mainSendPort) {
       childReceivePort.listen((message) {
         if (message is SendPort) {
           childSendPorts[childKey] = message;
+          if (draining) {
+            message.send({'type': 'stop'});
+            return;
+          }
           message.send({
             'type': 'start',
             'email': email,
@@ -129,6 +140,11 @@ void supervisorEntryPoint(SendPort mainSendPort) {
         }
       });
     }).catchError((e) {
+      if (!exited.isCompleted) exited.complete();
+      childExits.remove(exited);
+      exitPort.close();
+      errorPort.close();
+      childReceivePort.close();
       log('Failed to spawn child for $childKey: $e');
       childAlive[childKey] = false;
     });
@@ -264,14 +280,31 @@ void supervisorEntryPoint(SendPort mainSendPort) {
     configuredEmails = newEmails;
   }
 
-  receivePort.listen((cmd) {
+  receivePort.listen((cmd) async {
     if (cmd is SupervisorCommand) {
       switch (cmd.type) {
         case 'start':
+          draining = false;
           running = true;
           configPath = cmd.configPath;
           log('Supervisor starting with config: $configPath');
           scanConfigAndStart();
+          break;
+        case 'pause':
+          running = false;
+          draining = true;
+          // Pending spawns receive stop as soon as they announce their port.
+          final exits = childExits.map((c) => c.future).toList();
+          for (final port in childSendPorts.values) {
+            port.send({'type': 'stop'});
+          }
+          await Future.wait(exits);
+          childIsolates.clear();
+          childSendPorts.clear();
+          childAlive.clear();
+          accountAuthCodes.clear();
+          configuredEmails = {};
+          mainSendPort.send(SupervisorMessage('paused'));
           break;
         case 'stop':
           running = false;
@@ -286,6 +319,7 @@ void supervisorEntryPoint(SendPort mainSendPort) {
           configPath = cmd.configPath;
           break;
         case 'rescan':
+          if (draining) break;
           log('Manual rescan triggered');
           scanConfigAndStart();
           break;
@@ -321,6 +355,7 @@ void childEntryPoint(SendPort supervisorPort) {
   String? storageDir;
   int? configIndex;
   bool shouldStop = false;
+  bool working = false;
 
   void notify(String type, Map<String, dynamic>? data) {
     supervisorPort.send({
@@ -548,6 +583,8 @@ void childEntryPoint(SendPort supervisorPort) {
     if (msg is Map<String, dynamic>) {
       switch (msg['type']) {
         case 'start':
+          working = true;
+          try {
           email = msg['email'] as String?;
           authCode = msg['authCode'] as String?;
           accountType = msg['accountType'] as String?;
@@ -615,10 +652,19 @@ void childEntryPoint(SendPort supervisorPort) {
           // If we exit the IDLE loop, notify supervisor
           notify('child_exited', {'account': email});
           break;
+          } finally {
+            working = false;
+            receivePort.close();
+            Isolate.exit();
+          }
 
         case 'stop':
           log('Received stop command');
           shouldStop = true;
+          if (!working) {
+            receivePort.close();
+            Isolate.exit();
+          }
           break;
       }
     }
@@ -632,22 +678,52 @@ void childEntryPoint(SendPort supervisorPort) {
 /// Manages the supervisor isolate from the UI thread.
 /// Call [start] to begin background email monitoring, [stop] to shut it down.
 class EmailBackgroundService {
+  static final _instances = <EmailBackgroundService>{};
+  static bool _maintenance = false;
+  static Future<void> pauseAll() async {
+    _maintenance = true;
+    try {
+      await Future.wait(_instances.toList().map((s) => s.pause()));
+    } catch (_) {
+      // Never leave workers stranded in maintenance state on a partial drain.
+      _maintenance = false;
+      for (final service in _instances.toList()) {
+        service.resume();
+      }
+      rethrow;
+    }
+  }
+
+  static void resumeAll() {
+    _maintenance = false;
+    for (final service in _instances.toList()) {
+      service.resume();
+    }
+  }
+
   Isolate? _supervisorIsolate;
   SendPort? _supervisorPort;
   ReceivePort? _mainReceivePort;
   StreamSubscription? _subscription;
+  Completer<void>? _ready;
+  Completer<void>? _paused;
+  String? _configPath;
 
   final void Function(SupervisorMessage) onMessage;
 
   EmailBackgroundService({required this.onMessage});
 
   Future<void> start(String configPath) async {
-    if (_supervisorIsolate != null) {
+    _configPath = configPath;
+    _instances.add(this);
+    if (_maintenance) return;
+    if (_supervisorIsolate != null || _ready != null) {
       onMessage(SupervisorMessage('log', data: {'msg': 'Service already running'}));
       return;
     }
 
     _mainReceivePort = ReceivePort();
+    _ready = Completer<void>();
 
     _supervisorIsolate = await Isolate.spawn(
       supervisorEntryPoint,
@@ -657,8 +733,14 @@ class EmailBackgroundService {
     _subscription = _mainReceivePort!.listen((message) {
       if (message is SendPort) {
         _supervisorPort = message;
-        _supervisorPort!.send(SupervisorCommand('start', configPath: configPath));
+        if (!_maintenance) {
+          _supervisorPort!.send(SupervisorCommand('start', configPath: configPath));
+        }
+        _ready!.complete();
       } else if (message is SupervisorMessage) {
+        if (message.type == 'paused' && _paused != null && !_paused!.isCompleted) {
+          _paused!.complete();
+        }
         onMessage(message);
       } else if (message is List) {
         // Isolate.onExit / onError — find which child died
@@ -666,11 +748,40 @@ class EmailBackgroundService {
         onMessage(SupervisorMessage('log', data: {'msg': 'Isolate event: $message'}));
       }
     });
+    await _ready!.future;
+  }
+
+  Future<void> pause() async {
+    if (_ready == null) return;
+    await _ready!.future;
+    if (_paused != null) return _paused!.future;
+    _paused = Completer<void>();
+    final port = _supervisorPort;
+    if (port == null) return;
+    port.send(SupervisorCommand('pause'));
+    // Children may sit inside blocking native calls (IMAP IDLE, network fetch);
+    // bound the drain so a stuck worker cannot wedge a backup/restore forever.
+    final paused = _paused!;
+    await paused.future.timeout(
+      const Duration(seconds: 45),
+      onTimeout: () {
+        if (identical(_paused, paused)) _paused = null;
+        throw StateError('background_pause_timeout');
+      },
+    );
+  }
+
+  void resume() {
+    _paused = null;
+    if (_ready == null) {
+      if (_configPath != null) start(_configPath!);
+    } else {
+      _supervisorPort?.send(SupervisorCommand('start', configPath: _configPath));
+    }
   }
 
   Future<void> stop() async {
-    _supervisorPort?.send(SupervisorCommand('stop'));
-    await Future.delayed(const Duration(milliseconds: 500));
+    await pause();
     _supervisorIsolate?.kill(priority: Isolate.immediate);
     _supervisorIsolate = null;
     _supervisorPort = null;
@@ -678,11 +789,15 @@ class EmailBackgroundService {
     _subscription = null;
     _mainReceivePort?.close();
     _mainReceivePort = null;
+    _ready = null;
+    _paused = null;
+    _instances.remove(this);
   }
 
   bool get isRunning => _supervisorIsolate != null;
 
   void rescan() {
+    if (_maintenance) return;
     _supervisorPort?.send(SupervisorCommand('rescan'));
   }
 }

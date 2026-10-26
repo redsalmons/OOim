@@ -12,6 +12,7 @@
 #include <random>
 #include <sstream>
 
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/ec.h>
 #include <openssl/pem.h>
@@ -49,6 +50,11 @@ int email_core_initialize(const char* appSupportDir) {
     if (!appSupportDir) {
         return -1;
     }
+
+    // Keep OpenSSL's internal state (thread locks) alive for the whole process
+    // lifetime: static destructors free X509/EVP_PKEY objects at exit and would
+    // otherwise use locks that atexit cleanup already released (SIGSEGV).
+    OPENSSL_init_crypto(OPENSSL_INIT_NO_ATEXIT, NULL);
 
     char dataDir[512], configDir[512], logDir[512];
     snprintf(dataDir, sizeof(dataDir), "%s/data", appSupportDir);

@@ -146,6 +146,7 @@ class AppRoot extends StatefulWidget {
 class _AppRootState extends State<AppRoot> {
   bool _checking = true;
   bool _configured = false;
+  String? _initError;
 
   @override
   void initState() {
@@ -172,6 +173,15 @@ class _AppRootState extends State<AppRoot> {
     native.EmailCore.logWrite('[Dart] Initializing libemail...');
     final initResult = native.EmailCore.initializeLibemail(appDir.path);
     native.EmailCore.logWrite('[Dart] Libemail initialization result: $initResult');
+    if (!initResult) {
+      if (mounted) setState(() {
+        _initError = AppStrings.isZh
+            ? '数据初始化未完成，请保留原数据并重新打开应用。'
+            : 'Data initialization failed. Keep your data and reopen the app.';
+        _checking = false;
+      });
+      return;
+    }
 
     // Migration: Update islocal for existing emails
     native.EmailCore.logWrite('[Dart] Running islocal migration...');
@@ -206,10 +216,11 @@ class _AppRootState extends State<AppRoot> {
 
     if (!exists) {
       setState(() {
-        _configured = false;
+        _configured = true;
         _checking = false;
       });
-      _showConfigDialog(configPath);
+      // Configuration (including backup import) is available from Settings.
+      await WindowController.main().show();
     } else {
       setState(() {
         _configured = true;
@@ -220,19 +231,9 @@ class _AppRootState extends State<AppRoot> {
     }
   }
 
-  Future<void> _showConfigDialog(String configPath) async {
-    final window = await DesktopMultiWindow.createWindow(jsonEncode({
-      'configPath': configPath,
-    }));
-    window
-      ..setFrame(const Offset(0, 0) & const Size(680, 560))
-      ..center()
-      ..setTitle(AppStrings.emailConfig)
-      ..show();
-  }
-
   @override
   Widget build(BuildContext context) {
+    if (_initError != null) return Scaffold(body: Center(child: Text(_initError!)));
     if (_checking || !_configured) {
       return const Scaffold();
     }

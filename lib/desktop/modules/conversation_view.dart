@@ -711,7 +711,9 @@ mixin ConversationViewMixin on State<EmailModule> {
           alignment: Alignment.centerRight,
           child: TextButton(
             onPressed: () {
-              if (UnifiedSessionManager.resetPeerIdentity(session.sessionId)) loadUnifiedSessions();
+              // "*" sweeps every session flagged identity-changed: all banners
+              // carry the same stale flag, clearing one at a time is tedious.
+              if (UnifiedSessionManager.resetPeerIdentity('*')) loadUnifiedSessions();
             },
             child: Text(AppStrings.trustNewIdentity),
           ),
@@ -816,7 +818,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                                 child: Row(
                                   children: [
                                     IconButton(
-                                      icon: Icon(Icons.folder_open, size: 20, color: context.oim.textSecondary),
+                                      icon: Icon(Icons.attach_file, size: 20, color: context.oim.textSecondary),
                                       onPressed: () async {
                                         final picked = await FilePicker.pickFiles();
                                         if (picked.isEmpty) return;
