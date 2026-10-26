@@ -6,6 +6,10 @@ plugins {
 
 android {
     namespace = "com.redsalmon.oim"
+    base {
+        // APK output: OceanTalk-<versionName>-<buildType>.apk
+        archivesName = "OceanTalk-${flutter.versionName}"
+    }
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
