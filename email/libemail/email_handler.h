@@ -85,6 +85,16 @@ public:
      */
     void loadEmailConfig(const oemail::EmailConfig& config);
 
+    /**
+     * @brief Re-read oim.conf and re-apply this index's mutable fields
+     *        (imap/smtp server+port, auth_code when present) to the live
+     *        delegate. Called before every network op so config edits take
+     *        effect without restarting the child isolate.
+     * @param configIndex Index into g_EmailConfigIndices
+     * @return true if the account's config entry was found and applied
+     */
+    bool refreshConfigForIndex(int configIndex);
+
     // Static member variables
     static std::shared_ptr<EmailHandler> g_instance;
     static std::vector<std::shared_ptr<EmailComm::Email>> g_EmailConfigIndices;
