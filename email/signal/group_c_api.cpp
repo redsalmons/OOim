@@ -143,7 +143,12 @@ int verifyBinding(const std::string& account, const std::string& groupId,
     if (out.email.empty() || out.ikPub.empty() || out.mlsKey.empty() || out.sig.empty()) return -1;
     if (!verify_with_ecc_public_key(out.ikPub, bindingPayload(out.email, out.mlsKey), out.sig)) return -2;
     if (out.email == account) {
-        return (out.ikPub == identity_public_key(account, groupId) && out.mlsKey == mls::signatureKeyHex(account, groupId)) ? 0 : -2;
+        // The echo must equal the binding we published for this group (stored
+        // when we created the group / sent our KeyPackage). signatureKeyHex
+        // cannot be used here: before joinGroup there is no MLS gid yet.
+        MlsRepo::Binding own;
+        if (!g_mlsRepo.loadBinding(groupId, account, own)) return -2;
+        return (out.ikPub == own.ikPub && out.mlsKey == own.mlsKey) ? 0 : -2;
     }
     return pin_peer_identity(account, groupId, out.email, out.ikPub);
 }
