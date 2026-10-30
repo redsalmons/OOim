@@ -227,6 +227,29 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
+  static final _rfcDate = RegExp(
+      r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})');
+
+  DateTime? _parseLastTime(String ts) {
+    final iso = DateTime.tryParse(ts);
+    if (iso != null) return iso;
+    final m = _rfcDate.firstMatch(ts);
+    if (m == null) return null;
+    const months = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+                    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12};
+    return DateTime(int.parse(m[3]!), months[m[2]!]!, int.parse(m[1]!),
+        int.parse(m[4]!), int.parse(m[5]!), int.parse(m[6]!));
+  }
+
+  String _fmtLastTime(String ts) {
+    final t = _parseLastTime(ts);
+    if (t == null) return '';
+    String s(int n) => n.toString().padLeft(2, '0');
+    if (AppStrings.isZh) return '${t.month}月${t.day}日 ${s(t.hour)}:${s(t.minute)}';
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${months[t.month - 1]} ${t.day}, ${s(t.hour)}:${s(t.minute)}';
+  }
+
   Widget buildUnifiedSessionItem(UnifiedSessionInfo session) {
     final isSelected = selectedUnifiedSessionId == session.sessionId;
     final memberCount = session.members.length;
@@ -266,15 +289,26 @@ mixin EmailListViewMixin on State<EmailModule> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: context.oim.textPrimary),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: context.oim.textPrimary),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _fmtLastTime(session.updatedAt),
+                        style: TextStyle(fontSize: 11, color: context.oim.textMuted),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    '$memberCount${AppStrings.isZh ? "人" : " members"} · ${session.updatedAt}',
+                    '${memberCount.toString().padRight(3)} ${session.account}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 12, color: context.oim.textMuted),

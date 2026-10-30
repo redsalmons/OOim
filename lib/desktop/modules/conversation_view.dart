@@ -344,9 +344,16 @@ mixin ConversationViewMixin on State<EmailModule> {
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     itemCount: messages.length,
                     itemBuilder: (context, index) {
-                      // One META message carries its whole files[] array — no
-                      // cross-message batch merging needed.
-                      return _buildUnifiedMessageBubble(messages[index], members, usSession!.account);
+                      // WeChat-style time divider: first real user message,
+                      // then any message >10 min after the previous one.
+                      final msg = messages[index];
+                      final showTime = index == _firstUserMsgIndex(messages) ||
+                          (index > 0 && _timeGapOver(messages[index - 1], msg));
+                      return Column(children: [
+                        if (showTime && msg.timestamp.isNotEmpty)
+                          _timeDivider(msg.timestamp),
+                        _buildUnifiedMessageBubble(msg, members, usSession!.account),
+                      ]);
                     },
                   ),
           ),
@@ -535,8 +542,63 @@ mixin ConversationViewMixin on State<EmailModule> {
     );
   }
 
+  int _firstUserMsgIndex(List<SessionMessage> msgs) =>
+      msgs.indexWhere((m) => m.kind != MessageKind.handshake);
+
+  // Timestamps arrive as ISO ("2026-10-30 18:21:24", local pending) or RFC 2822
+  // mail dates ("Fri, 30 Oct 2026 18:21:24 +0800", stored messages).
+  static final _rfcDate = RegExp(
+      r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})');
+
+  DateTime? _parseMsgTime(String timestamp) {
+    final iso = DateTime.tryParse(timestamp);
+    if (iso != null) return iso;
+    final m = _rfcDate.firstMatch(timestamp);
+    if (m == null) return null;
+    const months = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+                    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12};
+    return DateTime(int.parse(m[3]!), months[m[2]!]!, int.parse(m[1]!),
+        int.parse(m[4]!), int.parse(m[5]!), int.parse(m[6]!));
+  }
+
+  bool _timeGapOver(SessionMessage prev, SessionMessage cur) {
+    final a = _parseMsgTime(prev.timestamp);
+    final b = _parseMsgTime(cur.timestamp);
+    if (a == null || b == null) return false;
+    return b.difference(a).inMinutes >= 10;
+  }
+
+  String _formatMsgTime(String timestamp) {
+    final t = _parseMsgTime(timestamp);
+    if (t == null) return timestamp;
+    String s(int n) => n.toString().padLeft(2, '0');
+    if (AppStrings.isZh) return '${t.month}月${t.day}日 ${s(t.hour)}:${s(t.minute)}:${s(t.second)}';
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${months[t.month - 1]} ${t.day}, ${s(t.hour)}:${s(t.minute)}:${s(t.second)}';
+  }
+
+  Widget _timeDivider(String timestamp) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Center(
+          child: Text(_formatMsgTime(timestamp),
+              style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
+        ),
+      );
+
   Widget _buildUnifiedMessageBubble(SessionMessage msg, List<String> members, String myAccount) {
     final isMe = msg.isSent;
+    if (msg.kind == MessageKind.handshake) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Center(
+          child: Text(
+              isMe
+                  ? '${msg.sender} ${AppStrings.isZh ? "发送了握手信息" : "sent a handshake"}'
+                  : '${AppStrings.isZh ? "接收了" : "Received handshake from"} ${msg.sender}${AppStrings.isZh ? " 的握手信息" : ""}',
+              style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
+        ),
+      );
+    }
     final Widget content = switch (msg.kind) {
       MessageKind.handshake => const Text('🤝', style: TextStyle(fontSize: 20)),
       MessageKind.file => _buildFileCard(msg.files, isMe, msg.text),
@@ -569,12 +631,9 @@ mixin ConversationViewMixin on State<EmailModule> {
                   ),
                   child: content,
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  msg.pending ? (AppStrings.isZh ? '发送中…' : 'Sending…') : msg.timestamp,
-                  style: TextStyle(fontSize: 11,
-                      color: msg.pending ? Colors.orange[400] : context.oim.textMuted),
-                ),
+                if (msg.pending)
+                  Text(AppStrings.isZh ? '发送中…' : 'Sending…',
+                      style: TextStyle(fontSize: 11, color: Colors.orange[400])),
               ],
             ),
           ),
@@ -724,7 +783,7 @@ mixin ConversationViewMixin on State<EmailModule> {
 
   Widget _buildUnifiedInputBar(UnifiedSessionInfo session) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
       decoration: BoxDecoration(
         color: context.oim.panel,
         border: Border(top: BorderSide(color: context.oim.border, width: 0.5)),
@@ -772,17 +831,26 @@ mixin ConversationViewMixin on State<EmailModule> {
                     decoration: BoxDecoration(
                       color: context.oim.inputField,
                       borderRadius: BorderRadius.circular(4),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: context.isDark ? 0.35 : 0.08),
+                          blurRadius: 10,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
                     child: Container(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(4),
                         border: Border.all(
-                          color: _isDragging ? context.oim.accentGreen : context.oim.border,
-                          width: 1,
+                          color: _isDragging
+                              ? context.oim.accentGreen
+                              : context.oim.border.withValues(alpha: 0.4),
+                          width: 0.5,
                         ),
                       ),
                       child: ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
+                        borderRadius: BorderRadius.circular(3),
                         child: SingleChildScrollView(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,

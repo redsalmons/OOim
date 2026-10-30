@@ -70,7 +70,12 @@ public:
     // Enter IMAP IDLE mode on the selected folder, block until server sends
     // an untagged response (e.g. EXISTS). Returns true if new mail may have
     // arrived, false on error/timeout.
-    bool idle_wait(const std::string& folder, int timeout_seconds = 300) override;
+    int idle_wait(const std::string& folder, int timeout_seconds = 300) override;
+
+    // Probe mailbox status on the selected folder: sends NOOP and parses the
+    // untagged response for UIDNEXT/UIDVALIDITY/EXISTS; falls back to a STATUS
+    // command when the server does not report UIDNEXT in the NOOP response.
+    std::string noop_probe(const std::string& folder) override;
 
     // Discover the Sent folder name
     std::string find_sent_folder() override;

@@ -44,15 +44,50 @@ class _SessionListPageState extends State<SessionListPage> {
     return peers.isNotEmpty ? peers.join(', ') : s.account;
   }
 
+  static final _rfcDate = RegExp(
+      r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})');
+
+  DateTime? _parseTime(String ts) {
+    final iso = DateTime.tryParse(ts);
+    if (iso != null) return iso;
+    final m = _rfcDate.firstMatch(ts);
+    if (m == null) return null;
+    const months = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+                    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12};
+    return DateTime(int.parse(m[3]!), months[m[2]!]!, int.parse(m[1]!),
+        int.parse(m[4]!), int.parse(m[5]!), int.parse(m[6]!));
+  }
+
+  String _fmtLastTime(String ts) {
+    final t = _parseTime(ts);
+    if (t == null) return '';
+    String s(int n) => n.toString().padLeft(2, '0');
+    if (AppStrings.isZh) return '${t.month}月${t.day}日 ${s(t.hour)}:${s(t.minute)}';
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${months[t.month - 1]} ${t.day}, ${s(t.hour)}:${s(t.minute)}';
+  }
+
   Widget _sessionTile(UnifiedSessionInfo s) {
     final title = _title(s);
     return ListTile(
       leading: CircleAvatar(
         child: Text(title.isNotEmpty ? title[0].toUpperCase() : '?'),
       ),
-      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _fmtLastTime(s.updatedAt),
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+        ],
+      ),
       subtitle: Text(
-        '${s.mode == 'mls' ? 'MLS' : 'Signal'} · ${s.members.length} · ${s.account}',
+        '${s.members.length.toString().padRight(3)} ${s.account}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),

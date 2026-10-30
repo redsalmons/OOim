@@ -105,6 +105,7 @@ void EmailOpt163Impl::dropStore_(vmime::shared_ptr<vmime::net::session>& session
     try { if (store) store->disconnect(); } catch (...) {}
     session.reset();
     store.reset();
+    current_selected_folder_.clear();
 }
 
 bool EmailOpt163Impl::connectStore_(vmime::shared_ptr<vmime::net::session>& session,
@@ -149,8 +150,13 @@ bool EmailOpt163Impl::connectStore_(vmime::shared_ptr<vmime::net::session>& sess
         return false;
     }
 
-    LOG_INFO("163 %s - establishing TCP connection to %s:%d...\n", who, 
-             imap_server_.empty() ? "imap.163.com" : imap_server_.c_str(), 
+    if (imap_server_.empty()) {
+        LOG_INFO("163 %s - no imap server, connection failed\n", who);
+        return false;
+    }
+
+    LOG_INFO("163 %s - establishing TCP connection to %s:%d...\n", who,
+             imap_server_.c_str(),
              imap_port_ > 0 ? imap_port_ : 993);
 
     try {
@@ -187,7 +193,7 @@ bool EmailOpt163Impl::connectStore_(vmime::shared_ptr<vmime::net::session>& sess
         session->getProperties()["ssl.ca-path"] = "";
 
         // Create IMAP store with imaps:// protocol for SSL/TLS
-        std::string imap_host = imap_server_.empty() ? "imap.163.com" : imap_server_;
+        std::string imap_host = imap_server_;
         int imap_p = imap_port_ > 0 ? imap_port_ : 993;
         vmime::utility::url storeurl("imaps", imap_host, imap_p);
         store = session->getStore(storeurl);
@@ -314,6 +320,7 @@ bool EmailOpt163Impl::select_folder(const std::string& folder_name) {
         vmime::shared_ptr<vmime::net::folder> folder = store_->getFolder(vmime::utility::path(folder_name));
         folder->open(vmime::net::folder::MODE_READ_ONLY);
         folder_ = folder;
+        current_selected_folder_ = folder_name;
         std::cout << "163 select_folder - successfully selected folder: " << folder_name << std::endl;
         return true;
     } catch (const vmime::exception& e) {
@@ -333,17 +340,20 @@ std::vector<std::string> EmailOpt163Impl::fetch_emails_since_uid(const std::stri
         vmime::shared_ptr<vmime::net::folder> folder_obj = store_->getFolder(vmime::utility::path(folder));
         folder_obj->open(vmime::net::folder::MODE_READ_ONLY);
 
-        // Get all messages using 1:* range
-        vmime::net::messageSet allMessages = vmime::net::messageSet::byNumber(1, folder_obj->getMessageCount());
-        std::vector<vmime::shared_ptr<vmime::net::message>> messages = folder_obj->getMessages(allMessages);
-        std::vector<std::string> uids;
-
         int start_uid_int = 0;
         try {
             start_uid_int = std::stoi(start_uid);
         } catch (...) {
             start_uid_int = 0;
         }
+
+        // Fetch only the needed UID range instead of 1:* + local filtering
+        vmime::net::messageSet allMessages = (start_uid_int > 0)
+            ? vmime::net::messageSet::byUID(
+                  vmime::net::message::uid(start_uid_int), vmime::net::message::uid("*"))
+            : vmime::net::messageSet::byNumber(1, folder_obj->getMessageCount());
+        std::vector<vmime::shared_ptr<vmime::net::message>> messages = folder_obj->getMessages(allMessages);
+        std::vector<std::string> uids;
 
         for (const auto& msg : messages) {
             std::string uid_str = msg->getUID();
@@ -530,7 +540,7 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
             size_t bodyStart = fullResponse.find("BODY[]");
             if (bodyStart == std::string::npos) {
                 last_error_ = "No BODY[] in response";
-                LOG_INFO("163 get_email - no BODY[] in response, full response: %s\n", fullResponse.c_str());
+                LOG_INFO("163 get_email - no BODY[] in response (size=%zu)\n", fullResponse.size());
                 return "";
             }
             
@@ -562,7 +572,7 @@ std::string EmailOpt163Impl::get_email(const std::string& folder, const std::str
 #if 0
 bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& content) {
     LOG_INFO("163 send_email - folder=%s, content_size=%zu\n", folder.c_str(), content.size());
-    LOG_INFO("163 send_email - content preview: %s\n", content.substr(0, std::min(size_t(200), content.size())).c_str());
+    LOG_INFO("163 send_email - folder=%s\n", folder.c_str());
     LOG_INFO("163 send_email - auth_code_=%s, email_=%s\n", auth_code_.c_str(), email_.c_str());
     
     is_valid_ = !auth_code_.empty();
@@ -607,7 +617,12 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         session->getProperties()["ssl.check-server-identity"] = "false";
 
         // 3. 构建 URL (对 email 中的 @ 符号进行 percent-encoding: %40)
-        std::string smtpServer = smtp_server_.empty() ? "smtp.163.com" : smtp_server_;
+        if (smtp_server_.empty()) {
+            last_error_ = "No smtp server";
+            LOG_INFO("163 send_email - no smtp server\n");
+            return false;
+        }
+        std::string smtpServer = smtp_server_;
         int smtpPort = smtp_port_ > 0 ? smtp_port_ : 465;
 
         // 对 email_ 转义 @ -> %40
@@ -858,7 +873,12 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
 
         LOG_INFO("163 send_email - Session properties set, username=%s\n", email_.c_str());
 
-        std::string smtpServer = smtp_server_.empty() ? "smtp.163.com" : smtp_server_;
+        if (smtp_server_.empty()) {
+            last_error_ = "No smtp server";
+            LOG_INFO("163 send_email - no smtp server\n");
+            return false;
+        }
+        std::string smtpServer = smtp_server_;
         int smtpPort = smtp_port_ > 0 ? smtp_port_ : 465;
 
         // 3. 构建标准的 SMTPS URL 并获取 Transport
@@ -957,21 +977,12 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
             x_session_chart.clear();
         }
 
-        // Protocol bodies travel as a zip-packed message.oim attachment so
-        // external mail clients only see the notice text. Non-protocol mail
-        // (no X-Mailer) is sent verbatim.
+        // Protocol payload and type travel in text/plain armor.
         if (x_session_chart.empty()) {
             builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(bodyToSend));
         } else {
-            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(oim_notice_text()));
-            std::vector<uint8_t> zipped = oim_zip_pack(bodyToSend);
-            builder.attach(vmime::make_shared<vmime::defaultAttachment>(
-                vmime::make_shared<vmime::stringContentHandler>(
-                    std::string(reinterpret_cast<const char*>(zipped.data()), zipped.size())),
-                vmime::encoding(vmime::encodingTypes::BASE64),
-                vmime::mediaType("application/octet-stream"),
-                vmime::NULL_TEXT,
-                vmime::word("message.oim")));
+            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(
+                oim_encode_wire_body(bodyToSend, x_session_chart)));
         }
 
         vmime::shared_ptr<vmime::message> msg = builder.construct();
@@ -986,9 +997,10 @@ bool EmailOpt163Impl::send_email(const std::string& folder, const std::string& c
         // Set X-Mailer header if provided
         if (!x_session_chart.empty()) {
             vmime::shared_ptr<vmime::headerField> xMailerField =
-                vmime::headerFieldFactory::getInstance()->create("X-Mailer", x_session_chart);
+                vmime::headerFieldFactory::getInstance()->create("X-Mailer", XMailer::WIRE_VALUE);
             header->appendField(xMailerField);
-            LOG_INFO("163 send_email - set X-Mailer: %s\n", x_session_chart.c_str());
+            LOG_INFO("163 send_email - X-Mailer=%s, body message_type=%s\n",
+                     XMailer::WIRE_VALUE, x_session_chart.c_str());
         }
 
         // Handle In-Reply-To and References for conversation threading
@@ -1231,43 +1243,43 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
         }
         auto imapFolder = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPFolder>(f);
 
-        // SELECT via sendCommand on existing connection (has ID command sent)
-        vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
-            vmime::net::imap::IMAPCommand::createCommand("SELECT " + folderPath);
-        conn->sendCommand(selectCmd);
-        vmime::shared_ptr<vmime::net::imap::IMAPParser::response> selectResp(conn->readResponse());
-        
-        LOG_INFO("163 fetch_email_headers - SELECT folder=%s sent (original=%s)\n", folderPath.c_str(), folder.c_str());
-
-        bool selectOk = false;
+        // SELECT via sendCommand on existing connection (has ID command sent).
+        // Skipped when the target folder is already selected on this connection.
         bool unsafeLogin = false;
 
-        if (selectResp && !selectResp->isBad()) {
-            selectOk = true;
-        }
+        if (current_selected_folder_ != folder) {
+            vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
+                vmime::net::imap::IMAPCommand::createCommand("SELECT " + folderPath);
+            conn->sendCommand(selectCmd);
+            vmime::shared_ptr<vmime::net::imap::IMAPParser::response> selectResp(conn->readResponse());
 
-        // Update current selected folder tracking (instance-specific)
-        if (selectOk) {
-            current_selected_folder_ = folder;
-            LOG_INFO("163 fetch_email_headers - updated current_selected_folder_=%s\n", folder.c_str());
-        }
+            LOG_INFO("163 fetch_email_headers - SELECT folder=%s sent (original=%s)\n", folderPath.c_str(), folder.c_str());
 
-        if (selectResp) {
-            std::string errLog = selectResp->getErrorLog();
-            if (errLog.find("Unsafe Login") != std::string::npos ||
-                errLog.find("kefu@188.com") != std::string::npos) {
-                unsafeLogin = true;
+            bool selectOk = selectResp && !selectResp->isBad();
+
+            // Update current selected folder tracking (instance-specific)
+            if (selectOk) {
+                current_selected_folder_ = folder;
+                LOG_INFO("163 fetch_email_headers - updated current_selected_folder_=%s\n", folder.c_str());
             }
-        }
 
-        LOG_INFO("163 fetch_email_headers - selectOk=%d, unsafeLogin=%d\n", selectOk, unsafeLogin);
+            if (selectResp) {
+                std::string errLog = selectResp->getErrorLog();
+                if (errLog.find("Unsafe Login") != std::string::npos ||
+                    errLog.find("kefu@188.com") != std::string::npos) {
+                    unsafeLogin = true;
+                }
+            }
 
-        if (unsafeLogin) {
-            return R"({"status":"failed","error":"163_unsafe_login","message":"163 IMAP reported unsafe login. Please update your authorization code."})";
-        }
+            LOG_INFO("163 fetch_email_headers - selectOk=%d, unsafeLogin=%d\n", selectOk, unsafeLogin);
 
-        if (!selectOk) {
-            return R"({"status":"failed","error":"select_failed"})";
+            if (unsafeLogin) {
+                return R"({"status":"failed","error":"163_unsafe_login","message":"163 IMAP reported unsafe login. Please update your authorization code."})";
+            }
+
+            if (!selectOk) {
+                return R"({"status":"failed","error":"select_failed"})";
+            }
         }
 
         // Build message set based on start_uid
@@ -1318,6 +1330,15 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
         if (!fetchResp || fetchResp->isBad()) {
             LOG_INFO("163 fetch_email_headers - FETCH response is bad or null\n");
             return R"({"status":"failed","error":"fetch_bad_response"})";
+        }
+
+        // Unsafe-login detection also applies when SELECT was skipped above.
+        {
+            std::string fetchErrLog = fetchResp->getErrorLog();
+            if (fetchErrLog.find("Unsafe Login") != std::string::npos ||
+                fetchErrLog.find("kefu@188.com") != std::string::npos) {
+                return R"({"status":"failed","error":"163_unsafe_login","message":"163 IMAP reported unsafe login. Please update your authorization code."})";
+            }
         }
 
         // Helper: recursively parse vmime xbody into JSON
@@ -1619,11 +1640,11 @@ std::string EmailOpt163Impl::fetch_email_headers(const std::string& folder, cons
     }
 }
 
-bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) {
+int EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) {
     if (!store_ || !store_->isConnected()) {
         if (!connect_()) {
             last_error_ = "IDLE: connect failed";
-            return false;
+            return -1;
         }
     }
 
@@ -1631,32 +1652,31 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         auto imapStore = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
         if (!imapStore) {
             last_error_ = "IDLE: not IMAP store";
-            return false;
+            return -1;
         }
 
         auto conn = imapStore->getConnection();
         if (!conn) {
             last_error_ = "IDLE: no connection";
-            return false;
+            return -1;
         }
 
-        // SELECT the folder before entering IDLE
-        LOG_INFO("[IDLE] %s: selecting folder %s\n", email_.c_str(), folder.c_str());
-        vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
-            vmime::net::imap::IMAPCommand::createCommand("SELECT " + folder);
-        conn->sendCommand(selectCmd);
-        vmime::shared_ptr<vmime::net::imap::IMAPParser::response> selectResp(conn->readResponse());
+        // SELECT the folder before entering IDLE (skip if already selected)
+        if (current_selected_folder_ != folder) {
+            LOG_INFO("[IDLE] %s: selecting folder %s\n", email_.c_str(), folder.c_str());
+            vmime::shared_ptr<vmime::net::imap::IMAPCommand> selectCmd =
+                vmime::net::imap::IMAPCommand::createCommand("SELECT " + folder);
+            conn->sendCommand(selectCmd);
+            vmime::shared_ptr<vmime::net::imap::IMAPParser::response> selectResp(conn->readResponse());
 
-        bool selectOk = false;
-        if (selectResp && !selectResp->isBad()) {
-            selectOk = true;
-        }
+            bool selectOk = selectResp && !selectResp->isBad();
+            LOG_INFO("[IDLE] %s: SELECT %s\n", email_.c_str(), selectOk ? "OK" : "FAILED");
 
-        LOG_INFO("[IDLE] %s: SELECT %s\n", email_.c_str(), selectOk ? "OK" : "FAILED");
-
-        if (!selectOk) {
-            last_error_ = "IDLE: SELECT failed for folder " + folder;
-            return false;
+            if (!selectOk) {
+                last_error_ = "IDLE: SELECT failed for folder " + folder;
+                return -1;
+            }
+            current_selected_folder_ = folder;
         }
 
         // 1. Send IDLE command directly via raw socket (bypass vmime's sendCommand
@@ -1666,7 +1686,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         auto constSocket = conn->getSocket();
         if (!constSocket) {
             last_error_ = "IDLE: no socket";
-            return false;
+            return -1;
         }
         auto sok = vmime::const_pointer_cast<vmime::net::socket>(constSocket);
         auto timeoutHandler = sok->getTimeoutHandler();
@@ -1698,9 +1718,6 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
                 if (timeoutHandler) timeoutHandler->resetTimeOut();
                 std::string chunk;
                 sok->receive(chunk);
-                if (!chunk.empty()) {
-                    LOG_INFO("[IDLE] %s: continuation read: %s\n", email_.c_str(), chunk.substr(0, 200).c_str());
-                }
                 if (chunk.empty()) continue;
 
                 rawBuffer += chunk;
@@ -1725,7 +1742,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
 
         if (!gotContinuation) {
             last_error_ = "IDLE: no continuation response from server";
-            return false;
+            return -1;
         }
 
         bool gotNotification = false;
@@ -1768,7 +1785,7 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
                     if (!line.empty() && line.back() == '\r') {
                         line.pop_back();
                     }
-                    LOG_INFO("[IDLE] %s: server line: %s\n", email_.c_str(), line.substr(0, 200).c_str());
+                    LOG_INFO("[IDLE] %s: server line: %.200s\n", email_.c_str(), line.c_str());
 
                     if (line.find("EXISTS") != std::string::npos) {
                         gotNotification = true;
@@ -1810,19 +1827,142 @@ bool EmailOpt163Impl::idle_wait(const std::string& folder, int timeout_seconds) 
         try { store_->disconnect(); } catch (...) {}
         session_.reset();
         store_.reset();
+        current_selected_folder_.clear();
 
-        return gotNotification;
+        return gotNotification ? 1 : 0;
     } catch (const vmime::exceptions::operation_timed_out& e) {
         last_error_ = std::string("IDLE wait failed: ") + e.what();
-        return false;
+        return -1;
     } catch (const vmime::exception& e) {
         last_error_ = std::string("IDLE wait failed: ") + e.what();
         LOG_INFO("[IDLE] %s: vmime exception: %s\n", email_.c_str(), e.what());
-        return false;
+        return -1;
     } catch (const std::exception& e) {
         last_error_ = std::string("IDLE wait failed: ") + e.what();
         LOG_INFO("[IDLE] %s: std exception: %s\n", email_.c_str(), e.what());
-        return false;
+        return -1;
+    }
+}
+
+// Extract UIDNEXT/UIDVALIDITY/EXISTS from a parsed IMAP response:
+// untagged "* n EXISTS", "* STATUS ... (UIDNEXT n UIDVALIDITY m)",
+// and "[UIDNEXT n]"/"[UIDVALIDITY n]" resp-text-codes in tagged/untagged OK.
+static void probe_extract_(const vmime::net::imap::IMAPParser::response* resp,
+                           long& uidnext, long& uidvalidity, long& exists) {
+    using namespace vmime::net::imap;
+    if (!resp) return;
+
+    auto readRespTextCode = [&](const IMAPParser::resp_cond_state* st) {
+        if (!st || !st->resp_text || !st->resp_text->resp_text_code) return;
+        const auto& code = st->resp_text->resp_text_code;
+        if (!code->nz_number) return;
+        if (code->type == IMAPParser::resp_text_code::UIDNEXT) {
+            uidnext = static_cast<long>(code->nz_number->value);
+        } else if (code->type == IMAPParser::resp_text_code::UIDVALIDITY) {
+            uidvalidity = static_cast<long>(code->nz_number->value);
+        }
+    };
+
+    for (const auto& item : resp->continue_req_or_response_data) {
+        if (!item->response_data) continue;
+        const auto& rd = item->response_data;
+        if (rd->mailbox_data) {
+            const auto& md = rd->mailbox_data;
+            if (md->type == IMAPParser::mailbox_data::EXISTS && md->number) {
+                exists = static_cast<long>(md->number->value);
+            } else if (md->type == IMAPParser::mailbox_data::STATUS && md->status_att_list) {
+                for (const auto& att : md->status_att_list->values) {
+                    const auto* num = att->value_as_number();
+                    if (!num) continue;
+                    if (att->type == IMAPParser::status_att_val::UIDNEXT) {
+                        uidnext = static_cast<long>(num->value);
+                    } else if (att->type == IMAPParser::status_att_val::UIDVALIDITY) {
+                        uidvalidity = static_cast<long>(num->value);
+                    } else if (att->type == IMAPParser::status_att_val::MESSAGES) {
+                        exists = static_cast<long>(num->value);
+                    }
+                }
+            }
+        }
+        readRespTextCode(rd->resp_cond_state.get());
+    }
+
+    if (resp->response_done && resp->response_done->response_tagged) {
+        readRespTextCode(resp->response_done->response_tagged->resp_cond_state.get());
+    }
+}
+
+std::string EmailOpt163Impl::noop_probe(const std::string& folder) {
+    if (!store_ || !store_->isConnected()) {
+        if (!connect_()) {
+            return R"({"status":"failed","error":"connect_failed"})";
+        }
+    }
+
+    try {
+        auto imapStore = vmime::dynamic_pointer_cast<vmime::net::imap::IMAPStore>(store_);
+        if (!imapStore) {
+            return R"({"status":"failed","error":"not_imap_store"})";
+        }
+        auto conn = imapStore->getConnection();
+        if (!conn) {
+            return R"({"status":"failed","error":"no_connection"})";
+        }
+
+        std::string folderPath = folder;
+        if (folderPath.find(' ') != std::string::npos && folderPath.front() != '"') {
+            folderPath = "\"" + folderPath + "\"";
+        }
+
+        long uidnext = -1, uidvalidity = -1, exists = -1;
+
+        if (current_selected_folder_ != folder) {
+            // Not selected yet — SELECT returns UIDNEXT/UIDVALIDITY/EXISTS itself.
+            auto selectCmd = vmime::net::imap::IMAPCommand::createCommand("SELECT " + folderPath);
+            conn->sendCommand(selectCmd);
+            vmime::shared_ptr<vmime::net::imap::IMAPParser::response> resp(conn->readResponse());
+            if (!resp || resp->isBad()) {
+                last_error_ = "probe select failed";
+                return R"({"status":"failed","error":"select_failed"})";
+            }
+            current_selected_folder_ = folder;
+            probe_extract_(resp.get(), uidnext, uidvalidity, exists);
+        } else {
+            // Already SELECTED — NOOP keepalive, server piggybacks mailbox changes.
+            auto noopCmd = vmime::net::imap::IMAPCommand::createCommand("NOOP");
+            conn->sendCommand(noopCmd);
+            vmime::shared_ptr<vmime::net::imap::IMAPParser::response> resp(conn->readResponse());
+            if (!resp || resp->isBad()) {
+                last_error_ = "probe noop failed";
+                return R"({"status":"failed","error":"noop_failed"})";
+            }
+            probe_extract_(resp.get(), uidnext, uidvalidity, exists);
+        }
+
+        // STATUS fallback: server did not report UIDNEXT in SELECT/NOOP response.
+        if (uidnext < 0) {
+            auto statusCmd = vmime::net::imap::IMAPCommand::createCommand(
+                "STATUS " + folderPath + " (UIDNEXT UIDVALIDITY MESSAGES)");
+            conn->sendCommand(statusCmd);
+            vmime::shared_ptr<vmime::net::imap::IMAPParser::response> resp(conn->readResponse());
+            if (!resp || resp->isBad()) {
+                last_error_ = "probe status failed";
+                return R"({"status":"failed","error":"status_failed"})";
+            }
+            probe_extract_(resp.get(), uidnext, uidvalidity, exists);
+        }
+
+        nlohmann::json out;
+        out["status"] = "success";
+        out["uidnext"] = uidnext;
+        out["uidvalidity"] = uidvalidity;
+        out["exists"] = exists;
+        return out.dump();
+
+    } catch (const std::exception& e) {
+        last_error_ = std::string("probe failed: ") + e.what();
+        LOG_INFO("163 noop_probe - exception: %s\n", e.what());
+        return R"({"status":"failed","error":"exception"})";
     }
 }
 

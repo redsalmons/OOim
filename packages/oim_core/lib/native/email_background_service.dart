@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 import 'dart:io';
+import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
 import 'email_core.dart' as native;
 
@@ -41,6 +42,8 @@ void supervisorEntryPoint(SendPort mainSendPort) {
   final Map<String, Isolate> childIsolates = {};
   final Map<String, SendPort> childSendPorts = {};
   final Map<String, bool> childAlive = {};
+  // Last 'pong' time per child, for healthcheck liveness detection
+  final Map<String, DateTime> lastPong = {};
   // Track the authCode per account email to detect credential changes
   final Map<String, String> accountAuthCodes = {};
   // Track which emails are currently configured
@@ -74,6 +77,7 @@ void supervisorEntryPoint(SendPort mainSendPort) {
     final exited = Completer<void>();
     childExits.add(exited);
     childAlive[childKey] = true; // Includes pending spawn/SendPort handshakes.
+    lastPong[childKey] = DateTime.now(); // Fresh spawn gets a grace window.
     final isolate = Isolate.spawn(
       (SendPort supervisorPort) => childEntryPoint(supervisorPort),
       childReceivePort.sendPort,
@@ -129,6 +133,10 @@ void supervisorEntryPoint(SendPort mainSendPort) {
             if (storageDir != null) 'storageDir': storageDir,
           });
         } else if (message is Map) {
+          if (message['type'] == 'pong') {
+            lastPong[childKey] = DateTime.now();
+            return;
+          }
           final msg = SupervisorMessage(
             message['type'] as String? ?? 'unknown',
             account: email,
@@ -175,8 +183,10 @@ void supervisorEntryPoint(SendPort mainSendPort) {
     final newEmails = <String>{};
     final newAuthCodes = <String, String>{};
 
+    // authCode may be empty: on macOS the credential lives in the vault,
+    // resolved natively by setEmailCredentials. Gate on email only.
     for (final account in config.accounts) {
-      if (account.email.isNotEmpty && account.authCode.isNotEmpty) {
+      if (account.email.isNotEmpty) {
         newEmails.add(account.email);
         newAuthCodes[account.email] = account.authCode;
       }
@@ -197,13 +207,15 @@ void supervisorEntryPoint(SendPort mainSendPort) {
         stopChild('$email:Sent');
         stopChild('$email:Download');
         stopChild('$email:SendTask');
-        accountAuthCodes[email] = newAuthCodes[email]!;
+        // Remove so the spawn loop below treats it as a new account —
+        // keeping the entry would permanently suppress respawn.
+        accountAuthCodes.remove(email);
       }
     }
 
     // Start children for new emails
     for (final account in config.accounts) {
-      if (account.email.isNotEmpty && account.authCode.isNotEmpty) {
+      if (account.email.isNotEmpty) {
         final alreadyRunning = accountAuthCodes.containsKey(account.email);
         if (alreadyRunning) continue;
 
@@ -323,7 +335,37 @@ void supervisorEntryPoint(SendPort mainSendPort) {
           log('Manual rescan triggered');
           scanConfigAndStart();
           break;
+        case 'healthcheck':
+          if (draining) break;
+          for (final port in childSendPorts.values) {
+            port.send({'type': 'ping'});
+          }
+          // Children block inside native FFI calls (IMAP/SMTP can take tens
+          // of seconds), so one missed pong just means "busy". Restart only
+          // when the pong is stale well beyond that bound — a real wedge.
+          final cutoff = DateTime.now().subtract(const Duration(seconds: 75));
+          for (final key in childAlive.keys.toList()) {
+            if (childAlive[key] != true) continue;
+            final pong = lastPong[key];
+            if (pong != null && pong.isBefore(cutoff)) {
+              log('Healthcheck: child $key unresponsive, restarting');
+              stopChild(key);
+              // The spawn gate keys on the account, not the child — the
+              // entry must be cleared or the respawn is suppressed forever.
+              accountAuthCodes.remove(key.split(':').first);
+            }
+          }
+          scanConfigAndStart();
+          break;
       }
+    }
+  });
+
+  // Heartbeat: lets children detect a dead supervisor (self-exit as orphans).
+  Timer.periodic(const Duration(seconds: 15), (timer) {
+    if (!running) return;
+    for (final port in childSendPorts.values) {
+      port.send({'type': 'ping'});
     }
   });
 
@@ -356,6 +398,15 @@ void childEntryPoint(SendPort supervisorPort) {
   int? configIndex;
   bool shouldStop = false;
   bool working = false;
+  // Self-watchdog: supervisor heartbeats keep this fresh; a dead supervisor
+  // means no pings, and an orphaned child should exit so the respawned
+  // supervisor's children aren't duplicated.
+  var lastSupervisorMsg = DateTime.now();
+  Timer.periodic(const Duration(seconds: 20), (t) {
+    if (DateTime.now().difference(lastSupervisorMsg).inSeconds > 60) {
+      Isolate.exit();
+    }
+  });
 
   void notify(String type, Map<String, dynamic>? data) {
     supervisorPort.send({
@@ -385,7 +436,7 @@ void childEntryPoint(SendPort supervisorPort) {
 
     // Fetch and store new emails from the specified folder
     final fetchResult = native.EmailCore.fetchAndStoreEmails(configIndex!, folder!, email!, storageDir ?? '');
-    log('fetchAndStoreEmails result for $folder (configIndex: $configIndex): $fetchResult');
+    // Full JSON no longer logged — it can be megabytes and floods oim.log.
 
     try {
       final decoded = jsonDecode(fetchResult);
@@ -414,31 +465,76 @@ void childEntryPoint(SendPort supervisorPort) {
     if (configIndex == null) return;
 
     // SENT folder typically doesn't support IDLE, use polling for all providers
-    // INBOX uses IDLE for Outlook and QQ, polling for 163
-    final usePolling = accountType == '163.com' || 
-                       accountType == 'emailType163';
+    // INBOX uses IDLE for Outlook and QQ, polling for 163/126
+    final usePolling = accountType == '163.com' ||
+                       accountType == 'emailType163' ||
+                       accountType == '126.com' ||
+                       accountType == 'emailType126';
 
     if (usePolling) {
-      // 163 IMAP does not support IDLE command (returns "BAD command not support").
-      // Outlook INBOX and Sent both use IDLE.
-      // Fall back to polling: fetch every 10 seconds.
-      const pollInterval = Duration(seconds: 10);
-      log('Using polling for $folder (every ${pollInterval.inSeconds}s)');
+      // 163/126 IMAP does not support IDLE (returns "BAD command not support").
+      // Probe with NOOP (native falls back to STATUS for UIDNEXT) every few
+      // seconds; only fetch when UIDNEXT advances past the baseline.
+      const probeInterval = Duration(seconds: 4);
+      log('Using UIDNEXT probe for $folder (every ${probeInterval.inSeconds}s)');
+
+      // Baseline from the local watermark so mail arriving between the initial
+      // sync and the first probe is still detected.
+      int lastUidnext =
+          (int.tryParse(native.EmailCore.getMaxUid(email ?? '', folder ?? 'INBOX')) ?? 0) + 1;
+      int lastUidvalidity = -1;
 
       while (!shouldStop) {
-        await Future.delayed(pollInterval);
+        await Future.delayed(probeInterval);
         if (shouldStop) break;
 
-        log('Polling: fetching new emails...');
-        final ok = await runFetchCycle();
-        if (!ok) {
-          log('Polling fetch failed, waiting 5s before retry to avoid server rejection...');
+        try {
+          final probe = jsonDecode(native.EmailCore.noopProbe(configIndex!, folder!));
+
+          if (probe['status'] != 'success') {
+            log('Probe failed: ${probe['error']}, waiting 5s...');
+            await Future.delayed(const Duration(seconds: 5));
+            continue;
+          }
+
+          final uidnext = (probe['uidnext'] as num?)?.toInt() ?? -1;
+          final uidvalidity = (probe['uidvalidity'] as num?)?.toInt() ?? -1;
+
+          // UIDVALIDITY generation change invalidates stored UIDs — force fetch.
+          if (uidvalidity >= 0 && lastUidvalidity >= 0 && uidvalidity != lastUidvalidity) {
+            log('UIDVALIDITY changed ($lastUidvalidity -> $uidvalidity), forcing fetch');
+            lastUidnext = -1;
+          }
+
+          if (uidnext <= 0) {
+            // Server reports no UIDNEXT at all — degrade to a timed fetch.
+            log('UIDNEXT not reported, falling back to fetch');
+            final ok = await runFetchCycle();
+            if (!ok) await Future.delayed(const Duration(seconds: 5));
+            await Future.delayed(const Duration(seconds: 10));
+          } else if (uidnext > lastUidnext) {
+            log('UIDNEXT advanced ($lastUidnext -> $uidnext), fetching...');
+            final ok = await runFetchCycle();
+            if (ok) {
+              lastUidnext = uidnext;
+            } else {
+              log('Fetch after UIDNEXT advance failed, waiting 5s...');
+              await Future.delayed(const Duration(seconds: 5));
+            }
+          }
+          if (uidvalidity >= 0) lastUidvalidity = uidvalidity;
+        } catch (e) {
+          log('Probe exception: $e');
           await Future.delayed(const Duration(seconds: 5));
         }
       }
     } else {
       // Outlook and others support IDLE
       log('Entering IDLE mode for real-time push...');
+
+      // idleWait semantics: 1 = server notification, 0 = timeout, <0 = error.
+      int lastUidnext =
+          (int.tryParse(native.EmailCore.getMaxUid(email ?? '', folder ?? 'INBOX')) ?? 0) + 1;
 
       while (!shouldStop) {
         // Block and wait for new email notification. Short timeout so the
@@ -447,15 +543,36 @@ void childEntryPoint(SendPort supervisorPort) {
 
         if (shouldStop) break;
 
-        if (idleResult == 0) {
+        if (idleResult == 1) {
           log('IDLE: New email detected, fetching...');
           final ok = await runFetchCycle();
           if (!ok) {
             log('Fetch after IDLE failed, waiting 5s before retry...');
             await Future.delayed(const Duration(seconds: 5));
           }
+        } else if (idleResult == 0) {
+          // Timeout — lightweight UIDNEXT probe instead of a full fetch where
+          // the provider supports it (QQ via the 163 impl); others keep the
+          // prior fetch-on-timeout behavior.
+          bool needFetch = true;
+          try {
+            final probe = jsonDecode(native.EmailCore.noopProbe(configIndex!, folder!));
+            if (probe['status'] == 'success') {
+              final uidnext = (probe['uidnext'] as num?)?.toInt() ?? -1;
+              needFetch = uidnext <= 0 || uidnext > lastUidnext;
+              if (uidnext > 0) lastUidnext = uidnext;
+            }
+          } catch (_) {
+            needFetch = true;
+          }
+          if (needFetch) {
+            final ok = await runFetchCycle();
+            if (!ok) {
+              await Future.delayed(const Duration(seconds: 5));
+            }
+          }
         } else {
-          // Timeout (-5) or error
+          // Error — reconnect/refresh
           log('IDLE wait returned $idleResult, reconnecting/refreshing...');
           final ok = await runFetchCycle();
           if (!ok) {
@@ -475,7 +592,9 @@ void childEntryPoint(SendPort supervisorPort) {
       try {
         // Check if there are any pending emails to download (no IMAP connection needed)
         final pendingCount = native.EmailCore.countPendingBodies(email!);
-        log('Download loop check: pendingCount=$pendingCount for $email');
+        if (pendingCount > 0) {
+          log('Download loop: pendingCount=$pendingCount for $email');
+        }
         
         if (pendingCount <= 0) {
           // No pending emails, skip IMAP connection
@@ -545,7 +664,9 @@ void childEntryPoint(SendPort supervisorPort) {
 
         // Process pending send tasks
         final result = native.EmailCore.taskProcessPending(configIndex!, email!);
-        log('SendTask loop: taskProcessPending for account=$email, configIndex=$configIndex, result=$result');
+        if (result != '"none"' && !result.contains('"sent":0')) {
+          log('SendTask: $email result=$result');
+        }
 
         try {
           final decoded = jsonDecode(result);
@@ -581,7 +702,11 @@ void childEntryPoint(SendPort supervisorPort) {
 
   receivePort.listen((msg) async {
     if (msg is Map<String, dynamic>) {
+      lastSupervisorMsg = DateTime.now();
       switch (msg['type']) {
+        case 'ping':
+          notify('pong', null);
+          break;
         case 'start':
           working = true;
           try {
@@ -677,8 +802,30 @@ void childEntryPoint(SendPort supervisorPort) {
 
 /// Manages the supervisor isolate from the UI thread.
 /// Call [start] to begin background email monitoring, [stop] to shut it down.
+class _LifecycleHook extends WidgetsBindingObserver {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      for (final s in EmailBackgroundService._instances) {
+        s._supervisorPort?.send(SupervisorCommand('healthcheck'));
+      }
+    }
+  }
+}
+
 class EmailBackgroundService {
   static final _instances = <EmailBackgroundService>{};
+  static bool _lifecycleObserved = false;
+
+  static void _ensureLifecycleObserver() {
+    if (_lifecycleObserved) return;
+    _lifecycleObserved = true;
+    try {
+      WidgetsBinding.instance.addObserver(_LifecycleHook());
+    } catch (_) {
+      // Binding not initialized (e.g. pure Dart context) — healthcheck skipped
+    }
+  }
   static bool _maintenance = false;
   static Future<void> pauseAll() async {
     _maintenance = true;
@@ -722,13 +869,39 @@ class EmailBackgroundService {
       return;
     }
 
+    _ensureLifecycleObserver();
     _mainReceivePort = ReceivePort();
     _ready = Completer<void>();
 
+    final supervisorExitPort = ReceivePort();
+    final supervisorErrorPort = ReceivePort();
     _supervisorIsolate = await Isolate.spawn(
       supervisorEntryPoint,
       _mainReceivePort!.sendPort,
+      onExit: supervisorExitPort.sendPort,
+      onError: supervisorErrorPort.sendPort,
     );
+
+    // Watchdog: a dead supervisor leaves children unmanaged — restart the
+    // whole service after a short delay (orphans self-exit via ping watchdog).
+    supervisorExitPort.listen((_) {
+      supervisorErrorPort.close();
+      supervisorExitPort.close();
+      _supervisorIsolate = null;
+      _ready = null;
+      onMessage(SupervisorMessage('log',
+          data: {'msg': 'Supervisor isolate exited, restarting in 5s'}));
+      Timer(const Duration(seconds: 5), () {
+        if (_instances.isNotEmpty &&
+            _supervisorIsolate == null &&
+            _configPath != null) {
+          start(_configPath!);
+        }
+      });
+    });
+    supervisorErrorPort.listen((e) {
+      onMessage(SupervisorMessage('log', data: {'msg': 'Supervisor error: $e'}));
+    });
 
     _subscription = _mainReceivePort!.listen((message) {
       if (message is SendPort) {

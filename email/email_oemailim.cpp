@@ -92,7 +92,8 @@ static std::string fetchEmailContent(int configIndex, const std::string& folder,
 }
 static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
                          std::string& textBody, std::string& htmlBody,
-                         nlohmann::json& attachments, bool& hasAttachment);
+                         nlohmann::json& attachments, bool& hasAttachment,
+                         std::string* messageType = nullptr);
 
 // Forward declaration for email_add_email_to_session from email_session.cpp
 extern "C" int email_add_email_to_session(const char* sessionId, const char* uuid, const char* account, int encrypt_method, char* outJson, int outSize);
@@ -409,6 +410,33 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                      message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str(), pe.uuid.c_str());
         } catch (const std::exception& e) {
             LOG_INFO("[DB] download_pending: failed to parse eml content: %s\n", e.what());
+        }
+
+        // Header is only a transport marker. Restore the type from the decoded
+        // body before choosing the Signal/MLS handler or persisting visibility.
+        try {
+            std::string payload, messageType;
+            if (!oim_parse_protocol_mail(emlContent, payload, messageType))
+                throw std::runtime_error("missing OceanTalk protocol body");
+            x_session_chart = messageType;
+            const bool visible = messageType != XMailer::ATTACH_CHUNK &&
+                                 messageType != XMailer::MLS_FILE_CHUNK;
+            if (!s_emailRepo.setProtocolType(pe.uuid, accountStr, messageType, visible))
+                throw std::runtime_error("failed to persist OceanTalk message type");
+        } catch (const std::exception& e) {
+            // Legacy wire format (X-Mailer present but not "OceanTalk") can
+            // never decode — mark done instead of retrying forever, or it
+            // starves the pending queue (LIMIT 10) and new mail stalls.
+            if (!x_session_chart.empty() && !XMailer::isWireValue(x_session_chart)) {
+                LOG_INFO("[DB] download_pending: legacy wire format uuid=%s (x_mailer=%s), marking done\n",
+                         pe.uuid.c_str(), x_session_chart.c_str());
+                s_emailRepo.setIslocal(pe.uuid, accountStr, 2);
+                continue;
+            }
+            LOG_INFO("[DB] download_pending: invalid protocol envelope uuid=%s: %s\n",
+                     pe.uuid.c_str(), e.what());
+            s_emailRepo.incrementRetryCount(pe.uuid, accountStr);
+            continue;
         }
 
         // Persist the wire body up front so every displayable message has a
@@ -1440,14 +1468,15 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
 // Helper: recursively extract text/html body and attachments from vmime message parts
 static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
                          std::string& textBody, std::string& htmlBody,
-                         json& attachments, bool& hasAttachment) {
+                         json& attachments, bool& hasAttachment,
+                         std::string* messageType) {
     auto body = part->getBody();
     vmime::mediaType ct = body->getContentType();
 
     if (ct.getType() == vmime::mediaTypes::MULTIPART) {
         auto parts = body->getPartList();
         for (size_t i = 0; i < parts.size(); i++) {
-            extractParts(parts[i], textBody, htmlBody, attachments, hasAttachment);
+            extractParts(parts[i], textBody, htmlBody, attachments, hasAttachment, messageType);
         }
         return;
     }
@@ -1574,11 +1603,35 @@ static void extractParts(const vmime::shared_ptr<vmime::bodyPart>& part,
         }
 
         if (subType == vmime::mediaTypes::TEXT_PLAIN && textBody.empty()) {
-            textBody = content;
+            std::string payload, type;
+            if (oim_decode_wire_body(content, payload, type)) {
+                textBody = payload;
+                if (messageType) *messageType = type;
+            } else {
+                textBody = content;
+            }
         } else if (subType == vmime::mediaTypes::TEXT_HTML && htmlBody.empty()) {
             htmlBody = content;
         }
     }
+}
+
+bool oim_parse_protocol_mail(const std::string& eml, std::string& payload, std::string& messageType) {
+    auto msg = vmime::make_shared<vmime::message>();
+    msg->parse(eml);
+    const auto header = msg->getHeader();
+    if (!header->hasField(XMailer::HEADER)) return false;
+    const auto marker = vmime::text::decodeAndUnfold(header->findField(XMailer::HEADER)->getValue()->generate());
+    if (!marker || !XMailer::isWireValue(marker->getConvertedText(vmime::charset("utf-8"))))
+        return false;
+    std::string text, html, type;
+    json attachments = json::array();
+    bool hasAttachment = false;
+    extractParts(msg, text, html, attachments, hasAttachment, &type);
+    if (type.empty()) return false;
+    payload = text;
+    messageType = type;
+    return true;
 }
 
 bool parse_stored_body_text(int64_t emailId, std::string& textBody, std::string& htmlBody) {
@@ -1644,7 +1697,12 @@ extern "C" int email_parse_body(int64_t emailId, char* outJson, int outSize) {
         json attachments = json::array();
         bool hasAttachment = false;
 
-        extractParts(msg, textBody, htmlBody, attachments, hasAttachment);
+        std::string messageType;
+        extractParts(msg, textBody, htmlBody, attachments, hasAttachment, &messageType);
+        if (XMailer::isWireValue(xMailer)) {
+            if (messageType.empty()) throw std::runtime_error("missing OceanTalk protocol body");
+            xMailer = messageType;
+        }
 
         json response;
         response["status"] = "success";

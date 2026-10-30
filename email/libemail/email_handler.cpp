@@ -8,6 +8,7 @@
 #include "email_config_provider.h"
 #include "logger.h"
 #include <fstream>
+#include <sys/stat.h>
 
 namespace oemailim {
 
@@ -128,11 +129,13 @@ int EmailHandler::OpenNewEmail(const std::string& email_id) {
 
     // Determine provider type from config.type
     if (target_config.type == "163.com" || target_config.type == "emailType163" ||
-        target_config.type == "qq.com" || target_config.type == "emailTypeQQ") {
-        
+        target_config.type == "qq.com" || target_config.type == "emailTypeQQ" ||
+        target_config.type == "126.com" || target_config.type == "emailType126") {
+
         bool isQQ = (target_config.type == "qq.com" || target_config.type == "emailTypeQQ");
-        std::string defaultSmtp = isQQ ? "smtp.qq.com" : "smtp.163.com";
-        std::string defaultImap = isQQ ? "imap.qq.com" : "imap.163.com";
+        bool is126 = (target_config.type == "126.com" || target_config.type == "emailType126");
+        std::string defaultSmtp = isQQ ? "smtp.qq.com" : (is126 ? "smtp.126.com" : "smtp.163.com");
+        std::string defaultImap = isQQ ? "imap.qq.com" : (is126 ? "imap.126.com" : "imap.163.com");
         
         provider = oemailim::EmailProvider::EMAIL_PROVIDER_163;
         email = std::make_shared<EmailComm::Email163>(
@@ -255,11 +258,13 @@ void EmailHandler::loadEmailConfig(const oemail::EmailConfig& config) {
 
     // Determine provider type from config.type
     if (config.type == "163.com" || config.type == "emailType163" ||
-        config.type == "qq.com" || config.type == "emailTypeQQ") {
-        
+        config.type == "qq.com" || config.type == "emailTypeQQ" ||
+        config.type == "126.com" || config.type == "emailType126") {
+
         bool isQQ = (config.type == "qq.com" || config.type == "emailTypeQQ");
-        std::string defaultSmtp = isQQ ? "smtp.qq.com" : "smtp.163.com";
-        std::string defaultImap = isQQ ? "imap.qq.com" : "imap.163.com";
+        bool is126 = (config.type == "126.com" || config.type == "emailType126");
+        std::string defaultSmtp = isQQ ? "smtp.qq.com" : (is126 ? "smtp.126.com" : "smtp.163.com");
+        std::string defaultImap = isQQ ? "imap.qq.com" : (is126 ? "imap.126.com" : "imap.163.com");
         
         provider = oemailim::EmailProvider::EMAIL_PROVIDER_163;
         email = std::make_shared<EmailComm::Email163>(
@@ -367,7 +372,16 @@ bool EmailHandler::refreshConfigForIndex(int configIndex) {
     auto email = g_EmailConfigIndices[configIndex];
     if (!email) return false;
 
-    oemail::ConfigLoader loader(configDir + "/oim.conf");
+    // Skip re-reading the conf when it hasn't changed since the last applied load.
+    const std::string confPath = configDir + "/oim.conf";
+    static time_t s_confMtime = 0;
+    struct stat st;
+    const bool haveStat = (stat(confPath.c_str(), &st) == 0);
+    if (haveStat && s_confMtime != 0 && st.st_mtime == s_confMtime) {
+        return true;
+    }
+
+    oemail::ConfigLoader loader(confPath);
     if (!loader.load()) return false;
 
     const std::string addr = email->get_address();
@@ -392,6 +406,7 @@ bool EmailHandler::refreshConfigForIndex(int configIndex) {
         }
         LOG_INFO("config refresh: account=%s imap=%s:%d smtp=%s:%d\n", addr.c_str(),
                  cfg.imap_server.c_str(), cfg.imap_port, cfg.smtp_server.c_str(), cfg.smtp_port);
+        if (haveStat) s_confMtime = st.st_mtime;
         return true;
     }
     return false;

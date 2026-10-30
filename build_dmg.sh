@@ -2,7 +2,7 @@
 set -e
 
 # Version used in the DMG filename — bump here for each release.
-VERSION="1.0.0"
+VERSION="1.0.1"
 # Package arch tag: universal (arm64+x86_64 fat binaries).
 ARCH_TAG="universal"
 

@@ -1075,19 +1075,10 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         irt = "<" + irt + ">";
     }
 
-    // Protocol bodies travel as a zip-packed message.oim attachment when
-    // X-Mailer is set; the body shows only the notice text.
+    // Graph must send protocol armor as text, not HTML (which folds line breaks).
     std::string wireBody = body;
-    nlohmann::json jAttachments = nlohmann::json::array();
     if (!x_session_chart.empty()) {
-        wireBody = oim_notice_text();
-        std::vector<uint8_t> zipped = oim_zip_pack(body);
-        jAttachments.push_back({
-            {"@odata.type", "#microsoft.graph.fileAttachment"},
-            {"name", "message.oim"},
-            {"contentType", "application/octet-stream"},
-            {"contentBytes", base64_encode_bytes(zipped)}
-        });
+        wireBody = oim_encode_wire_body(body, x_session_chart);
     }
 
     std::string email_msg;
@@ -1100,10 +1091,11 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
         email_msg += "References: " + irt + "\r\n";
     }
     if (!x_session_chart.empty()) {
-        email_msg += "X-Mailer: " + x_session_chart + "\r\n";
+        email_msg += std::string("X-Mailer: ") + XMailer::WIRE_VALUE + "\r\n";
     }
     email_msg += "MIME-Version: 1.0\r\n";
-    email_msg += "Content-Type: text/html; charset=utf-8\r\n";
+    email_msg += x_session_chart.empty() ? "Content-Type: text/html; charset=utf-8\r\n"
+                                        : "Content-Type: text/plain; charset=utf-8\r\n";
     email_msg += "Content-Transfer-Encoding: 8bit\r\n";
     email_msg += "\r\n";
     email_msg += wireBody;
@@ -1135,7 +1127,7 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
 
     nlohmann::json jHeaders = nlohmann::json::array();
     if (!x_session_chart.empty()) {
-        jHeaders.push_back({{"name", "X-Mailer"}, {"value", x_session_chart}});
+        jHeaders.push_back({{"name", "X-Mailer"}, {"value", XMailer::WIRE_VALUE}});
     }
     // Note: In-Reply-To and References are NOT set here. Graph API's
     // internetMessageHeaders only accepts custom headers starting with 'x-'/'X-'.
@@ -1144,16 +1136,13 @@ bool EmailOptOutlookImpl::send_email_via_graph_api(const std::string& recipient,
     nlohmann::json jBody;
     jBody["message"] = {
         {"subject", subject},
-        {"body", {{"contentType", "HTML"}, {"content", wireBody}}},
+        {"body", {{"contentType", x_session_chart.empty() ? "HTML" : "Text"}, {"content", wireBody}}},
         {"toRecipients", jRecipients},
         {"internetMessageHeaders", jHeaders}
     };
-    if (!jAttachments.empty()) {
-        jBody["message"]["attachments"] = jAttachments;
-    }
 
     std::string json_body = jBody.dump();
-    LOG_INFO("Outlook send_email_via_graph_api: JSON body: %s\n", json_body.c_str());
+    LOG_INFO("Outlook send_email_via_graph_api: request size=%zu\n", json_body.size());
     
     // Single sendMail call with injected Message-ID via extended property
     // The server will use our Message-ID instead of generating its own
@@ -1385,22 +1374,13 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         // Set subject
         builder.setSubject(vmime::text(subject, vmime::charset("UTF-8")));
         
-        // Set body — protocol bodies travel as a zip-packed message.oim
-        // attachment so external clients only see the notice text; plain mail
-        // is sent verbatim.
+        // Set body — protocol payload and type travel in text/plain armor.
         builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
         if (x_session_chart.empty()) {
             builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(body));
         } else {
-            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(oim_notice_text()));
-            std::vector<uint8_t> zipped = oim_zip_pack(body);
-            builder.attach(vmime::make_shared<vmime::defaultAttachment>(
-                vmime::make_shared<vmime::stringContentHandler>(
-                    std::string(reinterpret_cast<const char*>(zipped.data()), zipped.size())),
-                vmime::encoding(vmime::encodingTypes::BASE64),
-                vmime::mediaType("application/octet-stream"),
-                vmime::NULL_TEXT,
-                vmime::word("message.oim")));
+            builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(
+                oim_encode_wire_body(body, x_session_chart)));
         }
         
         // Build the message
@@ -1427,7 +1407,7 @@ bool EmailOptOutlookImpl::send_email_via_vmime_smtp(const std::string& recipient
         // Add custom header: X-Mailer
         if (!x_session_chart.empty()) {
             vmime::shared_ptr<vmime::headerField> xMailerField =
-                vmime::headerFieldFactory::getInstance()->create("X-Mailer", x_session_chart);
+                vmime::headerFieldFactory::getInstance()->create("X-Mailer", XMailer::WIRE_VALUE);
             msg->getHeader()->appendField(xMailerField);
         }
         
@@ -1596,13 +1576,13 @@ std::string EmailOptOutlookImpl::fetch_email_headers(const std::string& folder, 
 }
 
 
-bool EmailOptOutlookImpl::idle_wait(const std::string& folder, int timeout_seconds) {
+int EmailOptOutlookImpl::idle_wait(const std::string& folder, int timeout_seconds) {
     // Use Microsoft Graph delta query for Outlook watch
     LOG_INFO("Outlook [WATCH] Using Graph API delta query for folder %s (timeout=%d)\n", folder.c_str(), timeout_seconds);
 
     if (!ensure_graph_token()) {
         LOG_INFO("Outlook [WATCH] failed to ensure graph token: %s\n", last_error_.c_str());
-        return false;
+        return -1;
     }
 
     auto start = std::chrono::steady_clock::now();
@@ -1615,7 +1595,7 @@ bool EmailOptOutlookImpl::idle_wait(const std::string& folder, int timeout_secon
             }
             if (!pending_message_ids_.empty()) {
                 LOG_INFO("Outlook [WATCH] found %zu new message(s)\n", pending_message_ids_.size());
-                return true;
+                return 1;
             }
         }
 
@@ -1623,7 +1603,7 @@ bool EmailOptOutlookImpl::idle_wait(const std::string& folder, int timeout_secon
             std::chrono::steady_clock::now() - start).count();
         if (elapsed >= timeout_seconds) {
             LOG_INFO("Outlook [WATCH] timeout, no new messages\n");
-            return false;
+            return 0;
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(2));

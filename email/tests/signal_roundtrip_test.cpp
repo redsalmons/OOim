@@ -4,12 +4,18 @@
 #include "email_core_common.h"
 #include "signal_protocol.h"
 #include "signal_message.h"
+#include "libemail/x_mailer.h"
+#include "email_body_repo.h"
+#include "email_repo.h"
+#include "file_chunk_util.h"
+#include <vmime/vmime.hpp>
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <random>
 
 using json = nlohmann::json;
 
@@ -19,6 +25,128 @@ static int g_failures = 0;
 
 static const char* A = "alice@example.com";
 static const char* B = "bob@example.com";
+
+static std::string mime_roundtrip(const std::string& payload, const std::string& type) {
+    vmime::messageBuilder builder;
+    builder.setExpeditor(vmime::mailbox(A));
+    vmime::addressList recipients;
+    recipients.appendAddress(vmime::make_shared<vmime::mailbox>(B));
+    builder.setRecipients(recipients);
+    builder.setSubject(vmime::text("OceanTalk transport test"));
+    builder.getTextPart()->setCharset(vmime::charset("UTF-8"));
+    builder.getTextPart()->setText(vmime::make_shared<vmime::stringContentHandler>(
+        oim_encode_wire_body(payload, type)));
+    auto msg = builder.construct();
+    msg->getHeader()->appendField(
+        vmime::headerFieldFactory::getInstance()->create("X-Mailer", XMailer::WIRE_VALUE));
+    // Deliberately unrelated header IDs: transport must preserve body IDs.
+    msg->getHeader()->MessageId()->setValue("<unrelated-header@example.com>");
+    const auto eml = msg->generate();
+    CHECK(eml.find("message.oim") == std::string::npos, "no protocol attachment");
+    CHECK(eml.find("application/octet-stream") == std::string::npos, "no binary MIME part");
+    std::string decoded, decodedType;
+    REQUIRE(oim_parse_protocol_mail(eml, decoded, decodedType), "parse MIME armor");
+    CHECK(decodedType == type, "internal protocol type preserved");
+    CHECK(decoded == payload, "payload and body IDs byte-for-byte preserved");
+    return decoded;
+}
+
+static void test_wire_format() {
+    const std::string payload = R"({"x-message-id":"<body-id>","x-reply-to":"<parent>","text":"中文\npayload"})";
+    for (const auto* type : {XMailer::PREKEY_BUNDLE, XMailer::SESSION_INIT,
+                            XMailer::RATCHET_MSG, XMailer::REPAIR_MSG,
+                            XMailer::ATTACH_META, XMailer::ATTACH_CHUNK,
+                            XMailer::MLS_KEY_PACKAGE, XMailer::MLS_WELCOME,
+                            XMailer::MLS_COMMIT, XMailer::MLS_APP_MSG,
+                            XMailer::MLS_FILE_META, XMailer::MLS_FILE_CHUNK}) {
+        mime_roundtrip(payload, type);
+    }
+    // Graph's Text body and standard MIME transfer encodings must decode alike.
+    auto wire = oim_encode_wire_body(payload, XMailer::PREKEY_BUNDLE);
+    std::string crlf;
+    for (char c : wire) crlf += c == '\n' ? "\r\n" : std::string(1, c);
+    const std::string headers =
+        "X-Mailer: OceanTalk\r\nMIME-Version: 1.0\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n";
+    for (const auto* encoding : {"8bit", "base64", "quoted-printable"}) {
+        std::string body = crlf;
+        if (std::string(encoding) == "base64") {
+            body = base64_encode(reinterpret_cast<const unsigned char*>(crlf.data()), crlf.size());
+        } else if (std::string(encoding) == "quoted-printable") {
+            body.clear();
+            for (unsigned char c : crlf) {
+                char hex[4];
+                snprintf(hex, sizeof(hex), "=%02X", c);
+                body += hex;
+                body += "=\r\n"; // exercise soft line wrapping
+            }
+        }
+        std::string decoded, type;
+        REQUIRE(oim_parse_protocol_mail(headers + "Content-Transfer-Encoding: " +
+                encoding + "\r\n\r\n" + body, decoded, type), "MIME transfer encoding");
+        CHECK(decoded == payload && type == XMailer::PREKEY_BUNDLE, "decoded Graph/MIME body");
+    }
+    std::string decoded, type;
+    CHECK(!oim_parse_protocol_mail(headers + "\r\nordinary text", decoded, type),
+          "marker without armor is not protocol data");
+    CHECK(!oim_decode_wire_body("ordinary email", decoded, type), "ordinary text unchanged");
+    for (const auto& broken : {
+            wire.substr(0, wire.find("-----END")),
+            std::string("-----BEGIN OCEANTALK MESSAGE-----\n!!!!\n-----END OCEANTALK MESSAGE-----"),
+            wire + wire}) {
+        bool rejected = false;
+        try { oim_decode_wire_body(broken, decoded, type); }
+        catch (const std::exception&) { rejected = true; }
+        CHECK(rejected, "malformed/truncated/duplicate armor rejected");
+    }
+    for (const auto& envelope : {
+            json{{"wire_version", 99}, {"message_type", "1.0.0"}, {"payload", payload}},
+            json{{"wire_version", 1}, {"message_type", "invalid"}, {"payload", payload}}}) {
+        const auto zip = oim_zip_pack(envelope.dump());
+        const auto armor = std::string("-----BEGIN OCEANTALK MESSAGE-----\n") +
+            base64_encode(zip.data(), zip.size()) + "\n-----END OCEANTALK MESSAGE-----\n";
+        bool rejected = false;
+        try { oim_decode_wire_body(armor, decoded, type); }
+        catch (const std::exception&) { rejected = true; }
+        CHECK(rejected, "unknown envelope version/type rejected");
+    }
+}
+
+static void test_stored_wire_body() {
+    REQUIRE(sqlite3_exec(g_db,
+        "CREATE TABLE email_body(email_id INTEGER PRIMARY KEY, body TEXT);"
+        "CREATE TABLE localemail(uuid TEXT, account TEXT, x_mailer TEXT, visible INTEGER);"
+        "INSERT INTO localemail VALUES('1','alice@example.com','OceanTalk',0);"
+        "INSERT INTO localemail VALUES('1','bob@example.com','OceanTalk',0);",
+        nullptr, nullptr, nullptr) == SQLITE_OK, "transport test tables");
+    EmailBodyRepo bodies;
+    EmailRepo emails;
+    const std::string payload = R"({"x-message-id":"<body>","x-reply-to":"<parent>"})";
+    const std::string prefix = "X-Mailer: OceanTalk\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+    REQUIRE(bodies.upsert(1, prefix + oim_encode_wire_body(payload, XMailer::MLS_WELCOME)),
+            "persist received armor");
+    char buffer[4096];
+    REQUIRE(email_parse_body(1, buffer, sizeof(buffer)) == 0, "parse stored wire body");
+    auto parsed = json::parse(buffer);
+    CHECK(parsed["x_mailer"] == XMailer::MLS_WELCOME && parsed["text_body"] == payload,
+          "UI receives internal type and original protocol body");
+    CHECK(parsed["has_attachments"] == false, "armor is not a UI attachment");
+    REQUIRE(emails.setProtocolType("1", A, XMailer::MLS_FILE_CHUNK, false), "persist chunk type");
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(g_db, "SELECT x_mailer, visible FROM localemail ORDER BY account",
+                              -1, &stmt, nullptr) == SQLITE_OK, "read classification");
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW, "alice row");
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))) ==
+          XMailer::MLS_FILE_CHUNK && sqlite3_column_int(stmt, 1) == 0, "chunk remains hidden");
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW, "bob row");
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))) ==
+          "OceanTalk", "same UID in other account not modified");
+    sqlite3_finalize(stmt);
+    REQUIRE(bodies.upsert(1, "X-Mailer: 1.0.2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello"),
+            "persist decrypted local body");
+    REQUIRE(email_parse_body(1, buffer, sizeof(buffer)) == 0, "read normalized local body");
+    CHECK(json::parse(buffer)["text_body"] == "hello", "local plaintext does not require armor");
+}
 
 static json call_json(int (*fn)(const char*, const char*, const char*, const char*, char*, int, const char*, const char*),
                       const char* acc, const char* peer, const char* sid, const char* text,
@@ -35,7 +163,8 @@ static json encrypt(const char* acc, const char* peer, const std::string& sid, c
 
 static json decrypt(const char* acc, const json& message) {
     std::vector<char> buf(1 << 20);
-    std::string body = message.dump();
+    std::string body = mime_roundtrip(message.dump(),
+        message.value("type", "") == "session_init" ? XMailer::SESSION_INIT : XMailer::RATCHET_MSG);
     signal_session_decrypt(acc, "courier@relay", body.c_str(), buf.data(), (int)buf.size());
     return json::parse(buf.data());
 }
@@ -120,6 +249,55 @@ static void test_bidirectional_and_out_of_order(const std::string& sid) {
     CHECK(e3["status"] == "success" && e3["plaintext"] == "b3", "alice decrypts b3");
 }
 
+static void test_inline_file_chunks(const std::string& sid) {
+    // One full production-size chunk plus a short final chunk. Random bytes
+    // exercise multi-MB armor rather than collapsing to a tiny compressed body.
+    std::string file(filechunk::kDefaultChunkSize + 137, '\0');
+    std::mt19937 random(42);
+    for (auto& byte : file) byte = static_cast<char>(random() & 0xff);
+    std::string received;
+    std::string parent = "<file-meta>";
+    int index = 0;
+    for (size_t offset = 0; offset < file.size(); offset += filechunk::kDefaultChunkSize, ++index) {
+        const auto chunk = file.substr(offset, filechunk::kDefaultChunkSize);
+        const auto id = "<inline-chunk-" + std::to_string(index) + ">";
+        const auto data = base64_encode(reinterpret_cast<const unsigned char*>(chunk.data()), chunk.size());
+        const json truck = {
+            {"msg_type", "truck"}, {"file_id", "inline-file"}, {"chunk_index", index},
+            {"chunk_data", data}, {"chunk_md5", compute_md5(chunk)},
+            {"x_message_id", id}, {"x_reply_to", parent}};
+        const auto plain = truck.dump();
+        std::vector<char> encrypted(plain.size() * 2 + 65536);
+        REQUIRE(signal_session_encrypt(A, B, sid.c_str(), plain.c_str(),
+            encrypted.data(), static_cast<int>(encrypted.size()), id.c_str(), parent.c_str()) == 0,
+            "encrypt full-size file chunk with existing Signal protocol");
+        const auto result = json::parse(encrypted.data());
+        REQUIRE(result["status"] == "success", "file chunk encryption succeeds");
+        const auto envelope = mime_roundtrip(result["message"].dump(), XMailer::ATTACH_CHUNK);
+        std::vector<char> decrypted(envelope.size() + 65536);
+        REQUIRE(signal_session_decrypt(B, A, envelope.c_str(), decrypted.data(),
+            static_cast<int>(decrypted.size())) == 0, "decrypt inline file chunk");
+        const auto decoded = json::parse(decrypted.data());
+        REQUIRE(decoded["status"] == "success", "inline chunk decryption succeeds");
+        CHECK(decoded["plaintext"] == plain, "file protocol fields preserved exactly");
+        const auto recovered = json::parse(decoded["plaintext"].get<std::string>());
+        const auto bytes = base64_decode(recovered["chunk_data"].get<std::string>());
+        const std::string restored(bytes.begin(), bytes.end());
+        CHECK(compute_md5(restored) == recovered["chunk_md5"], "chunk checksum unchanged");
+        received += restored;
+
+        // Transport-only MLS fixture: opaque ciphertext is never interpreted
+        // or transformed into Signal data by the inline wrapper.
+        const json mlsWire = {
+            {"type", "mls_file_chunk"}, {"x_session_id", "group-fixture"},
+            {"x_message_id", id}, {"x_reply_to", parent}, {"sender", A},
+            {"ciphertext", data}};
+        mime_roundtrip(mlsWire.dump(), XMailer::MLS_FILE_CHUNK);
+        parent = id;
+    }
+    CHECK(received == file, "full-size and final chunks reconstruct identical file bytes");
+}
+
 static void test_tamper(const std::string& sid) {
     json m = encrypt(A, B, sid, "secret", "<t1>");
 
@@ -180,10 +358,13 @@ static void test_bad_signature_and_identity_change() {
 int main() {
     REQUIRE(sqlite3_open(":memory:", &g_db) == SQLITE_OK, "open memory db");
     email_db_create_signal_tables(g_db);
+    test_wire_format();
+    test_stored_wire_body();
 
     std::string initCt;
     std::string sid = handshake(initCt);
     test_bidirectional_and_out_of_order(sid);
+    test_inline_file_chunks(sid);
     test_tamper(sid);
     test_bad_signature_and_identity_change();
 

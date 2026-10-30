@@ -190,6 +190,7 @@ class AppStrings {
 
   // Provider names
   static String get netease163 => isZh ? '网易163邮箱' : 'NetEase 163 Mail';
+  static String get netease126 => isZh ? '网易126邮箱' : 'NetEase 126 Mail';
   static String get qqMail => isZh ? 'QQ邮箱' : 'QQ Mail';
 
   // Email utils

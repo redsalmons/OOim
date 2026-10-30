@@ -187,6 +187,17 @@ int IdleWait_c(int configIndex, const char* folder, int timeoutSeconds);
 
 int FindSentFolder_c(int configIndex, char* outFolder, int outSize);
 
+/**
+ * @brief Lightweight mailbox probe for providers without IDLE (163/126/QQ).
+ * Sends NOOP on the selected folder and falls back to STATUS for UIDNEXT.
+ * @param configIndex Config index returned by OpenNewEmail_c
+ * @param folder Folder path (e.g. "INBOX")
+ * @param outJson Output buffer for JSON: {"status":"success","uidnext":N,"uidvalidity":M,"exists":E}
+ * @param outSize Size of output buffer
+ * @return 0 on success, negative on error
+ */
+int NoopProbe_c(int configIndex, const char* folder, char* outJson, int outSize);
+
 int EmailGetMaxUid_c(const char* account, const char* folder, char* outUid, int outSize);
 
 int SendEmail_c(int configIndex, const char* content);

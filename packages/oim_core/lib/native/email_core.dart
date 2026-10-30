@@ -316,6 +316,9 @@ typedef _OemailimEmailSelectDart = int Function(int, Pointer<Utf8>, Pointer<Utf8
 typedef _EmailIdleWaitNative = Int32 Function(Int32, Pointer<Utf8>, Int32);
 typedef _EmailIdleWaitDart = int Function(int, Pointer<Utf8>, int);
 
+typedef _EmailNoopProbeNative = Int32 Function(Int32, Pointer<Utf8>, Pointer<Utf8>, Int32);
+typedef _EmailNoopProbeDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>, int);
+
 typedef _EmailFindSentFolderNative = Int32 Function(Int32, Pointer<Utf8>, Int32);
 typedef _EmailFindSentFolderDart = int Function(int, Pointer<Utf8>, int);
 
@@ -502,6 +505,7 @@ final _emailQuerySessionIndexUuid = _lib.lookupFunction<_EmailQuerySessionIndexU
 
 final _emailGetMaxUid = _lib.lookupFunction<_EmailGetMaxUidNative, _EmailGetMaxUidDart>('email_get_max_uid');
 final _emailIdleWait = _lib.lookupFunction<_EmailIdleWaitNative, _EmailIdleWaitDart>('email_idle_wait');
+final _emailNoopProbe = _lib.lookupFunction<_EmailNoopProbeNative, _EmailNoopProbeDart>('email_noop_probe');
 final _emailFindSentFolder = _lib.lookupFunction<_EmailFindSentFolderNative, _EmailFindSentFolderDart>('email_find_sent_folder');
 final _emailSendViaConfig = _lib.lookupFunction<_EmailSendViaConfigNative, _EmailSendViaConfigDart>('email_send_via_config');
 final _emailLastError = _lib.lookupFunction<_EmailLastErrorNative, _EmailLastErrorDart>('email_get_last_error');
@@ -1283,6 +1287,21 @@ class EmailCore {
       return _emailIdleWait(configIndex, folderPtr, timeoutSeconds);
     } finally {
       malloc.free(folderPtr);
+    }
+  }
+
+  /// Lightweight mailbox probe (NOOP + STATUS fallback) for providers
+  /// without IDLE (163/126/QQ). Returns JSON string:
+  /// {"status":"success","uidnext":N,"uidvalidity":M,"exists":E}
+  static String noopProbe(int configIndex, String folder) {
+    final folderPtr = folder.toNativeUtf8();
+    final outJson = malloc.allocate<Utf8>(8192);
+    try {
+      _emailNoopProbe(configIndex, folderPtr, outJson, 8192);
+      return outJson.toDartString();
+    } finally {
+      malloc.free(folderPtr);
+      malloc.free(outJson);
     }
   }
 

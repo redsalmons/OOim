@@ -95,6 +95,25 @@ public:
                          std::string& error_message) const override;
 };
 
+class Email126ConfigProvider : public EmailConfigProvider {
+public:
+    std::string get_email_type() const override {
+        return "126.com";
+    }
+
+    std::string get_display_name() const override {
+        return "emailType126";
+    }
+
+    std::vector<ConfigField> get_config_fields() const override;
+
+    EmailConfig build_config(const std::map<std::string, std::string>& field_values,
+                             const std::string& master_password) const override;
+
+    bool validate_fields(const std::map<std::string, std::string>& field_values,
+                         std::string& error_message) const override;
+};
+
 class EmailQQConfigProvider : public EmailConfigProvider {
 public:
     std::string get_email_type() const override {

@@ -21,13 +21,16 @@ bool verify_with_ecc_public_key(const std::string& pubPem, const std::string& da
 std::string base64_encode(const unsigned char* data, size_t len);
 std::vector<uint8_t> base64_decode(const std::string& encoded);
 
-// Wire format for protocol mail: the text part is a fixed human-readable notice
-// and the real protocol JSON travels as a zip-packed "message.oim" attachment,
-// so external mail clients never see the JSON. Zip also deflates the base64
-// redundancy of chunk ciphertext, shrinking wire size versus plain bodies.
+// Protocol transport: notice + ASCII armor in text/plain. The zipped envelope
+// preserves the internal message type and the exact original protocol payload.
 const char* oim_notice_text();
 std::vector<uint8_t> oim_zip_pack(const std::string& text);
 std::string oim_zip_unpack(const std::vector<uint8_t>& zipData); // empty on failure
+std::string oim_encode_wire_body(const std::string& payload, const std::string& messageType);
+// Returns false for ordinary text; malformed armor throws.
+bool oim_decode_wire_body(const std::string& text, std::string& payload, std::string& messageType);
+// Requires X-Mailer: OceanTalk and valid text/plain armor.
+bool oim_parse_protocol_mail(const std::string& eml, std::string& payload, std::string& messageType);
 std::string compute_md5(const std::string& input);
 std::vector<uint8_t> zlib_compress(const std::vector<uint8_t>& data);
 std::vector<uint8_t> zlib_decompress(const std::vector<uint8_t>& compressed);

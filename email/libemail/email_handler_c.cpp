@@ -10,6 +10,7 @@
 #include "db_connection.h"
 #include "email_repo.h"
 #include "session_repo.h"
+#include "keychain_store.h"
 #include <string>
 #include <set>
 #include <nlohmann/json.hpp>
@@ -579,8 +580,14 @@ int SetCredentials_c(int configIndex, const char* email, const char* authCode) {
         // Use the 163-specific interface to set credentials
         auto impl163 = std::dynamic_pointer_cast<EmailComm::EmailOpt163Impl>(delegate);
         if (impl163) {
+            // On macOS the auth code lives in the credential vault, not in
+            // oim.conf — callers legitimately pass an empty code.
+            std::string code = authCode ? authCode : "";
+            if (code.empty() && email && *email) {
+                code = keychain_store::load_secret(email);
+            }
             impl163->set_email(email ? email : "");
-            impl163->set_auth_code(authCode ? authCode : "");
+            impl163->set_auth_code(code);
             emailObj->set_address(email ? email : "");
             return 0;
         }
@@ -750,6 +757,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
 
         int stored_count = 0;
         auto emails = response["emails"];
+        std::vector<EmailRecord> pendingInserts, stubInserts, deferredInserts;
 
         struct DeferredEmail {
             std::string uuid, from_addr, sender, subject, date, reply_to, in_reply_to, message_id;
@@ -775,7 +783,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             // Filter: only whitelist X-Mailer values are ours. Everything else —
             // foreign X-Mailer or none at all — is skipped, with only a uuid stub
             // recorded so the incremental sync watermark still advances.
-            if (!XMailer::isValid(x_session_chart)) {
+            if (!XMailer::isWireValue(x_session_chart)) {
                 LOG_INFO("FetchAndStore_c: skipping email uuid=%s, X-Mailer='%s' not in whitelist\n",
                          uuid.c_str(), x_session_chart.c_str());
                 // Persist a stub row (uuid only, invisible, already-processed) so the
@@ -791,7 +799,7 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
                     stub.isLocal = 2;
                     stub.visible = 0;
                     stub.xMailer = x_session_chart;
-                    s_emailRepo.insert(stub);
+                    stubInserts.push_back(std::move(stub));
                 }
                 continue;
             }
@@ -887,16 +895,13 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             insertRec.toAddr = email_data.value("to_addr", "");
             // 1.0.0~1.0.4: will download EML now and set islocal=1
             insertRec.isLocal = 0;
-            insertRec.visible = 1;
+            // Type (including hidden file chunks) is known only after decoding.
+            insertRec.visible = 0;
             insertRec.xMailer = x_session_chart;
-            int64_t my_rowid = s_emailRepo.insert(insertRec);
+            pendingInserts.push_back(std::move(insertRec));
 
-            if (my_rowid > 0 && folder == "INBOX") {
-                stored_count++;
-
-                LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_mailer=%s\n", 
-                         uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str());
-            }
+            LOG_INFO("FetchAndStore_c: uuid=%s, message_id=%s, in_reply_to=%s, x_mailer=%s\n",
+                     uuid.c_str(), message_id.c_str(), in_reply_to.c_str(), x_session_chart.c_str());
 
             // Body is fetched into memory by download_pending_bodies (no disk .eml).
 
@@ -907,6 +912,14 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             if (!email_data.value("to_addr", "").empty()) {
                 addressbook_extract_from_header(email_data.value("to_addr", "").c_str());
             }
+        }
+
+        // Phase 1 batch: single multi-row INSERTs instead of per-row autocommits.
+        // stored_count tracks INBOX inserts only (same intent as before).
+        {
+            const size_t n = s_emailRepo.insertMany(pendingInserts);
+            if (folderStr == "INBOX") stored_count += static_cast<int>(n);
+            s_emailRepo.insertMany(stubInserts);
         }
 
         // Phase 2: Insert 1.0.5 (attach chunk) emails with islocal=0 — let download thread handle
@@ -957,14 +970,13 @@ int FetchAndStore_c(int configIndex, const char* folder, const char* startUid,
             insertRec.isLocal = 0;
             insertRec.visible = 0;
             insertRec.xMailer = dc.x_session_chart;
-            int64_t my_rowid = s_emailRepo.insert(insertRec);
+            deferredInserts.push_back(std::move(insertRec));
 
-            if (my_rowid > 0) {
-                stored_count++;
-                LOG_INFO("FetchAndStore_c: deferred 1.0.5 uuid=%s, message_id=%s, islocal=0\n",
-                         dc.uuid.c_str(), dc.message_id.c_str());
-            }
+            LOG_INFO("FetchAndStore_c: deferred 1.0.5 uuid=%s, message_id=%s, islocal=0\n",
+                     dc.uuid.c_str(), dc.message_id.c_str());
         }
+
+        stored_count += static_cast<int>(s_emailRepo.insertMany(deferredInserts));
 
         // Build response with stored count
         response["stored"] = stored_count;
@@ -1036,20 +1048,76 @@ int IdleWait_c(int configIndex, const char* folder, int timeoutSeconds) {
         if (!delegate) return -3;
 
         std::string folderStr = folder ? folder : "INBOX";
-        bool result = delegate->idle_wait(folderStr, timeoutSeconds);
+        // idle_wait: 1 = notification, 0 = timeout, negative = error
+        int result = delegate->idle_wait(folderStr, timeoutSeconds);
 
         // Log the result and error for debugging (std::cerr is redirected to log file)
-        if (!result) {
+        if (result < 0) {
             auto err = delegate->get_last_error();
-            LOG_INFO("[IDLE] idle_wait returned false for folder %s, last_error: %s", folderStr.c_str(), err.c_str());
+            LOG_INFO("[IDLE] idle_wait returned %d for folder %s, last_error: %s", result, folderStr.c_str(), err.c_str());
         }
 
-        return result ? 0 : -5;
+        return result;
     } catch (const std::exception& e) {
         LOG_INFO("[IDLE] IdleWait_c exception: %s", e.what());
         return -5;
     } catch (...) {
         return -6;
+    }
+}
+
+int NoopProbe_c(int configIndex, const char* folder, char* outJson, int outSize) {
+    try {
+        if (configIndex < 0 || configIndex >= static_cast<int>(oemailim::EmailHandler::g_EmailConfigIndices.size())) {
+            if (outJson && outSize > 0) {
+                snprintf(outJson, outSize, R"({"status":"failed", "error":"invalid_config_index"})");
+            }
+            return -1;
+        }
+
+        auto emailObj = oemailim::EmailHandler::g_EmailConfigIndices[configIndex];
+        if (!emailObj) {
+            if (outJson && outSize > 0) {
+                snprintf(outJson, outSize, R"({"status":"failed", "error":"email_object_null"})");
+            }
+            return -2;
+        }
+
+        auto delegate = emailObj->get_delegate();
+        if (!delegate) {
+            if (outJson && outSize > 0) {
+                snprintf(outJson, outSize, R"({"status":"failed", "error":"delegate_null"})");
+            }
+            return -3;
+        }
+
+        // Hot-reload oim.conf so server/credential edits take effect without
+        // restarting this child isolate.
+        oemailim::EmailHandler::getInstance()->refreshConfigForIndex(configIndex);
+
+        std::string result = delegate->noop_probe(folder ? folder : "INBOX");
+        if (result.empty()) {
+            if (outJson && outSize > 0) {
+                snprintf(outJson, outSize, R"({"status":"failed", "error":"unsupported_provider"})");
+            }
+            return -4;
+        }
+
+        if (outJson && outSize > 0) {
+            snprintf(outJson, outSize, "%s", result.c_str());
+        }
+        return result.find("\"success\"") != std::string::npos ? 0 : -5;
+    } catch (const std::exception& e) {
+        LOG_INFO("NoopProbe_c exception: %s\n", e.what());
+        if (outJson && outSize > 0) {
+            snprintf(outJson, outSize, R"({"status":"failed", "error":"exception"})");
+        }
+        return -6;
+    } catch (...) {
+        if (outJson && outSize > 0) {
+            snprintf(outJson, outSize, R"({"status":"failed", "error":"exception"})");
+        }
+        return -7;
     }
 }
 

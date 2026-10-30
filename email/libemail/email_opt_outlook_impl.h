@@ -85,7 +85,7 @@ public:
     std::string fetch_email_headers(const std::string& folder, const std::string& start_uid) override;
 
     // Wait for new emails using IMAP IDLE
-    bool idle_wait(const std::string& folder, int timeout_seconds = 300) override;
+    int idle_wait(const std::string& folder, int timeout_seconds = 300) override;
 
     // Discover the Sent folder name via IMAP SPECIAL-USE or name matching
     std::string find_sent_folder();

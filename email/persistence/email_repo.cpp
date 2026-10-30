@@ -332,6 +332,60 @@ int64_t EmailRepo::insert(const EmailRecord& rec) {
     return sqlite3_last_insert_rowid(db);
 }
 
+size_t EmailRepo::insertMany(const std::vector<EmailRecord>& recs) {
+    auto& conn = DbConnection::instance();
+    sqlite3* db = conn.get();
+    if (!db || recs.empty()) return 0;
+
+    const char* cols =
+        "(uuid, account, sender, from_addr, subject, date, bodystructure, reply_to, "
+        "in_reply_to, message_id, flags, folder, islocal, servicerecvtime, to_addr, file, visible, x_mailer)";
+    const size_t kChunk = 50;  // 50*18 bound vars stays under legacy SQLITE_MAX_VARIABLE_NUMBER
+    size_t inserted = 0;
+
+    for (size_t base = 0; base < recs.size(); base += kChunk) {
+        const size_t n = std::min(kChunk, recs.size() - base);
+        std::string sql = "INSERT INTO localemail ";
+        sql += cols;
+        sql += " VALUES ";
+        for (size_t i = 0; i < n; ++i) {
+            if (i) sql += ",";
+            sql += "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?,?)";
+        }
+
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, NULL) != SQLITE_OK) break;
+
+        int p = 1;
+        for (size_t i = 0; i < n; ++i) {
+            const auto& r = recs[base + i];
+            sqlite3_bind_text(stmt, p++, r.uuid.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.account.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.sender.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.fromAddr.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.subject.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.date.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.bodystructure.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.replyTo.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.inReplyTo.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.messageId.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.flags.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.folder.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, p++, r.isLocal);
+            sqlite3_bind_text(stmt, p++, r.servicerecvtime.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, p++, r.toAddr.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, p++, r.visible);
+            sqlite3_bind_text(stmt, p++, r.xMailer.c_str(), -1, SQLITE_TRANSIENT);
+        }
+
+        const int rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) break;
+        inserted += n;
+    }
+    return inserted;
+}
+
 // Migration: Update islocal=1 for emails that already have file downloaded
 // This should be called once after schema update
 bool EmailRepo::migrateIslocalForNoSessionChart() {
@@ -448,6 +502,22 @@ bool EmailRepo::updateAfterDownload(const std::string& uuid, const std::string& 
     sqlite3_bind_text(stmt, 5, account.c_str(), -1, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+bool EmailRepo::setProtocolType(const std::string& uuid, const std::string& account,
+                               const std::string& messageType, bool visible) {
+    sqlite3* db = DbConnection::instance().get();
+    if (!db) return false;
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "UPDATE localemail SET x_mailer = ?, visible = ? WHERE uuid = ? AND account = ?;";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, messageType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, visible ? 1 : 0);
+    sqlite3_bind_text(stmt, 3, uuid.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, account.c_str(), -1, SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }

@@ -8,6 +8,7 @@ namespace XMailer {
 
 // Header name
 constexpr const char* HEADER = "X-Mailer";
+constexpr const char* WIRE_VALUE = "OceanTalk";
 
 // Message type values (Signal protocol over Email, v1)
 constexpr const char* PREKEY_BUNDLE  = "1.0.0";  // Prekey distribution (in-band)
@@ -47,6 +48,11 @@ inline bool isValid(const std::string& value) {
            value == ATTACH_META ||
            value == ATTACH_CHUNK ||
            isMls(value);
+}
+
+// Header admission is separate from internal protocol type validation.
+inline bool isWireValue(const std::string& value) {
+    return value == WIRE_VALUE;
 }
 
 } // namespace XMailer

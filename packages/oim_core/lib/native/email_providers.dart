@@ -49,6 +49,8 @@ class EmailAccountConfig {
     switch (type) {
       case '163.com':
         return AppStrings.netease163;
+      case '126.com':
+        return AppStrings.netease126;
       case 'qq.com':
         return AppStrings.qqMail;
       case 'gmail.com':
@@ -62,12 +64,14 @@ class EmailAccountConfig {
 }
 
 class EmailProviders {
-  static const List<String> supportedTypes = ['163.com', 'qq.com', 'gmail.com', 'outlook.com'];
+  static const List<String> supportedTypes = ['163.com', '126.com', 'qq.com', 'gmail.com', 'outlook.com'];
 
   static String displayNameFor(String type) {
     switch (type) {
       case '163.com':
         return AppStrings.netease163;
+      case '126.com':
+        return AppStrings.netease126;
       case 'qq.com':
         return AppStrings.qqMail;
       case 'gmail.com':
@@ -88,6 +92,15 @@ class EmailProviders {
           ConfigField(AppStrings.smtpServer, 'smtp_server', false, 'smtp.163.com', FieldKind.text),
           ConfigField(AppStrings.smtpPort, 'smtp_port', false, '465', FieldKind.port),
           ConfigField(AppStrings.imapServer, 'imap_server', false, 'imap.163.com', FieldKind.text),
+          ConfigField(AppStrings.imapPort, 'imap_port', false, '993', FieldKind.port),
+        ];
+      case '126.com':
+        return [
+          ConfigField(AppStrings.emailAddress, 'email', true, '', FieldKind.text),
+          ConfigField(AppStrings.authCode, 'auth_code', true, '', FieldKind.text),
+          ConfigField(AppStrings.smtpServer, 'smtp_server', false, 'smtp.126.com', FieldKind.text),
+          ConfigField(AppStrings.smtpPort, 'smtp_port', false, '465', FieldKind.port),
+          ConfigField(AppStrings.imapServer, 'imap_server', false, 'imap.126.com', FieldKind.text),
           ConfigField(AppStrings.imapPort, 'imap_port', false, '993', FieldKind.port),
         ];
       case 'qq.com':

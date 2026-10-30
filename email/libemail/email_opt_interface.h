@@ -93,8 +93,12 @@ public:
     virtual std::string fetch_email_headers(const std::string& folder, const std::string& start_uid) = 0;
 
     // Wait for new emails using IMAP IDLE
-    // Returns true if new emails arrived, false on timeout or error
-    virtual bool idle_wait(const std::string& folder, int timeout_seconds = 300) { return false; }
+    // Returns 1 if new emails arrived, 0 on timeout, negative on error
+    virtual int idle_wait(const std::string& folder, int timeout_seconds = 300) { return -1; }
+
+    // Lightweight mailbox probe (NOOP, STATUS fallback) for servers without IDLE.
+    // Returns JSON: {"status":"success","uidnext":N,"uidvalidity":M,"exists":E}
+    virtual std::string noop_probe(const std::string& folder) { return ""; }
 
     // Discover the Sent folder name via IMAP SPECIAL-USE or name matching
     virtual std::string find_sent_folder() { return "Sent"; }

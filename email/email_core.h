@@ -226,6 +226,11 @@ int oemailim_email_select(int configIndex, const char* path, char* outJson, int 
 // Returns 1 if notification received, 0 if timeout, negative on error.
 int email_idle_wait(int configIndex, const char* folder, int timeoutSeconds);
 
+// Lightweight mailbox probe (NOOP + STATUS fallback) for providers without IDLE.
+// outJson: {"status":"success","uidnext":N,"uidvalidity":M,"exists":E}
+// Returns 0 on success, negative on error.
+int email_noop_probe(int configIndex, const char* folder, char* outJson, int outSize);
+
 // Discover the Sent folder name via IMAP SPECIAL-USE or name matching.
 // Returns 0 on success, negative on error. outFolder contains the folder name.
 int email_find_sent_folder(int configIndex, char* outFolder, int outSize);

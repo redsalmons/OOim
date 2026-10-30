@@ -88,6 +88,10 @@ public:
     // Insert new email record, return rowid (0 on failure)
     int64_t insert(const EmailRecord& rec);
 
+    // Batch insert: chunked multi-row VALUES statements (autocommit per chunk).
+    // Returns the number of rows inserted.
+    size_t insertMany(const std::vector<EmailRecord>& recs);
+
     // Migration: Update islocal for existing emails
     bool migrateIslocalForNoSessionChart();
 
@@ -109,6 +113,9 @@ public:
 
     // Set islocal flag for an email (used when body is downloaded in fetch phase)
     bool setIslocal(const std::string& uuid, const std::string& account, int islocal);
+    // Resolve wire marker to the internal type after validating the body envelope.
+    bool setProtocolType(const std::string& uuid, const std::string& account,
+                         const std::string& messageType, bool visible);
     bool setIslocalIfLowerThan(const std::string& uuid, const std::string& account, int islocal, int maxExclusive);
 
     // Get islocal value by rowid

@@ -179,23 +179,78 @@ class _ConversationPageState extends State<ConversationPage> {
 
   // --- message rendering ---
 
+  int _firstUserMsgIndex(List<SessionMessage> msgs) =>
+      msgs.indexWhere((m) => m.kind != MessageKind.handshake);
+
+  // Timestamps arrive as ISO ("2026-10-30 18:21:24", local pending) or RFC 2822
+  // mail dates ("Fri, 30 Oct 2026 18:21:24 +0800", stored messages).
+  static final _rfcDate = RegExp(
+      r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})');
+
+  DateTime? _parseMsgTime(String timestamp) {
+    final iso = DateTime.tryParse(timestamp);
+    if (iso != null) return iso;
+    final m = _rfcDate.firstMatch(timestamp);
+    if (m == null) return null;
+    const months = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+                    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12};
+    return DateTime(int.parse(m[3]!), months[m[2]!]!, int.parse(m[1]!),
+        int.parse(m[4]!), int.parse(m[5]!), int.parse(m[6]!));
+  }
+
+  bool _timeGapOver(SessionMessage prev, SessionMessage cur) {
+    final a = _parseMsgTime(prev.timestamp);
+    final b = _parseMsgTime(cur.timestamp);
+    if (a == null || b == null) return false;
+    return b.difference(a).inMinutes >= 10;
+  }
+
+  String _formatMsgTime(String timestamp) {
+    final t = _parseMsgTime(timestamp);
+    if (t == null) return timestamp;
+    String s(int n) => n.toString().padLeft(2, '0');
+    if (AppStrings.isZh) return '${t.month}月${t.day}日 ${s(t.hour)}:${s(t.minute)}:${s(t.second)}';
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${months[t.month - 1]} ${t.day}, ${s(t.hour)}:${s(t.minute)}:${s(t.second)}';
+  }
+
+  Widget _timeDivider(String timestamp) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Center(
+          child: Text(_formatMsgTime(timestamp),
+              style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        ),
+      );
+
   Widget _bubble(SessionMessage msg) {
     final isMe = msg.isSent;
+    if (msg.kind == MessageKind.handshake) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Center(
+          child: Text(
+              isMe
+                  ? '${msg.sender} ${AppStrings.isZh ? "发送了握手信息" : "sent a handshake"}'
+                  : '${AppStrings.isZh ? "接收了" : "Received handshake from"} ${msg.sender}${AppStrings.isZh ? " 的握手信息" : ""}',
+              style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        ),
+      );
+    }
     final Widget content = switch (msg.kind) {
       MessageKind.handshake => const Text('🤝', style: TextStyle(fontSize: 20)),
       MessageKind.file => _fileCard(msg.files, msg.text, msg.isSent),
-      MessageKind.text => SelectableText(msg.text),
+      MessageKind.text => SelectableText(msg.text, style: const TextStyle(fontSize: 14)),
     };
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(
         mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isMe)
             CircleAvatar(
-              radius: 14,
+              radius: 16,
               child: Text(msg.sender.isNotEmpty ? msg.sender[0].toUpperCase() : '?',
                   style: const TextStyle(fontSize: 11)),
             ),
@@ -215,21 +270,21 @@ class _ConversationPageState extends State<ConversationPage> {
                         ? Theme.of(context).colorScheme.primaryContainer
                         : Theme.of(context).colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                        color: Theme.of(context).dividerColor.withValues(alpha: 0.4)),
                   ),
                   child: content,
                 ),
-                Text(
-                  msg.pending ? (AppStrings.isZh ? '发送中…' : 'Sending…') : msg.timestamp,
-                  style: TextStyle(
-                      fontSize: 10, color: msg.pending ? Colors.orange : Colors.grey),
-                ),
+                if (msg.pending)
+                  Text(AppStrings.isZh ? '发送中…' : 'Sending…',
+                      style: const TextStyle(fontSize: 10, color: Colors.orange)),
               ],
             ),
           ),
           const SizedBox(width: 8),
           if (isMe)
             CircleAvatar(
-              radius: 14,
+              radius: 16,
               child: Text(AppStrings.me[0], style: const TextStyle(fontSize: 11)),
             ),
         ],
@@ -335,8 +390,19 @@ class _ConversationPageState extends State<ConversationPage> {
               ),
             Container(
               decoration: BoxDecoration(
-                border: Border.all(color: Theme.of(context).dividerColor),
-                borderRadius: BorderRadius.circular(8),
+                color: Theme.of(context).cardColor,
+                border: Border.all(
+                  color: Theme.of(context).dividerColor.withValues(alpha: 0.4),
+                  width: 0.5,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 10,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -477,7 +543,16 @@ class _ConversationPageState extends State<ConversationPage> {
                           ScrollViewKeyboardDismissBehavior.onDrag,
                       padding: const EdgeInsets.only(top: 8, bottom: 8),
                       itemCount: all.length,
-                      itemBuilder: (_, i) => _bubble(all[i]),
+                      itemBuilder: (_, i) {
+                        final msg = all[i];
+                        final showTime = i == _firstUserMsgIndex(all) ||
+                            (i > 0 && _timeGapOver(all[i - 1], msg));
+                        return Column(children: [
+                          if (showTime && msg.timestamp.isNotEmpty)
+                            _timeDivider(msg.timestamp),
+                          _bubble(msg),
+                        ]);
+                      },
                     ),
             ),
           ),

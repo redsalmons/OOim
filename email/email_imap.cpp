@@ -152,3 +152,7 @@ int email_fetch_and_store(int configIndex, const char* folder, const char* start
                           char* outJson, int outSize) {
     return FetchAndStore_c(configIndex, folder, startUid, account, storageDir, outJson, outSize);
 }
+
+int email_noop_probe(int configIndex, const char* folder, char* outJson, int outSize) {
+    return NoopProbe_c(configIndex, folder, outJson, outSize);
+}

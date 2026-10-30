@@ -23,6 +23,8 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 #include <zlib.h>
+#include "libemail/x_mailer.h"
+#include <stdexcept>
 
 // Shared global state
 sqlite3* g_db = NULL;
@@ -256,13 +258,66 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
 }
 
 // ---------------------------------------------------------------------------
-// Wire format: notice text part + single-entry zip attachment ("message.oim")
-// carrying the protocol JSON. The zip entry uses raw deflate.
+// The zip entry uses raw deflate; its bytes are carried inside text armor.
 // ---------------------------------------------------------------------------
 
 const char* oim_notice_text() {
     return "这是一条私密消息，请在零海客户端中查看。\n"
            "This is an OceanTalk-encrypted message — open it in the OceanTalk client.\n";
+}
+
+static constexpr const char* kArmorBegin = "-----BEGIN OCEANTALK MESSAGE-----";
+static constexpr const char* kArmorEnd = "-----END OCEANTALK MESSAGE-----";
+
+std::string oim_encode_wire_body(const std::string& payload, const std::string& messageType) {
+    if (!XMailer::isValid(messageType) || payload.empty())
+        throw std::runtime_error("invalid OceanTalk protocol payload/type");
+    const auto envelope = nlohmann::json{
+        {"wire_version", 1}, {"message_type", messageType}, {"payload", payload}};
+    const auto zipped = oim_zip_pack(envelope.dump());
+    if (zipped.empty()) throw std::runtime_error("OceanTalk compression failed");
+    const auto encoded = base64_encode(zipped.data(), zipped.size());
+    std::string text = std::string(oim_notice_text()) + "\n" + kArmorBegin + "\n";
+    for (size_t i = 0; i < encoded.size(); i += 76) {
+        text += encoded.substr(i, 76);
+        text += "\n";
+    }
+    return text + kArmorEnd + "\n";
+}
+
+bool oim_decode_wire_body(const std::string& text, std::string& payload, std::string& messageType) {
+    const auto begin = text.find(kArmorBegin);
+    if (begin == std::string::npos) return false;
+    const size_t start = begin + strlen(kArmorBegin);
+    const auto end = text.find(kArmorEnd, start);
+    if (end == std::string::npos || text.find(kArmorBegin, start) != std::string::npos ||
+        text.find(kArmorEnd, end + strlen(kArmorEnd)) != std::string::npos)
+        throw std::runtime_error("invalid OceanTalk armor boundaries");
+    std::string encoded;
+    for (size_t i = start; i < end; ++i) {
+        const unsigned char c = text[i];
+        if (c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '='))
+            throw std::runtime_error("invalid OceanTalk base64");
+        encoded += c;
+    }
+    if (encoded.empty() || encoded.size() % 4 != 0)
+        throw std::runtime_error("invalid OceanTalk base64 length");
+    const auto zipped = base64_decode(encoded);
+    if (zipped.empty() || base64_encode(zipped.data(), zipped.size()) != encoded)
+        throw std::runtime_error("invalid OceanTalk base64 encoding");
+    const auto envelope = nlohmann::json::parse(oim_zip_unpack(zipped));
+    if (envelope.at("wire_version") != 1 ||
+        !envelope.at("message_type").is_string() || !envelope.at("payload").is_string())
+        throw std::runtime_error("unsupported OceanTalk envelope");
+    const auto type = envelope.at("message_type").get<std::string>();
+    const auto inner = envelope.at("payload").get<std::string>();
+    if (!XMailer::isValid(type) || inner.empty())
+        throw std::runtime_error("invalid OceanTalk envelope payload/type");
+    payload = inner;
+    messageType = type;
+    return true;
 }
 
 static void oim_put16(std::vector<uint8_t>& v, uint16_t x) {
@@ -478,4 +533,3 @@ extern "C" sqlite3* email_core_get_db() {
 std::mutex& email_core_get_db_mutex() {
     return g_db_mutex;
 }
-
