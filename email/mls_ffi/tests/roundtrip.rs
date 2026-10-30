@@ -125,11 +125,15 @@ fn three_party_roundtrip() {
         let n = ok(dec(&a, &gid_c, &ct_u, AAD, pt.as_mut_ptr(), 4096).0, "dec u");
         assert_eq!(&pt[..n], msg_u);
 
-        // Signature key helpers: KeyPackage carries the account's MLS signature key
-        let mut sk = buf(256); let n = ok(mls_signature_key(b.as_ptr(), sk.as_mut_ptr(), 256), "sigkey"); sk.truncate(n);
+        // Signature keys are per-group: the group's own leaf key matches the
+        // members list, and a fresh KeyPackage carries a different key.
+        let mut sk = buf(256); let n = ok(mls_signature_key(b.as_ptr(), gid_c.as_ptr(), sk.as_mut_ptr(), 256), "sigkey"); sk.truncate(n);
+        let b_leaf = members.iter().find(|v| v["identity"] == "b@qq.com").unwrap();
+        let sk_hex: String = sk.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(sk_hex, b_leaf["signature_key"].as_str().unwrap(), "group leaf key is the member's signature key");
         let mut kp_b2 = buf(4096); let n = ok(mls_generate_key_package(b.as_ptr(), kp_b2.as_mut_ptr(), 4096), "kp b2"); kp_b2.truncate(n);
         let mut sk2 = buf(256); let n = ok(mls_key_package_signature_key(kp_b2.as_ptr(), kp_b2.len() as c_int, sk2.as_mut_ptr(), 256), "kp sigkey"); sk2.truncate(n);
-        assert_eq!(sk, sk2);
+        assert_ne!(sk, sk2, "every key package gets a fresh signature key");
 
         // Replay must fail (forward secrecy / no key reuse)
         let mut pt = buf(4096);

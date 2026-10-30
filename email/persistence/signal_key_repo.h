@@ -4,10 +4,12 @@
 #include <string>
 #include <cstdint>
 
-// Long-lived identity key of a local account
+// Identity key of a local account, scoped to one session
+// (sig_xxx for 1:1, group id for 1:n).
 struct SignalIdentityRecord {
     int64_t id = 0;
     std::string account;
+    std::string sessionId;
     std::string ikPub;       // PEM
     std::string ikPriv;      // encrypted PEM
     std::string ikPassword;  // password for decrypting ikPriv
@@ -35,20 +37,24 @@ struct SignalPeerPrekeyRecord {
     std::string spkSig;
 };
 
-// Trust-on-first-use record of a peer's identity key
+// Trust-on-first-use record of a peer's identity key, scoped to one session
 struct SignalPeerIdentityRecord {
     int64_t id = 0;
     std::string account;
+    std::string sessionId;
     std::string peerEmail;
     std::string ikPub;
 };
 
 class SignalKeyRepo {
 public:
-    // --- Account identity key ---
-    bool upsertIdentity(const std::string& account, const std::string& ikPub,
-                        const std::string& ikPriv, const std::string& ikPassword);
-    bool loadIdentity(const std::string& account, SignalIdentityRecord& out);
+    // --- Session-scoped identity key ---
+    bool upsertIdentity(const std::string& account, const std::string& sessionId,
+                        const std::string& ikPub, const std::string& ikPriv,
+                        const std::string& ikPassword);
+    bool loadIdentity(const std::string& account, const std::string& sessionId,
+                      SignalIdentityRecord& out);
+    bool deleteIdentity(const std::string& account, const std::string& sessionId);
 
     // --- Per-session signed prekey ---
     bool insertSignedPrekey(const std::string& account, const std::string& sessionUuid,
@@ -67,12 +73,14 @@ public:
     bool loadPeerPrekey(const std::string& account, const std::string& peerEmail,
                         const std::string& sessionUuid, SignalPeerPrekeyRecord& out);
 
-    // --- Peer identity (TOFU) ---
-    bool loadPeerIdentity(const std::string& account, const std::string& peerEmail,
-                          SignalPeerIdentityRecord& out);
-    bool upsertPeerIdentity(const std::string& account, const std::string& peerEmail,
-                            const std::string& ikPub);
-    bool deletePeerIdentity(const std::string& account, const std::string& peerEmail);
+    // --- Peer identity (TOFU, session-scoped) ---
+    bool loadPeerIdentity(const std::string& account, const std::string& sessionId,
+                          const std::string& peerEmail, SignalPeerIdentityRecord& out);
+    bool upsertPeerIdentity(const std::string& account, const std::string& sessionId,
+                            const std::string& peerEmail, const std::string& ikPub);
+    bool deletePeerIdentity(const std::string& account, const std::string& sessionId,
+                            const std::string& peerEmail);
+    bool deletePeerIdentitiesBySession(const std::string& account, const std::string& sessionId);
 };
 
 #endif // PERSISTENCE_SIGNAL_KEY_REPO_H

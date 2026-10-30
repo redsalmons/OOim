@@ -254,11 +254,13 @@ static std::string hexOf(const std::vector<uint8_t>& v) {
     return h;
 }
 
-std::string signatureKeyHex(const std::string& account) {
+std::string signatureKeyHex(const std::string& account, const std::string& groupId) {
     std::lock_guard<std::mutex> lk(g_mutex);
     if (!ensureLocked(account)) return "";
+    std::string gid = mlsGid(groupId);
+    if (gid.empty()) return "";
     std::vector<uint8_t> k;
-    int rc = callOut([&](uint8_t* o, int n) { return mls_signature_key(account.c_str(), o, n); }, k);
+    int rc = callOut([&](uint8_t* o, int n) { return mls_signature_key(account.c_str(), gid.c_str(), o, n); }, k);
     return rc < 0 ? "" : hexOf(k);
 }
 

@@ -53,8 +53,9 @@ std::string selfUpdate(const std::string& account, const std::string& groupId);
 std::string proposeSelfUpdate(const std::string& account, const std::string& groupId);
 std::string commitPending(const std::string& account, const std::string& groupId);
 
-// Identity binding material.
-std::string signatureKeyHex(const std::string& account);
+// Identity binding material: our leaf signature key inside `groupId` ("" if we
+// have not created/joined it yet), and the signature key inside a KeyPackage.
+std::string signatureKeyHex(const std::string& account, const std::string& groupId);
 std::string keyPackageSignatureKeyHex(const std::string& keyPackageB64);
 
 struct Member {

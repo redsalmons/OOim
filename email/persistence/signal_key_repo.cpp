@@ -10,46 +10,64 @@ static std::string col_text(sqlite3_stmt* stmt, int i) {
     return t ? (const char*)t : "";
 }
 
-// --- Account identity key ---
+// --- Session-scoped identity key ---
 
-bool SignalKeyRepo::upsertIdentity(const std::string& account, const std::string& ikPub,
-                                   const std::string& ikPriv, const std::string& ikPassword) {
+bool SignalKeyRepo::upsertIdentity(const std::string& account, const std::string& sessionId,
+                                   const std::string& ikPub, const std::string& ikPriv,
+                                   const std::string& ikPassword) {
     sqlite3* db = db_handle();
     if (!db) return false;
-    const char* sql = "INSERT INTO signal_identity (account, ik_pub, ik_priv, ik_password) "
-                      "VALUES (?, ?, ?, ?) "
-                      "ON CONFLICT(account) DO UPDATE SET ik_pub=excluded.ik_pub, "
+    const char* sql = "INSERT INTO signal_identity (account, session_id, ik_pub, ik_priv, ik_password) "
+                      "VALUES (?, ?, ?, ?, ?) "
+                      "ON CONFLICT(account, session_id) DO UPDATE SET ik_pub=excluded.ik_pub, "
                       "ik_priv=excluded.ik_priv, ik_password=excluded.ik_password;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, ikPub.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, ikPriv.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 4, ikPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, ikPub.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, ikPriv.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, ikPassword.c_str(), -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
 
-bool SignalKeyRepo::loadIdentity(const std::string& account, SignalIdentityRecord& out) {
+bool SignalKeyRepo::loadIdentity(const std::string& account, const std::string& sessionId,
+                                 SignalIdentityRecord& out) {
     sqlite3* db = db_handle();
     if (!db) return false;
-    const char* sql = "SELECT id, account, ik_pub, ik_priv, ik_password FROM signal_identity "
-                      "WHERE account = ? LIMIT 1;";
+    const char* sql = "SELECT id, account, session_id, ik_pub, ik_priv, ik_password FROM signal_identity "
+                      "WHERE account = ? AND session_id = ? LIMIT 1;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         out.id = sqlite3_column_int64(stmt, 0);
         out.account = col_text(stmt, 1);
-        out.ikPub = col_text(stmt, 2);
-        out.ikPriv = col_text(stmt, 3);
-        out.ikPassword = col_text(stmt, 4);
+        out.sessionId = col_text(stmt, 2);
+        out.ikPub = col_text(stmt, 3);
+        out.ikPriv = col_text(stmt, 4);
+        out.ikPassword = col_text(stmt, 5);
         found = true;
     }
     sqlite3_finalize(stmt);
     return found;
+}
+
+bool SignalKeyRepo::deleteIdentity(const std::string& account, const std::string& sessionId) {
+    sqlite3* db = db_handle();
+    if (!db) return false;
+    const char* sql = "DELETE FROM signal_identity WHERE account = ? AND session_id = ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
 }
 
 // --- Per-session signed prekey ---
@@ -169,55 +187,74 @@ bool SignalKeyRepo::loadPeerPrekey(const std::string& account, const std::string
     return found;
 }
 
-// --- Peer identity (TOFU) ---
+// --- Peer identity (TOFU, session-scoped) ---
 
-bool SignalKeyRepo::loadPeerIdentity(const std::string& account, const std::string& peerEmail,
-                                     SignalPeerIdentityRecord& out) {
+bool SignalKeyRepo::loadPeerIdentity(const std::string& account, const std::string& sessionId,
+                                     const std::string& peerEmail, SignalPeerIdentityRecord& out) {
     sqlite3* db = db_handle();
     if (!db) return false;
-    const char* sql = "SELECT id, account, peer_email, ik_pub FROM signal_peer_identity "
-                      "WHERE account = ? AND peer_email = ? LIMIT 1;";
+    const char* sql = "SELECT id, account, session_id, peer_email, ik_pub FROM signal_peer_identity "
+                      "WHERE account = ? AND session_id = ? AND peer_email = ? LIMIT 1;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, peerEmail.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, peerEmail.c_str(), -1, SQLITE_TRANSIENT);
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         out.id = sqlite3_column_int64(stmt, 0);
         out.account = col_text(stmt, 1);
-        out.peerEmail = col_text(stmt, 2);
-        out.ikPub = col_text(stmt, 3);
+        out.sessionId = col_text(stmt, 2);
+        out.peerEmail = col_text(stmt, 3);
+        out.ikPub = col_text(stmt, 4);
         found = true;
     }
     sqlite3_finalize(stmt);
     return found;
 }
 
-bool SignalKeyRepo::upsertPeerIdentity(const std::string& account, const std::string& peerEmail,
-                                       const std::string& ikPub) {
+bool SignalKeyRepo::upsertPeerIdentity(const std::string& account, const std::string& sessionId,
+                                       const std::string& peerEmail, const std::string& ikPub) {
     sqlite3* db = db_handle();
     if (!db) return false;
-    const char* sql = "INSERT INTO signal_peer_identity (account, peer_email, ik_pub) VALUES (?, ?, ?) "
-                      "ON CONFLICT(account, peer_email) DO UPDATE SET ik_pub=excluded.ik_pub, "
+    const char* sql = "INSERT INTO signal_peer_identity (account, session_id, peer_email, ik_pub) "
+                      "VALUES (?, ?, ?, ?) "
+                      "ON CONFLICT(account, session_id, peer_email) DO UPDATE SET ik_pub=excluded.ik_pub, "
                       "first_seen=datetime('now','localtime');";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, peerEmail.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, ikPub.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, peerEmail.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, ikPub.c_str(), -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
 
-bool SignalKeyRepo::deletePeerIdentity(const std::string& account, const std::string& peerEmail) {
+bool SignalKeyRepo::deletePeerIdentity(const std::string& account, const std::string& sessionId,
+                                       const std::string& peerEmail) {
     sqlite3* db = db_handle();
     if (!db) return false;
-    const char* sql = "DELETE FROM signal_peer_identity WHERE account = ? AND peer_email = ?;";
+    const char* sql = "DELETE FROM signal_peer_identity WHERE account = ? AND session_id = ? AND peer_email = ?;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, peerEmail.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, peerEmail.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+bool SignalKeyRepo::deletePeerIdentitiesBySession(const std::string& account, const std::string& sessionId) {
+    sqlite3* db = db_handle();
+    if (!db) return false;
+    const char* sql = "DELETE FROM signal_peer_identity WHERE account = ? AND session_id = ?;";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, account.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, sessionId.c_str(), -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;

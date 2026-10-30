@@ -49,13 +49,15 @@ static json sessionToJson(const UnifiedSession& s) {
     j["created_at"] = s.createdAt;
     j["updated_at"] = s.updatedAt;
     if (s.mode == SessionMode::Signal) {
-        // Safety number material: own and (pinned) peer identity fingerprints.
+        // Safety number material: own and (pinned) peer identity fingerprints,
+        // scoped to this session's Signal session id.
         char fp[128];
-        signal_identity_fingerprint(s.account.c_str(), fp, sizeof(fp));
+        signal_identity_fingerprint(s.account.c_str(), s.signalSessionId.c_str(), fp, sizeof(fp));
         j["identity_fp"] = fp;
         std::string peer;
         for (auto& m : s.members) if (m != s.account) { peer = m; break; }
-        signal_peer_identity_fingerprint(s.account.c_str(), peer.c_str(), fp, sizeof(fp));
+        signal_peer_identity_fingerprint(s.account.c_str(), s.signalSessionId.c_str(),
+                                         peer.c_str(), fp, sizeof(fp));
         j["peer_identity_fp"] = fp;
     }
     return j;
@@ -246,10 +248,13 @@ int us_set_subject(const char* sessionId, const char* subject,
 // reopen it. Signal pins live in signal_peer_identity; MLS member pins share
 // the same table (pin_peer_identity), so the reset is protocol-agnostic.
 static bool resetMembersAndReopen_(UnifiedSessionRepo& repo, UnifiedSession& s) {
+    // Pins are scoped by the session's own key container: sig_xxx for 1:1,
+    // the MLS group id for 1:n.
+    const std::string& scope = (s.mode == SessionMode::Signal) ? s.signalSessionId : s.mlsGroupId;
     bool ok = true;
     for (auto& m : s.members) {
         if (m == s.account) continue;
-        if (signal_peer_identity_reset(s.account.c_str(), m.c_str()) != 0) ok = false;
+        if (signal_peer_identity_reset(s.account.c_str(), scope.c_str(), m.c_str()) != 0) ok = false;
     }
     if (!repo.setStatus(s.sessionId, kSessionActive)) ok = false;
     return ok;

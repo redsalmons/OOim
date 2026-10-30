@@ -413,13 +413,17 @@ int signal_session_exists_for_email_session(const char* account,
 int signal_session_close(const char* account, const char* peerEmail,
                          const char* sessionId);
 
-// Hex SHA-256 fingerprints for safety-number comparison. Empty string if unknown.
-int signal_identity_fingerprint(const char* account, char* out, int outSize);
-int signal_peer_identity_fingerprint(const char* account, const char* peerEmail,
-                                     char* out, int outSize);
+// Hex SHA-256 fingerprints for safety-number comparison, scoped to a session.
+// Empty string if unknown.
+int signal_identity_fingerprint(const char* account, const char* sessionId,
+                                char* out, int outSize);
+int signal_peer_identity_fingerprint(const char* account, const char* sessionId,
+                                     const char* peerEmail, char* out, int outSize);
 
-// Forget the trusted identity key of a peer (user confirmed the key change).
-int signal_peer_identity_reset(const char* account, const char* peerEmail);
+// Forget the trusted identity key of a peer inside a session (user confirmed
+// the key change).
+int signal_peer_identity_reset(const char* account, const char* sessionId,
+                               const char* peerEmail);
 
 // === Group messaging (MLS / RFC 9420, X-Mailer 2.0.x) ===
 // Implemented in signal/group_c_api.cpp on top of signal/mls_group.{h,cpp}.

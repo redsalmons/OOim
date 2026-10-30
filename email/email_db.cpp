@@ -81,24 +81,29 @@ void email_db_create_signal_tables(sqlite3* db) {
             version = atoi((const char*)sqlite3_column_text(st, 0));
         sqlite3_finalize(st);
     }
-    if (version != 2) {
-        LOG_INFO("Signal schema %d -> 2: recreating signal tables\n", version);
+    if (version != 3) {
+        LOG_INFO("Signal schema %d -> 3: recreating signal tables\n", version);
         exec("DROP TABLE IF EXISTS signal_identity;");
         exec("DROP TABLE IF EXISTS signal_prekey;");
         exec("DROP TABLE IF EXISTS signal_session;");
         exec("DROP TABLE IF EXISTS signal_skipped_key;");
         exec("DROP TABLE IF EXISTS signal_peer_prekey;");
         exec("DROP TABLE IF EXISTS signal_peer_identity;");
-        exec("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('signal_schema', '2');");
+        exec("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('signal_schema', '3');");
     }
 
+    // Identity keys are session-scoped: each session owns its own IK pair.
+    // session_id is the Signal session uuid (sig_xxx) for 1:1 and the MLS
+    // group id for 1:n.
     exec("CREATE TABLE IF NOT EXISTS signal_identity ("
          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-         "account TEXT NOT NULL UNIQUE,"
+         "account TEXT NOT NULL,"
+         "session_id TEXT NOT NULL,"
          "ik_pub TEXT NOT NULL,"
          "ik_priv TEXT NOT NULL,"
          "ik_password TEXT,"
-         "created_at TEXT DEFAULT (datetime('now','localtime'))"
+         "created_at TEXT DEFAULT (datetime('now','localtime')),"
+         "UNIQUE(account, session_id)"
          ");");
 
     exec("CREATE TABLE IF NOT EXISTS signal_prekey ("
@@ -160,13 +165,16 @@ void email_db_create_signal_tables(sqlite3* db) {
          "UNIQUE(account, peer_email, session_uuid)"
          ");");
 
+    // Peer identity pins are session-scoped: a new session starts with a
+    // clean slate, identity-changed can only fire mid-session.
     exec("CREATE TABLE IF NOT EXISTS signal_peer_identity ("
          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
          "account TEXT NOT NULL,"
+         "session_id TEXT NOT NULL,"
          "peer_email TEXT NOT NULL,"
          "ik_pub TEXT NOT NULL,"
          "first_seen TEXT DEFAULT (datetime('now','localtime')),"
-         "UNIQUE(account, peer_email)"
+         "UNIQUE(account, session_id, peer_email)"
          ");");
 }
 

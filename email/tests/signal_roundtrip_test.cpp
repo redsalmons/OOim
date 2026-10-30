@@ -335,23 +335,26 @@ static void test_bad_signature_and_identity_change() {
                                       otherPub.c_str(), pb["spk_sig"].get<std::string>().c_str());
     CHECK(rc == -2, "bad SPK signature rejected");
 
-    // Genuine bundle pins Carol's IK
+    // Genuine bundle pins Carol's IK for this session
     CHECK(store_bundle(B, C, cBundle), "carol pinned");
     char fp[128];
-    signal_peer_identity_fingerprint(B, C, fp, sizeof(fp));
+    signal_peer_identity_fingerprint(B, sid.c_str(), C, fp, sizeof(fp));
     CHECK(std::string(fp) == key_fingerprint(pb["ik_pub"]), "peer fingerprint matches bundle IK");
 
-    // Same email, different identity key: rejected until the user resets trust
+    // Same email, different identity key inside the same session: rejected until
+    // the user resets trust. Other sessions are a clean slate (isolation).
     std::string ik2Pub, ik2Priv;
     generate_ecc_keypair(ik2Pub, ik2Priv, "pw2");
     std::string spk2Pub, spk2Priv;
     generate_ecc_keypair(spk2Pub, spk2Priv, "pw3");
     std::string sig2 = sign_with_ecc_private_key(ik2Priv, "pw2", spk2Pub);
+    rc = signal_store_peer_prekey(B, C, sid.c_str(), ik2Pub.c_str(), spk2Pub.c_str(), sig2.c_str());
+    CHECK(rc == -3, "changed identity rejected inside the session");
     rc = signal_store_peer_prekey(B, C, "sig_other", ik2Pub.c_str(), spk2Pub.c_str(), sig2.c_str());
-    CHECK(rc == -3, "changed identity rejected");
+    CHECK(rc == 0, "other session accepts a different peer IK (isolation)");
 
-    CHECK(signal_peer_identity_reset(B, C) == 0, "reset trust");
-    rc = signal_store_peer_prekey(B, C, "sig_other", ik2Pub.c_str(), spk2Pub.c_str(), sig2.c_str());
+    CHECK(signal_peer_identity_reset(B, sid.c_str(), C) == 0, "reset trust");
+    rc = signal_store_peer_prekey(B, C, sid.c_str(), ik2Pub.c_str(), spk2Pub.c_str(), sig2.c_str());
     CHECK(rc == 0, "new identity accepted after reset");
 }
 
@@ -368,12 +371,13 @@ int main() {
     test_tamper(sid);
     test_bad_signature_and_identity_change();
 
-    // Account identity key is stable across sessions
+    // Every session gets its own identity key (session isolation)
     char fp1[128], fp2[128];
-    signal_identity_fingerprint(A, fp1, sizeof(fp1));
+    signal_identity_fingerprint(A, sid.c_str(), fp1, sizeof(fp1));
     std::string sid2 = handshake(initCt);
-    signal_identity_fingerprint(A, fp2, sizeof(fp2));
-    CHECK(std::string(fp1) == fp2 && fp1[0] != '\0', "account IK is long-lived");
+    signal_identity_fingerprint(A, sid2.c_str(), fp2, sizeof(fp2));
+    CHECK(fp1[0] != '\0' && fp2[0] != '\0' && std::string(fp1) != fp2,
+          "each session has its own IK");
     CHECK(sid2 != sid, "fresh session id");
 
     if (g_failures == 0) printf("signal_roundtrip_test: all checks passed\n");

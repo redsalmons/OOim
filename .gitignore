@@ -97,3 +97,9 @@ tools/vc_err.txt
 tools/vc_out.txt
 tools/vcvars_err.txt
 tools/vcvars_out.txt
+
+# Per-arch email core build dirs
+email/build-arm64/
+email/build-x64/
+
+installer_output/

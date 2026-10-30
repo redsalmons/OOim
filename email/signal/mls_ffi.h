@@ -47,8 +47,9 @@ int mls_decrypt(const char* account, const char* group_id_hex,
                 const uint8_t* ciphertext, int ct_len, uint8_t* out, int out_len,
                 uint8_t* out_sender, int sender_len);
 
-// Our MLS signature public key / the one inside a TLS KeyPackage (raw bytes).
-int mls_signature_key(const char* account, uint8_t* out, int out_len);
+// Our MLS signature public key inside a group / the one inside a TLS
+// KeyPackage (raw bytes).
+int mls_signature_key(const char* account, const char* group_id_hex, uint8_t* out, int out_len);
 int mls_key_package_signature_key(const uint8_t* kp, int kp_len, uint8_t* out, int out_len);
 
 // Post-compromise security. Owner refreshes its leaf and commits (also covers

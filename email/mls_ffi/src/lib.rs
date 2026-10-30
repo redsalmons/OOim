@@ -77,29 +77,46 @@ impl OpenMlsProvider for OimProvider {
 
 struct AccountState {
     provider: OimProvider,
-    signer: SignatureKeyPair,
-    credential: CredentialWithKey,
+    account: String,
+    // One leaf signature key per MLS group (session isolation): created fresh
+    // for every group we create or every KeyPackage we publish, and recovered
+    // at join time by matching our own leaf's signature key against the keys
+    // held in provider storage.
+    signers: HashMap<String, SignatureKeyPair>,
     groups: HashMap<String, MlsGroup>,
 }
 
 impl AccountState {
     fn new(account: &str) -> Result<Self, String> {
-        let provider = OimProvider::default();
+        Ok(Self {
+            provider: OimProvider::default(),
+            account: account.to_string(),
+            signers: HashMap::new(),
+            groups: HashMap::new(),
+        })
+    }
+
+    fn credential(&self, signer: &SignatureKeyPair) -> CredentialWithKey {
+        CredentialWithKey {
+            credential: BasicCredential::new(self.account.as_bytes().to_vec()).into(),
+            signature_key: signer.public().into(),
+        }
+    }
+
+    /// Fresh signer for a new credential (group create / key package). The
+    /// private key lands in provider storage so it survives save/load.
+    fn fresh_signer(&self) -> Result<SignatureKeyPair, String> {
         let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
             .map_err(|e| format!("signature keypair: {e:?}"))?;
         signer
-            .store(provider.storage())
+            .store(self.provider.storage())
             .map_err(|e| format!("store signer: {e:?}"))?;
-        let credential = CredentialWithKey {
-            credential: BasicCredential::new(account.as_bytes().to_vec()).into(),
-            signature_key: signer.public().into(),
-        };
-        Ok(Self { provider, signer, credential, groups: HashMap::new() })
+        Ok(signer)
     }
 
     /// Split borrow: (provider, signer, group). The group is lazily loaded from storage.
     fn parts(&mut self, gid_hex: &str) -> Result<(&OimProvider, &SignatureKeyPair, &mut MlsGroup), String> {
-        let AccountState { provider, signer, groups, .. } = self;
+        let AccountState { provider, signers, groups, .. } = self;
         if !groups.contains_key(gid_hex) {
             let gid = GroupId::from_slice(&hex_decode(gid_hex)?);
             let g = MlsGroup::load(provider.storage(), &gid)
@@ -107,11 +124,22 @@ impl AccountState {
                 .ok_or_else(|| format!("group {gid_hex} not found"))?;
             groups.insert(gid_hex.to_string(), g);
         }
+        let signer = signers
+            .get(gid_hex)
+            .ok_or_else(|| format!("no signer for group {gid_hex}"))?;
         Ok((provider, signer, groups.get_mut(gid_hex).unwrap()))
     }
 
     fn group(&mut self, gid_hex: &str) -> Result<&mut MlsGroup, String> {
-        self.parts(gid_hex).map(|(_, _, g)| g)
+        let AccountState { provider, groups, .. } = self;
+        if !groups.contains_key(gid_hex) {
+            let gid = GroupId::from_slice(&hex_decode(gid_hex)?);
+            let g = MlsGroup::load(provider.storage(), &gid)
+                .map_err(|e| format!("load group: {e:?}"))?
+                .ok_or_else(|| format!("group {gid_hex} not found"))?;
+            groups.insert(gid_hex.to_string(), g);
+        }
+        Ok(groups.get_mut(gid_hex).unwrap())
     }
 }
 
@@ -226,8 +254,10 @@ pub extern "C" fn mls_generate_key_package(account: *const c_char, out: *mut u8,
     report(
         "mls_generate_key_package",
         with_account(&account, true, |st| {
+            let signer = st.fresh_signer()?;
+            let credential = st.credential(&signer);
             let bundle = KeyPackage::builder()
-                .build(CIPHERSUITE, &st.provider, &st.signer, st.credential.clone())
+                .build(CIPHERSUITE, &st.provider, &signer, credential)
                 .map_err(|e| format!("build keypackage: {e:?}"))?;
             let bytes = bundle
                 .key_package()
@@ -245,9 +275,12 @@ pub extern "C" fn mls_create_group(account: *const c_char, out_gid: *mut u8, gid
     report(
         "mls_create_group",
         with_account(&account, true, |st| {
-            let group = MlsGroup::new(&st.provider, &st.signer, &create_config(), st.credential.clone())
+            let signer = st.fresh_signer()?;
+            let credential = st.credential(&signer);
+            let group = MlsGroup::new(&st.provider, &signer, &create_config(), credential)
                 .map_err(|e| format!("create group: {e:?}"))?;
             let gid_hex = hex_encode(group.group_id().as_slice());
+            st.signers.insert(gid_hex.clone(), signer);
             st.groups.insert(gid_hex.clone(), group);
             Ok(write_out(gid_hex.as_bytes(), out_gid, gid_len))
         }),
@@ -326,6 +359,17 @@ pub extern "C" fn mls_join_group(
                 .into_group(&st.provider)
                 .map_err(|e| format!("into_group: {e:?}"))?;
             let gid_hex = hex_encode(group.group_id().as_slice());
+            // Adopt the signer of the KeyPackage that got us in: our leaf's
+            // signature key identifies the private key we stored earlier.
+            let leaf_pub = group
+                .own_leaf_node()
+                .map(|l| l.signature_key().as_slice().to_vec())
+                .ok_or("no own leaf after join")?;
+            if !st.signers.contains_key(&gid_hex) {
+                let signer = SignatureKeyPair::read(st.provider.storage(), &leaf_pub, CIPHERSUITE.signature_algorithm())
+                    .ok_or("signer for our leaf not in storage (KeyPackage was not generated here)")?;
+                st.signers.insert(gid_hex.clone(), signer);
+            }
             st.groups.insert(gid_hex.clone(), group);
             Ok(write_out(gid_hex.as_bytes(), out_gid, gid_len))
         }),
@@ -415,11 +459,18 @@ pub extern "C" fn mls_decrypt(
     )
 }
 
-/// Our MLS signature public key (binds the MLS leaf to the account identity key).
+/// Our MLS signature public key inside a group (binds the MLS leaf to the
+/// session identity key).
 #[no_mangle]
-pub extern "C" fn mls_signature_key(account: *const c_char, out: *mut u8, out_len: c_int) -> c_int {
-    let Ok(account) = cstr(account) else { return ERR_BAD_ARG };
-    report("mls_signature_key", with_account(&account, true, |st| Ok(write_out(st.signer.public(), out, out_len))))
+pub extern "C" fn mls_signature_key(account: *const c_char, group_id_hex: *const c_char, out: *mut u8, out_len: c_int) -> c_int {
+    let (Ok(account), Ok(gid)) = (cstr(account), cstr(group_id_hex)) else { return ERR_BAD_ARG };
+    report(
+        "mls_signature_key",
+        with_account(&account, false, |st| {
+            let signer = st.signers.get(&gid).ok_or_else(|| format!("no signer for group {gid}"))?;
+            Ok(write_out(signer.public(), out, out_len))
+        }),
+    )
 }
 
 /// Signature public key carried by a TLS-serialised KeyPackage.
@@ -580,11 +631,12 @@ pub extern "C" fn mls_get_members(account: *const c_char, group_id_hex: *const c
 // ─── Persistence ─────────────────────────────────────────────────────────────
 //
 // Blob layout (all lengths big-endian u32):
-//   magic "OIM1" | sig_scheme u16 | pub_len | pub | n_entries | (k_len k v_len v)*
-// The signer's private key is itself an entry in the storage map (written by `signer.store()`),
-// so only the public key is needed to look it up again on load.
+//   magic "OIM2" | sig_scheme u16 | n_entries | (k_len k v_len v)*
+//     | n_signers | (gid_len gid pub_len pub)*
+// Each signer's private key is itself an entry in the storage map (written by
+// `signer.store()`), so only the public key is needed to look it up on load.
 
-const MAGIC: &[u8; 4] = b"OIM1";
+const MAGIC: &[u8; 4] = b"OIM2";
 
 fn put_bytes(buf: &mut Vec<u8>, d: &[u8]) {
     buf.extend_from_slice(&(d.len() as u32).to_be_bytes());
@@ -615,12 +667,16 @@ pub extern "C" fn mls_save_state(account: *const c_char, out: *mut u8, out_len: 
             let mut buf = Vec::new();
             buf.extend_from_slice(MAGIC);
             buf.extend_from_slice(&(CIPHERSUITE.signature_algorithm() as u16).to_be_bytes());
-            put_bytes(&mut buf, st.signer.public());
             let values = st.provider.storage.values.read().unwrap();
             buf.extend_from_slice(&(values.len() as u32).to_be_bytes());
             for (k, v) in values.iter() {
                 put_bytes(&mut buf, k);
                 put_bytes(&mut buf, v);
+            }
+            buf.extend_from_slice(&(st.signers.len() as u32).to_be_bytes());
+            for (gid, signer) in st.signers.iter() {
+                put_bytes(&mut buf, gid.as_bytes());
+                put_bytes(&mut buf, signer.public());
             }
             Ok(write_out(&buf, out, out_len))
         }),
@@ -638,7 +694,6 @@ pub extern "C" fn mls_load_state(account: *const c_char, blob: *const u8, blob_l
             return Err("bad magic".into());
         }
         cur = &cur[6..]; // magic + scheme (scheme is fixed to CIPHERSUITE for now)
-        let public = take_bytes(&mut cur)?.to_vec();
         if cur.len() < 4 {
             return Err("truncated".into());
         }
@@ -652,13 +707,25 @@ pub extern "C" fn mls_load_state(account: *const c_char, blob: *const u8, blob_l
         }
         let provider = OimProvider { crypto: RustCrypto::default(), storage: MemoryStorage::default() };
         *provider.storage.values.write().unwrap() = map;
-        let signer = SignatureKeyPair::read(provider.storage(), &public, CIPHERSUITE.signature_algorithm())
-            .ok_or("signer not found in restored storage")?;
-        let credential = CredentialWithKey {
-            credential: BasicCredential::new(account.as_bytes().to_vec()).into(),
-            signature_key: signer.public().into(),
-        };
-        Ok(AccountState { provider, signer, credential, groups: HashMap::new() })
+        if cur.len() < 4 {
+            return Err("truncated".into());
+        }
+        let n_signers = u32::from_be_bytes(cur[..4].try_into().unwrap()) as usize;
+        cur = &cur[4..];
+        let mut signers = HashMap::with_capacity(n_signers);
+        for _ in 0..n_signers {
+            let gid = String::from_utf8(take_bytes(&mut cur)?.to_vec()).map_err(|e| format!("gid: {e}"))?;
+            let public = take_bytes(&mut cur)?.to_vec();
+            let signer = SignatureKeyPair::read(provider.storage(), &public, CIPHERSUITE.signature_algorithm())
+                .ok_or_else(|| format!("signer for group {gid} not in restored storage"))?;
+            signers.insert(gid, signer);
+        }
+        Ok(AccountState {
+            provider,
+            account: account.to_string(),
+            signers,
+            groups: HashMap::new(),
+        })
     })();
     match parsed {
         Ok(st) => {

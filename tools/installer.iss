@@ -14,7 +14,7 @@
 #endif
 
 #define AppName "OceanTalk"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppPublisher "com.example"
 #define AppExe "oceantalk.exe"
 #define SourceDir "..\build\windows\" + Arch + "\runner"
@@ -27,7 +27,7 @@ AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=..\installer_output
-OutputBaseFilename={#AppName}-setup-{#Arch}
+OutputBaseFilename={#AppName}-setup-{#AppVersion}-{#Arch}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

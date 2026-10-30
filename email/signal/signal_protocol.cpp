@@ -183,9 +183,9 @@ static std::string x3dh_root_key(const std::string& dh1, const std::string& dh2,
 
 // --- Identity & prekeys ---
 
-bool ensure_identity_key(const std::string& account) {
+bool ensure_identity_key(const std::string& account, const std::string& sessionId) {
     SignalIdentityRecord rec;
-    if (s_keyRepo.loadIdentity(account, rec)) return true;
+    if (s_keyRepo.loadIdentity(account, sessionId, rec)) return true;
 
     std::string pubPem, privPem;
     std::string password = generate_random_password(32);
@@ -193,18 +193,18 @@ bool ensure_identity_key(const std::string& account) {
         LOG_INFO("[Signal] ensure_identity_key: failed to generate keypair for %s\n", account.c_str());
         return false;
     }
-    if (!s_keyRepo.upsertIdentity(account, pubPem, privPem, password)) {
+    if (!s_keyRepo.upsertIdentity(account, sessionId, pubPem, privPem, password)) {
         LOG_INFO("[Signal] ensure_identity_key: failed to store identity for %s\n", account.c_str());
         return false;
     }
-    LOG_INFO("[Signal] ensure_identity_key: created identity key for %s fp=%s\n",
-             account.c_str(), key_fingerprint(pubPem).c_str());
+    LOG_INFO("[Signal] ensure_identity_key: created identity key for %s session=%s fp=%s\n",
+             account.c_str(), sessionId.c_str(), key_fingerprint(pubPem).c_str());
     return true;
 }
 
-std::string identity_public_key(const std::string& account) {
+std::string identity_public_key(const std::string& account, const std::string& sessionId) {
     SignalIdentityRecord rec;
-    return s_keyRepo.loadIdentity(account, rec) ? rec.ikPub : "";
+    return s_keyRepo.loadIdentity(account, sessionId, rec) ? rec.ikPub : "";
 }
 
 std::string key_fingerprint(const std::string& pubPem) {
@@ -217,22 +217,26 @@ std::string key_fingerprint(const std::string& pubPem) {
     return hex;
 }
 
-std::string sign_with_identity_key(const std::string& account, const std::string& data) {
+std::string sign_with_identity_key(const std::string& account, const std::string& sessionId,
+                                   const std::string& data) {
     SignalIdentityRecord ik;
-    if (!s_keyRepo.loadIdentity(account, ik)) return "";
+    if (!s_keyRepo.loadIdentity(account, sessionId, ik)) return "";
     return sign_with_ecc_private_key(ik.ikPriv, ik.ikPassword, data);
 }
 
-int pin_peer_identity(const std::string& account, const std::string& peer, const std::string& ikPub) {
+int pin_peer_identity(const std::string& account, const std::string& sessionId,
+                      const std::string& peer, const std::string& ikPub) {
     SignalPeerIdentityRecord known;
-    if (s_keyRepo.loadPeerIdentity(account, peer, known)) {
+    if (s_keyRepo.loadPeerIdentity(account, sessionId, peer, known)) {
         if (known.ikPub == ikPub) return 0;
-        LOG_INFO("[Signal] peer %s: identity key changed (known fp=%s, got fp=%s)\n",
-                 peer.c_str(), key_fingerprint(known.ikPub).c_str(), key_fingerprint(ikPub).c_str());
+        LOG_INFO("[Signal] peer %s session=%s: identity key changed (known fp=%s, got fp=%s)\n",
+                 peer.c_str(), sessionId.c_str(),
+                 key_fingerprint(known.ikPub).c_str(), key_fingerprint(ikPub).c_str());
         return -3;
     }
-    s_keyRepo.upsertPeerIdentity(account, peer, ikPub);
-    LOG_INFO("[Signal] peer %s: pinned identity key fp=%s\n", peer.c_str(), key_fingerprint(ikPub).c_str());
+    s_keyRepo.upsertPeerIdentity(account, sessionId, peer, ikPub);
+    LOG_INFO("[Signal] peer %s session=%s: pinned identity key fp=%s\n",
+             peer.c_str(), sessionId.c_str(), key_fingerprint(ikPub).c_str());
     return 0;
 }
 
@@ -241,7 +245,7 @@ bool ensure_signed_prekey_for_session(const std::string& account, const std::str
     if (s_keyRepo.loadSignedPrekey(account, sessionUuid, rec)) return true;
 
     SignalIdentityRecord ik;
-    if (!s_keyRepo.loadIdentity(account, ik)) {
+    if (!s_keyRepo.loadIdentity(account, sessionUuid, ik)) {
         LOG_INFO("[Signal] ensure_signed_prekey_for_session: no identity key for %s\n", account.c_str());
         return false;
     }
@@ -269,7 +273,7 @@ PrekeyBundle build_prekey_bundle_for_session(const std::string& account, const s
     PrekeyBundle bundle;
     SignalIdentityRecord ik;
     SignalPrekeyRecord spk;
-    if (!s_keyRepo.loadIdentity(account, ik) || !s_keyRepo.loadSignedPrekey(account, sessionUuid, spk)) {
+    if (!s_keyRepo.loadIdentity(account, sessionUuid, ik) || !s_keyRepo.loadSignedPrekey(account, sessionUuid, spk)) {
         return bundle;
     }
     bundle.ikPub = ik.ikPub;
@@ -298,13 +302,14 @@ std::string generate_session_id() {
 // --- X3DH ---
 
 bool x3dh_initiate(const std::string& account,
+                   const std::string& sessionId,
                    const PrekeyBundle& peerBundle,
                    std::string& outRootKey,
                    std::string& outEkPub,
                    std::string& outEkPriv,
                    std::string& outEkPassword) {
     SignalIdentityRecord ik;
-    if (!s_keyRepo.loadIdentity(account, ik)) {
+    if (!s_keyRepo.loadIdentity(account, sessionId, ik)) {
         LOG_INFO("[Signal] x3dh_initiate: no identity key for %s\n", account.c_str());
         return false;
     }
@@ -331,7 +336,7 @@ bool x3dh_respond(const std::string& account,
                   const std::string& peerEkPub,
                   std::string& outRootKey) {
     SignalIdentityRecord ik;
-    if (!s_keyRepo.loadIdentity(account, ik)) {
+    if (!s_keyRepo.loadIdentity(account, sessionUuid, ik)) {
         LOG_INFO("[Signal] x3dh_respond: no identity key for %s\n", account.c_str());
         return false;
     }

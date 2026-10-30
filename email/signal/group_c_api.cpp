@@ -121,27 +121,31 @@ json bindingJson(const MlsRepo::Binding& b) {
     return {{"email", b.email}, {"ik_pub", b.ikPub}, {"mls_key", b.mlsKey}, {"sig", b.sig}};
 }
 
-// Our own binding: account IK signs our MLS signature key.
-bool makeOwnBinding(const std::string& account, MlsRepo::Binding& out) {
-    if (!ensure_identity_key(account)) return false;
+// Our own binding: the session IK (scoped to groupId) signs our MLS leaf
+// signature key for that group.
+bool makeOwnBinding(const std::string& account, const std::string& groupId,
+                    const std::string& mlsKey, MlsRepo::Binding& out) {
+    if (!ensure_identity_key(account, groupId)) return false;
     out.email = account;
-    out.ikPub = identity_public_key(account);
-    out.mlsKey = mls::signatureKeyHex(account);
-    out.sig = sign_with_identity_key(account, bindingPayload(out.email, out.mlsKey));
+    out.ikPub = identity_public_key(account, groupId);
+    out.mlsKey = mlsKey;
+    out.sig = sign_with_identity_key(account, groupId, bindingPayload(out.email, out.mlsKey));
     return !out.ikPub.empty() && !out.mlsKey.empty() && !out.sig.empty();
 }
 
-// Verify a received binding and pin the identity. 0 ok, -1 malformed, -2 bad
-// signature / not our key for our own entry, -3 identity key changed.
-int verifyBinding(const std::string& account, const json& j, MlsRepo::Binding& out) {
+// Verify a received binding and pin the identity for this group. 0 ok,
+// -1 malformed, -2 bad signature / not our key for our own entry,
+// -3 identity key changed mid-session.
+int verifyBinding(const std::string& account, const std::string& groupId,
+                  const json& j, MlsRepo::Binding& out) {
     if (!j.is_object()) return -1;
     out = {j.value("email", ""), j.value("ik_pub", ""), j.value("mls_key", ""), j.value("sig", "")};
     if (out.email.empty() || out.ikPub.empty() || out.mlsKey.empty() || out.sig.empty()) return -1;
     if (!verify_with_ecc_public_key(out.ikPub, bindingPayload(out.email, out.mlsKey), out.sig)) return -2;
     if (out.email == account) {
-        return (out.ikPub == identity_public_key(account) && out.mlsKey == mls::signatureKeyHex(account)) ? 0 : -2;
+        return (out.ikPub == identity_public_key(account, groupId) && out.mlsKey == mls::signatureKeyHex(account, groupId)) ? 0 : -2;
     }
-    return pin_peer_identity(account, out.email, out.ikPub);
+    return pin_peer_identity(account, groupId, out.email, out.ikPub);
 }
 
 void flagIdentityChanged(const std::string& account, const std::string& groupId) {
@@ -155,7 +159,7 @@ void flagIdentityChanged(const std::string& account, const std::string& groupId)
 // Verify + store a binding for a group; identity changes flag the session.
 int acceptBinding(const std::string& account, const std::string& groupId, const json& j) {
     MlsRepo::Binding b;
-    int rc = verifyBinding(account, j, b);
+    int rc = verifyBinding(account, groupId, j, b);
     if (rc == 0) g_mlsRepo.upsertBinding(groupId, b);
     else {
         LOG_INFO("[MLS] binding for %s in group=%s rejected rc=%d\n", j.value("email", "?").c_str(), groupId.c_str(), rc);
@@ -293,15 +297,17 @@ int onInvite(const std::string& account, const std::string& from, const json& bo
     }
 
     // The owner's leaf must be bound to its identity key before we hand over a KeyPackage.
-    if (acceptBinding(account, groupId, body.value("binding", json())) != 0) return -13;
-
-    MlsRepo::Binding mine;
-    if (!makeOwnBinding(account, mine)) return -14;
-    g_mlsRepo.upsertBinding(groupId, mine);
-    g_mlsRepo.setLastUpdateAt(groupId, nowSecs());
+    int invBrc = acceptBinding(account, groupId, body.value("binding", json()));
+    if (invBrc == -3) return 1;  // identity changed: hold until the user resets trust
+    if (invBrc != 0) return -13;
 
     std::string kp = mls::generateKeyPackage(account);
     if (kp.empty()) return -11;
+    // Our leaf key for this group lives in the KeyPackage we just issued.
+    MlsRepo::Binding mine;
+    if (!makeOwnBinding(account, groupId, mls::keyPackageSignatureKeyHex(kp), mine)) return -14;
+    g_mlsRepo.upsertBinding(groupId, mine);
+    g_mlsRepo.setLastUpdateAt(groupId, nowSecs());
     std::string kpMsgId = newMessageId(account);
     json kpBody = {{"type", "mls_key_package"}, {"x_session_id", rec.xSessionId},
                    {"x_message_id", kpMsgId}, {"x_reply_to", msgId}, {"key_package", kp},
@@ -322,10 +328,10 @@ int onKeyPackage(const std::string& account, const std::string& from, const json
 
     std::string kp = body.value("key_package", "");
     MlsRepo::Binding b;
-    int brc = verifyBinding(account, body.value("binding", json()), b);
+    int brc = verifyBinding(account, groupId, body.value("binding", json()), b);
     if (brc != 0 || b.email != from || b.mlsKey != mls::keyPackageSignatureKeyHex(kp)) {
         LOG_INFO("[MLS] key_package from %s rejected: binding rc=%d email=%s\n", from.c_str(), brc, b.email.c_str());
-        if (brc == -3) flagIdentityChanged(account, groupId);
+        if (brc == -3) { flagIdentityChanged(account, groupId); return 1; }  // hold until trust reset
         return -24;
     }
     for (auto& m : mls::memberEmails(account, groupId)) {
@@ -364,7 +370,11 @@ int onWelcome(const std::string& account, const json& body, const std::string& p
     if (groupId.empty()) { LOG_INFO("[MLS] welcome: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
     if (mls::isReady(account, groupId)) { LOG_INFO("[MLS] welcome: group=%s already joined\n", groupId.c_str()); return 0; }
     for (auto& bj : body.value("bindings", json::array())) {
-        if (acceptBinding(account, groupId, bj) != 0) return -32;
+        int brc = acceptBinding(account, groupId, bj);
+        // Identity changed: hold the welcome. Once the user resets trust the
+        // next download pass replays it and the join completes.
+        if (brc == -3) return 1;
+        if (brc != 0) return -32;
     }
     std::string gid = mls::joinGroup(account, groupId, body.value("welcome", ""), body.value("ratchet_tree", ""));
     if (gid.empty()) return -30;
@@ -381,7 +391,9 @@ int onHandshake(const std::string& account, const json& body, const std::string&
     const bool isProposal = body.value("type", "") == "mls_update_proposal";
     if (!isProposal && body.contains("binding")) {
         // Add commit: the new leaf must be bound before it enters our tree.
-        if (acceptBinding(account, groupId, body["binding"]) != 0) return -33;
+        int cbrc = acceptBinding(account, groupId, body["binding"]);
+        if (cbrc == -3) return 1;  // identity changed: hold until the user resets trust
+        if (cbrc != 0) return -33;
     }
     int rc = mls::processHandshake(account, groupId, body.value(isProposal ? "proposal" : "commit", ""));
     if (rc < 0) return 1;
@@ -440,7 +452,9 @@ int groupCreateInternal(const std::string& account, const std::string& subject,
     if (!g_groupRepo.createGroup(rec)) return fail(outJson, outSize, -3, "createGroup failed");
     if (mls::createGroup(account, rec.groupId).empty()) return fail(outJson, outSize, -4, "mls createGroup failed");
     MlsRepo::Binding mine;
-    if (!makeOwnBinding(account, mine)) return fail(outJson, outSize, -6, "identity binding failed");
+    if (!makeOwnBinding(account, rec.groupId, mls::signatureKeyHex(account, rec.groupId), mine)) {
+        return fail(outJson, outSize, -6, "identity binding failed");
+    }
     g_mlsRepo.upsertBinding(rec.groupId, mine);
     g_mlsRepo.setLastUpdateAt(rec.groupId, nowSecs());
 
@@ -498,7 +512,8 @@ extern "C" int group_invite_members(const char* account, const char* groupId, co
     g_groupRepo.updateMembers(rec.groupId, rec.members);
 
     MlsRepo::Binding mine;
-    if (!g_mlsRepo.loadBinding(rec.groupId, account, mine) && !makeOwnBinding(account, mine)) {
+    if (!g_mlsRepo.loadBinding(rec.groupId, account, mine) &&
+        !makeOwnBinding(account, rec.groupId, mls::signatureKeyHex(account, rec.groupId), mine)) {
         return fail(outJson, outSize, -6, "identity binding failed");
     }
     std::string recipients = joinRecipients(added, account);

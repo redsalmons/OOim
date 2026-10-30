@@ -28,20 +28,21 @@ static int write_error(char* outJson, int outSize, const char* error, int rc) {
     return rc;
 }
 
-// TOFU: first bundle from a peer pins its IK; a different IK afterwards is rejected.
+// TOFU: first bundle from a peer pins its IK for this session; a different IK
+// inside the same session is rejected.
 // Returns 0 ok, -2 bad signature, -3 identity changed.
-static int verify_and_pin_peer(const std::string& account, const std::string& peer,
-                               const PrekeyBundle& bundle) {
+static int verify_and_pin_peer(const std::string& account, const std::string& sessionId,
+                               const std::string& peer, const PrekeyBundle& bundle) {
     if (!verify_prekey_bundle(bundle)) {
         LOG_INFO("[Signal] peer %s: invalid SPK signature, bundle rejected\n", peer.c_str());
         return -2;
     }
-    return pin_peer_identity(account, peer, bundle.ikPub);
+    return pin_peer_identity(account, sessionId, peer, bundle.ikPub);
 }
 
 static int bundle_for_session(const std::string& acc, const std::string& sigId,
                               char* outJson, int outSize) {
-    if (!ensure_identity_key(acc)) return write_error(outJson, outSize, "no_identity_key", -2);
+    if (!ensure_identity_key(acc, sigId)) return write_error(outJson, outSize, "no_identity_key", -2);
     if (!ensure_signed_prekey_for_session(acc, sigId)) return write_error(outJson, outSize, "no_signed_prekey", -3);
 
     PrekeyBundle bundle = build_prekey_bundle_for_session(acc, sigId);
@@ -73,7 +74,7 @@ extern "C" int signal_store_peer_prekey(const char* account, const char* peerEma
                                         const char* spkPub, const char* spkSig) {
     if (!account || !peerEmail || !sessionId || !*sessionId || !ikPub || !spkPub || !spkSig) return -1;
     PrekeyBundle bundle{ikPub, spkPub, spkSig};
-    int rc = verify_and_pin_peer(account, peerEmail, bundle);
+    int rc = verify_and_pin_peer(account, sessionId, peerEmail, bundle);
     if (rc != 0) return rc;
     return s_signalKeyRepo.upsertPeerPrekey(account, peerEmail, sessionId, ikPub, spkPub, spkSig) ? 0 : -1;
 }
@@ -100,7 +101,7 @@ extern "C" int signal_session_initiate_with_id(const char* account, const char* 
     if (myBundle.ikPub.empty()) return write_error(outJson, outSize, "no_signed_prekey", -3);
 
     std::string rootKey, ekPub, ekPriv, ekPassword;
-    if (!x3dh_initiate(acc, peerBundle, rootKey, ekPub, ekPriv, ekPassword)) {
+    if (!x3dh_initiate(acc, sid, peerBundle, rootKey, ekPub, ekPriv, ekPassword)) {
         return write_error(outJson, outSize, "x3dh_failed", -6);
     }
     if (!dr_initialize(acc, peer, sid, rootKey, peerBundle.spkPub, true)) {
@@ -199,7 +200,7 @@ extern "C" int signal_session_decrypt(const char* account, const char* peerEmail
             return fail("init_missing_bundle", -3);
         }
         // Initiator's bundle: signature + pinned identity.
-        int pin = verify_and_pin_peer(acc, peer, parsed.senderBundle);
+        int pin = verify_and_pin_peer(acc, sigId, peer, parsed.senderBundle);
         if (pin == -2) return fail("bad_spk_signature", -3);
         if (pin == -3) return fail("identity_changed", -9);
 
@@ -276,22 +277,24 @@ extern "C" int signal_session_exists_for_email_session(const char* account,
     return 1;
 }
 
-extern "C" int signal_identity_fingerprint(const char* account, char* out, int outSize) {
-    if (!account || !out || outSize <= 0) return -1;
-    snprintf(out, outSize, "%s", key_fingerprint(identity_public_key(account)).c_str());
+extern "C" int signal_identity_fingerprint(const char* account, const char* sessionId,
+                                           char* out, int outSize) {
+    if (!account || !sessionId || !out || outSize <= 0) return -1;
+    snprintf(out, outSize, "%s", key_fingerprint(identity_public_key(account, sessionId)).c_str());
     return 0;
 }
 
-extern "C" int signal_peer_identity_fingerprint(const char* account, const char* peerEmail,
-                                                char* out, int outSize) {
-    if (!account || !peerEmail || !out || outSize <= 0) return -1;
+extern "C" int signal_peer_identity_fingerprint(const char* account, const char* sessionId,
+                                                const char* peerEmail, char* out, int outSize) {
+    if (!account || !sessionId || !peerEmail || !out || outSize <= 0) return -1;
     SignalPeerIdentityRecord rec;
-    std::string fp = s_signalKeyRepo.loadPeerIdentity(account, peerEmail, rec) ? key_fingerprint(rec.ikPub) : "";
+    std::string fp = s_signalKeyRepo.loadPeerIdentity(account, sessionId, peerEmail, rec) ? key_fingerprint(rec.ikPub) : "";
     snprintf(out, outSize, "%s", fp.c_str());
     return 0;
 }
 
-extern "C" int signal_peer_identity_reset(const char* account, const char* peerEmail) {
-    if (!account || !peerEmail) return -1;
-    return s_signalKeyRepo.deletePeerIdentity(account, peerEmail) ? 0 : -1;
+extern "C" int signal_peer_identity_reset(const char* account, const char* sessionId,
+                                          const char* peerEmail) {
+    if (!account || !sessionId || !peerEmail) return -1;
+    return s_signalKeyRepo.deletePeerIdentity(account, sessionId, peerEmail) ? 0 : -1;
 }

@@ -1,4 +1,4 @@
-# Refresh the Windows shell icon cache (taskbar / desktop shortcut / exe icons).
+ # Refresh the Windows shell icon cache (taskbar / desktop shortcut / exe icons).
 # Use after changing app icons — the shell caches icons by path, so reinstalling
 # to the same location keeps showing the stale icon until the cache is rebuilt.
 #

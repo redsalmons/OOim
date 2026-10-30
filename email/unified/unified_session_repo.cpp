@@ -1,5 +1,6 @@
 #include "unified_session_repo.h"
 #include "db_connection.h"
+#include "signal_key_repo.h"
 #include "logger.h"
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
@@ -412,6 +413,18 @@ bool UnifiedSessionRepo::close(const std::string& sessionId) {
     auto& conn = DbConnection::instance();
     sqlite3* db = conn.get();
     if (!db) return false;
+
+    // Session-scoped key material dies with the session: drop this session's
+    // identity key and every pin it held (sig_xxx for 1:1, group id for 1:n).
+    UnifiedSession s;
+    if (load(sessionId, s)) {
+        static SignalKeyRepo s_keys;
+        const std::string& scope = (s.mode == SessionMode::Signal) ? s.signalSessionId : s.mlsGroupId;
+        if (!scope.empty()) {
+            s_keys.deleteIdentity(s.account, scope);
+            s_keys.deletePeerIdentitiesBySession(s.account, scope);
+        }
+    }
 
     const char* sql = "UPDATE unified_session SET status=1, "
                       "updated_at=datetime('now','localtime') "
