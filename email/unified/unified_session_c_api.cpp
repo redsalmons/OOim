@@ -170,6 +170,25 @@ int us_add_members(const char* account, const char* sessionId,
     return result.success ? 0 : -3;
 }
 
+// Cancel a pending invite by removing a not-yet-joined member.
+// outJson: {status, session_id, error?}
+int us_remove_member(const char* account, const char* sessionId,
+                     const char* member, char* outJson, int outSize) {
+    if (!account || !sessionId || !member || !outJson || outSize <= 0) return -1;
+
+    auto result = s_manager.removeMember(account, sessionId, member);
+
+    json resp;
+    resp["status"] = result.success ? "success" : "error";
+    resp["session_id"] = result.sessionId;
+    if (!result.error.empty()) resp["error"] = result.error;
+
+    snprintf(outJson, outSize, "%s", resp.dump().c_str());
+    LOG_INFO("[US] us_remove_member: session=%s member=%s ok=%d\n",
+             sessionId, member, result.success ? 1 : 0);
+    return result.success ? 0 : -3;
+}
+
 // List all active sessions for an account.
 // outJson: {status, sessions: [{session_id, mode, members, ...}]}
 int us_list_sessions(const char* account, char* outJson, int outSize) {

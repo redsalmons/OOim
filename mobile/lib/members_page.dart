@@ -117,6 +117,39 @@ class _MembersPageState extends State<MembersPage> {
     }
   }
 
+  // --- remove member (cancel pending invite) ---
+
+  Future<void> _removeMember(String member) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(AppStrings.isZh ? '移除成员' : 'Remove member'),
+        content: Text(AppStrings.isZh
+            ? '确定移除 $member 吗？仅适用于尚未加入的成员。'
+            : 'Remove $member? Only pending members can be removed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(AppStrings.cancel)),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(AppStrings.delete)),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final resultJson = UnifiedSessionManager.removeMember(
+        session.account, session.sessionId, member);
+    try {
+      final result = jsonDecode(resultJson);
+      if (result['status'] == 'success') {
+        _load();
+      } else {
+        _toast(AppStrings.isZh
+            ? '移除失败: ${result['error'] ?? 'unknown'}'
+            : 'Remove failed: ${result['error'] ?? 'unknown'}');
+      }
+    } catch (e) {
+      _toast('$e');
+    }
+  }
+
   // --- build ---
 
   @override
@@ -164,6 +197,13 @@ class _MembersPageState extends State<MembersPage> {
                 overflow: TextOverflow.ellipsis,
               ),
               subtitle: Text(m, maxLines: 1, overflow: TextOverflow.ellipsis),
+              trailing: m.toLowerCase() == session.account.toLowerCase()
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.remove_circle_outline, size: 20),
+                      tooltip: AppStrings.isZh ? '移除' : 'Remove',
+                      onPressed: () => _removeMember(m),
+                    ),
             ),
           ListTile(
             dense: true,

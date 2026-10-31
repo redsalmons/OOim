@@ -450,6 +450,11 @@ mixin ConversationViewMixin on State<EmailModule> {
                           ],
                         ),
                       ),
+                      if (!isMe)
+                        GestureDetector(
+                          onTap: () => _unifiedRemoveMember(session, m),
+                          child: Icon(Icons.remove_circle_outline, size: 18, color: context.oim.textMuted),
+                        ),
                     ],
                   ),
                 );
@@ -1047,6 +1052,40 @@ mixin ConversationViewMixin on State<EmailModule> {
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(AppStrings.sendFailedWith('$e')), duration: const Duration(seconds: 3)));
+    }
+  }
+
+  void _unifiedRemoveMember(UnifiedSessionInfo session, String member) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(AppStrings.isZh ? '移除成员' : 'Remove member'),
+        content: Text(AppStrings.isZh
+            ? '确定移除 $member 吗？仅适用于尚未加入的成员。'
+            : 'Remove $member? Only pending members can be removed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(AppStrings.cancel)),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(AppStrings.delete)),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final resultJson = UnifiedSessionManager.removeMember(
+        session.account, session.sessionId, member);
+    try {
+      final result = jsonDecode(resultJson);
+      if (result['status'] == 'success') {
+        loadUnifiedSessions();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(AppStrings.isZh
+                ? '移除失败: ${result['error'] ?? 'unknown'}'
+                : 'Remove failed: ${result['error'] ?? 'unknown'}'),
+            duration: const Duration(seconds: 2)));
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('$e'), duration: const Duration(seconds: 2)));
     }
   }
 

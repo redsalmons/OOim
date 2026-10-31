@@ -106,6 +106,7 @@ final _usSendMessage = _lib.lookupFunction<_UsThreeArgNative, _UsThreeArgDart>('
 final _usSendFiles = _lib.lookupFunction<_UsSendFilesNative, _UsSendFilesDart>('us_send_files');
 final _usListMessages = _lib.lookupFunction<_UsTwoArgNative, _UsTwoArgDart>('us_list_messages');
 final _usAddMembers = _lib.lookupFunction<_UsThreeArgNative, _UsThreeArgDart>('us_add_members');
+final _usRemoveMember = _lib.lookupFunction<_UsThreeArgNative, _UsThreeArgDart>('us_remove_member');
 final _usListSessions = _lib.lookupFunction<_UsQueryNative, _UsQueryDart>('us_list_sessions');
 final _usGetSession = _lib.lookupFunction<_UsQueryNative, _UsQueryDart>('us_get_session');
 final _usSetSessionFlags = _lib.lookupFunction<_UsSetSessionFlagsNative, _UsSetSessionFlagsDart>('us_set_session_flags');
@@ -419,6 +420,13 @@ class UnifiedSessionManager {
   /// Returns a JSON string: {status, session_id, upgraded, mode, task_id}
   static String addMembers(String account, String sessionId, List<String> newMembers) =>
       _call3(_usAddMembers, account, sessionId, jsonEncode(newMembers));
+
+  /// Cancel a pending invite by removing a member that has not joined the
+  /// ratchet tree yet. In-tree members are rejected by the native layer.
+  ///
+  /// Returns a JSON string: {status, session_id, error?}
+  static String removeMember(String account, String sessionId, String member) =>
+      _call3(_usRemoveMember, account, sessionId, member);
 
   /// List all active sessions for an account.
   ///

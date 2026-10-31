@@ -582,6 +582,50 @@ bool UnifiedSessionManager::setSessionFlags(const std::string& sessionId, int pi
     return repo_.updateFlags(sessionId, pinned ? 1 : 0, hidden ? 1 : 0);
 }
 
+// ---------- removeMember ----------
+
+SendResult UnifiedSessionManager::removeMember(const std::string& account,
+                                                const std::string& sessionId,
+                                                const std::string& member) {
+    SendResult result;
+    result.sessionId = sessionId;
+
+    UnifiedSession session;
+    if (!repo_.load(sessionId, session)) {
+        result.error = "session not found";
+        return result;
+    }
+    if (member.empty() || member == account) {
+        result.error = "invalid member";
+        return result;
+    }
+    auto it = std::find(session.members.begin(), session.members.end(), member);
+    if (it == session.members.end()) {
+        result.error = "member not found";
+        return result;
+    }
+    // Guard: an in-tree member is already an encryption recipient — removing it
+    // requires an MLS remove commit, not a roster edit.
+    if (session.mode == SessionMode::Mls && !session.mlsGroupId.empty()) {
+        std::vector<std::string> tree = mls::memberEmails(account, session.mlsGroupId);
+        if (std::find(tree.begin(), tree.end(), member) != tree.end()) {
+            result.error = "member already joined";
+            return result;
+        }
+    }
+    if (session.members.size() <= 2) {
+        result.error = "cannot leave empty session";
+        return result;
+    }
+    session.members.erase(it);
+    if (!repo_.updateMembers(sessionId, session.members)) {
+        result.error = "persist failed";
+        return result;
+    }
+    result.success = true;
+    return result;
+}
+
 bool UnifiedSessionManager::isReady(const std::string& account, const std::string& sessionId) {
     UnifiedSession session;
     if (!repo_.load(sessionId, session)) return false;
@@ -609,24 +653,25 @@ bool UnifiedSessionManager::isReady(const std::string& account, const std::strin
         if (sigSid.empty()) return false;
         if (signal_session_exists(account.c_str(), peer.c_str(), sigSid.c_str()) != 1) return false;
 
-        // A signal_session row is written the instant we *initiate* X3DH, so its mere
-        // existence only proves we hold the peer's keys. Sending is allowed once the
-        // peer has proven it holds ours too (its PREKEY_BUNDLE processed, or our bundle
-        // delivered as responder) — that is what kex_done records.
-        static SignalSessionRepo s_kexRepo;
-        return s_kexRepo.isKexDone(account, sigSid);
+        // Signal semantics: the initiator may send as soon as it holds the
+        // peer's keys (X3DH initiated — the session row above exists). The
+        // responder holds ours from the bundle it processed, so existence is
+        // sufficient; waiting for kex_done would deadlock both sides if the
+        // first app mail arrives before the bundle is processed.
+        return true;
     } else {
-        // MLS: every member other than ourselves must already be in the ratchet tree.
-        // Right after creation, or while a 1:1 is being upgraded to 1:n, the tree still
-        // holds a subset, so those members' keys are not exchanged yet and sending must
-        // stay blocked until the last one joins.
+        // MLS semantics: members not yet in the tree simply cannot read what is
+        // sent now (epoch rules make that true even for late joiners), so a
+        // pending/dead invitee must not block the group. Ready once we are in
+        // the tree and at least one other member is.
         if (!mls::isReady(account, session.mlsGroupId)) return false;
         std::vector<std::string> tree = mls::memberEmails(account, session.mlsGroupId);
         size_t peers = 0;
-        for (auto& m : session.members) {
-            if (m == account || m.empty()) continue;
-            peers++;
-            if (std::find(tree.begin(), tree.end(), m) == tree.end()) return false;
+        for (auto& m : tree) {
+            if (m != account && !m.empty() &&
+                std::find(session.members.begin(), session.members.end(), m) != session.members.end()) {
+                peers++;
+            }
         }
         return peers > 0;
     }

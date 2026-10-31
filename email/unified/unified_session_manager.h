@@ -47,6 +47,13 @@ public:
                           const std::string& sessionId,
                           const std::vector<std::string>& newMembers);
 
+    // Cancels a pending invite: removes `member` from session.members. Only
+    // members not yet in the ratchet tree may be removed this way — an in-tree
+    // member requires a real MLS remove commit (not implemented).
+    SendResult removeMember(const std::string& account,
+                            const std::string& sessionId,
+                            const std::string& member);
+
     // Query all active sessions for an account.
     std::vector<UnifiedSession> listSessions(const std::string& account);
 

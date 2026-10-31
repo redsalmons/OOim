@@ -545,6 +545,12 @@ int us_list_messages(const char* account, const char* sessionId,
 int us_add_members(const char* account, const char* sessionId,
                    const char* membersJson, char* outJson, int outSize);
 
+// Cancel a pending invite: removes a member that has not joined the ratchet
+// tree yet. Returns error when the member already joined or is unknown.
+// outJson: {status, session_id, error?}
+int us_remove_member(const char* account, const char* sessionId,
+                     const char* member, char* outJson, int outSize);
+
 // List all active sessions for an account.
 // outJson: {status, sessions: [{session_id, mode, members, ...}]}
 int us_list_sessions(const char* account, char* outJson, int outSize);
