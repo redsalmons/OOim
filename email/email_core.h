@@ -482,6 +482,13 @@ int group_send_file_multi(const char* account, const char* unifiedSessionId,
                     const char* subject, const char* text, const char* batchId,
                     char* outJson, int outSize);
 
+// Owner-side roster broadcast after pending members were removed: updates
+// group_session.members and queues a 2.0.6 member_update to every remaining
+// member AND each removed one. removedJson: JSON array of emails.
+// outJson: {status, removed, error?}
+int group_broadcast_member_update(const char* account, const char* groupId,
+                                  const char* removedJson, char* outJson, int outSize);
+
 // Receive-side handler for any 2.0.x mail (called by download_pending).
 // bodyText = JSON body; message_id/in_reply_to = local ids from the body (header fallback).
 // On success writes the local group_id to outGroupId and returns 0 and, for 2.0.3,

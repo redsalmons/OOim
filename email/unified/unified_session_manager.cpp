@@ -622,6 +622,16 @@ SendResult UnifiedSessionManager::removeMember(const std::string& account,
         result.error = "persist failed";
         return result;
     }
+    if (session.mode == SessionMode::Mls && !session.mlsGroupId.empty()) {
+        // Propagate the roster change: remaining members update their list and
+        // the removed member learns it was kicked (its session closes).
+        json removedJson = json::array({member});
+        char notifyBuf[4096];
+        if (group_broadcast_member_update(account.c_str(), session.mlsGroupId.c_str(),
+                                          removedJson.dump().c_str(), notifyBuf, sizeof(notifyBuf)) != 0) {
+            result.error = "member removed locally; roster notice not sent";
+        }
+    }
     result.success = true;
     return result;
 }

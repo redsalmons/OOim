@@ -26,10 +26,11 @@ constexpr const char* MLS_COMMIT      = "2.0.2";  // owner -> existing members: 
 constexpr const char* MLS_APP_MSG     = "2.0.3";  // group application message (MLS ciphertext)
 constexpr const char* MLS_FILE_META   = "2.0.4";  // group file metadata (visible in UI)
 constexpr const char* MLS_FILE_CHUNK  = "2.0.5";  // group file chunk data (hidden from UI)
+constexpr const char* MLS_MEMBER_UPDATE = "2.0.6"; // owner -> members: roster change {removed, added, members}
 
 inline bool isMls(const std::string& v) {
     return v == MLS_KEY_PACKAGE || v == MLS_WELCOME || v == MLS_COMMIT || v == MLS_APP_MSG ||
-           v == MLS_FILE_META || v == MLS_FILE_CHUNK;
+           v == MLS_FILE_META || v == MLS_FILE_CHUNK || v == MLS_MEMBER_UPDATE;
 }
 
 // Aliases mapping old names to new 1.0.x values (no 0.1.x backward compat)
