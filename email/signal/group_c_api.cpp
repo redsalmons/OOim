@@ -231,6 +231,27 @@ void queueHandshake(const std::string& account, const GroupSessionRecord& rec, c
     LOG_INFO("[MLS] queued %s group=%s to=[%s] task=%lld\n", type, rec.groupId.c_str(), recipients.c_str(), (long long)tid);
 }
 
+// 2.0.6 member_update: owner broadcasts a roster change. `added` members are
+// skipped (their invite already carries the list); `extraNotify` reaches
+// members no longer on the roster — removed members must be notified too.
+void queueMemberUpdate(const std::string& account, const GroupSessionRecord& rec,
+                       const std::vector<std::string>& removed, const std::vector<std::string>& added,
+                       const std::vector<std::string>& extraNotify = {}) {
+    std::vector<std::string> notify = rec.members;
+    for (auto& a : added)
+        notify.erase(std::remove(notify.begin(), notify.end(), a), notify.end());
+    for (auto& e : extraNotify)
+        if (std::find(notify.begin(), notify.end(), e) == notify.end()) notify.push_back(e);
+    std::string recipients = joinRecipients(notify, account);
+    if (recipients.empty()) return;
+    std::string id = newMessageId(account);
+    json body = {{"type", "mls_member_update"}, {"x_session_id", rec.xSessionId},
+                 {"x_message_id", id}, {"x_reply_to", rec.xReplyId},
+                 {"removed", removed}, {"added", added}, {"members", rec.members}};
+    int64_t tid = g_taskRepo.insert(account, recipients, rec.subject, body.dump(), rec.xReplyId, id, "", "", XMailer::MLS_MEMBER_UPDATE);
+    LOG_INFO("[MLS] queued member_update group=%s to=[%s] task=%lld\n", rec.groupId.c_str(), recipients.c_str(), (long long)tid);
+}
+
 void maybeRefreshLeaf(const std::string& account, const GroupSessionRecord& rec) {
     int64_t last = g_mlsRepo.lastUpdateAt(rec.groupId);
     if (nowSecs() - last < kLeafRefreshInterval) return;
@@ -330,6 +351,12 @@ int onKeyPackage(const std::string& account, const std::string& from, const json
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return -21;
     if (rec.owner != account) { LOG_INFO("[MLS] key_package received by non-owner, ignored\n"); return 0; }
+    // Only roster members may hand in a KeyPackage: a removed (or never
+    // invited) account must not join through a stale invite.
+    if (std::find(rec.members.begin(), rec.members.end(), from) == rec.members.end()) {
+        LOG_INFO("[MLS] key_package from %s rejected: not on the group=%s roster\n", from.c_str(), groupId.c_str());
+        return -25;
+    }
 
     std::string kp = body.value("key_package", "");
     MlsRepo::Binding b;
@@ -448,7 +475,8 @@ extern "C" int group_remove_member(const char* account, const char* groupId,
 
 // 2.0.2 mls_commit / mls_update_proposal: advance the epoch or queue the proposal.
 // Returns 1 (retry later) while the group is not joined or the message is out of order.
-int onHandshake(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId, std::string& groupId) {
+int onHandshake(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId,
+                std::string& groupId, std::string& plaintext) {
     groupId = resolveGroup(account, parentId, xSessionId);
     if (groupId.empty()) { LOG_INFO("[MLS] handshake: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
     if (!mls::isReady(account, groupId)) { LOG_INFO("[MLS] handshake before welcome for group=%s, retry later\n", groupId.c_str()); return 1; }
@@ -477,12 +505,24 @@ int onHandshake(const std::string& account, const json& body, const std::string&
             g_groupRepo.incrementEpoch(groupId);
         }
         UnifiedSession us;
-        if (g_usRepo.loadByMlsGroupId(account, groupId, us)) {
+        const bool haveUs = g_usRepo.loadByMlsGroupId(account, groupId, us);
+        if (haveUs) {
             us.members.erase(std::remove(us.members.begin(), us.members.end(), removed), us.members.end());
             g_usRepo.updateMembers(us.sessionId, us.members);
             if (removed == account) g_usRepo.setStatus(us.sessionId, kSessionRemoved);
         }
-        if (removed == account) return 0;
+        if (removed == account) {
+            // Evicted: surface a conversation notice, then retire the session.
+            // close() cascade-deletes the group-scoped IK + pins; kSessionRemoved
+            // keeps the session listed (status IN (0,2,3)) but disables input.
+            plaintext = "oim:removed-self";  // localized by the UI layer
+            g_groupRepo.closeGroup(groupId);
+            if (haveUs) { g_usRepo.close(us.sessionId); g_usRepo.setStatus(us.sessionId, kSessionRemoved); }
+            LOG_INFO("[MLS] evicted from group=%s, session marked removed\n", groupId.c_str());
+            return 0;
+        }
+        plaintext = "oim:removed:" + removed;
+        LOG_INFO("[MLS] member_update: %s evicted from group=%s\n", removed.c_str(), groupId.c_str());
     }
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return -21;
@@ -514,6 +554,58 @@ int onAppMessage(const std::string& account, const json& body, const std::string
         plaintext.clear();
         return -41;
     }
+    return 0;
+}
+
+// 2.0.6 mls_member_update (member side): apply an owner roster change. The
+// removed member is notified too — its session is closed locally.
+int onMemberUpdate(const std::string& account, const std::string& from, const json& body,
+                   const std::string& parentId, const std::string& xSessionId, std::string& groupId,
+                   std::string& plaintext) {
+    groupId = resolveGroup(account, parentId, xSessionId);
+    if (groupId.empty()) { LOG_INFO("[MLS] member_update: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
+    GroupSessionRecord rec;
+    if (!g_groupRepo.loadGroup(groupId, rec)) return 1;
+    if (from != rec.owner) { LOG_INFO("[MLS] member_update from non-owner %s, ignored\n", from.c_str()); return 0; }
+
+    std::vector<std::string> removed = body.value("removed", std::vector<std::string>{});
+    std::vector<std::string> added = body.value("added", std::vector<std::string>{});
+    UnifiedSession us;
+    const bool haveUs = g_usRepo.loadByMlsGroupId(account, groupId, us);
+
+    if (std::find(removed.begin(), removed.end(), account) != removed.end()) {
+        // We were removed: close() cascade-deletes this group's scoped identity
+        // key + pins; kSessionRemoved keeps the session listed (readable) but
+        // disables input — same outcome as the in-tree eviction path.
+        g_groupRepo.removeMember(groupId, account);
+        g_groupRepo.closeGroup(groupId);
+        if (haveUs) { g_usRepo.close(us.sessionId); g_usRepo.setStatus(us.sessionId, kSessionRemoved); }
+        plaintext = "oim:removed-self";
+        LOG_INFO("[MLS] member_update: removed from group=%s, session marked removed\n", groupId.c_str());
+        return 0;
+    }
+    if (!removed.empty()) {
+        std::string names;
+        for (auto& r : removed) names += (names.empty() ? "" : ",") + r;
+        plaintext = "oim:removed:" + names;  // localized by the UI layer
+    }
+
+    // The owner's roster is authoritative; fall back to the diff when absent.
+    std::vector<std::string> roster = body.value("members", std::vector<std::string>{});
+    if (!roster.empty()) {
+        rec.members = roster;
+        if (std::find(rec.members.begin(), rec.members.end(), account) == rec.members.end())
+            rec.members.push_back(account);
+    } else {
+        for (auto& r : removed)
+            rec.members.erase(std::remove(rec.members.begin(), rec.members.end(), r), rec.members.end());
+        for (auto& a : added)
+            if (std::find(rec.members.begin(), rec.members.end(), a) == rec.members.end()) rec.members.push_back(a);
+    }
+    g_groupRepo.updateMembers(groupId, rec.members);
+    if (haveUs) g_usRepo.updateMembers(us.sessionId, rec.members);
+    LOG_INFO("[MLS] member_update group=%s removed=%zu added=%zu members=%zu\n",
+             groupId.c_str(), removed.size(), added.size(), rec.members.size());
     return 0;
 }
 
@@ -612,7 +704,36 @@ extern "C" int group_invite_members(const char* account, const char* groupId, co
     int64_t tid = g_taskRepo.insert(account, recipients, rec.subject, invite.dump(), rec.xReplyId, id, "", "", XMailer::MLS_KEY_PACKAGE);
     if (tid <= 0) return fail(outJson, outSize, -5, "queue invite failed");
     LOG_INFO("[MLS] group_invite_members: group=%s to=[%s] task=%lld\n", rec.groupId.c_str(), recipients.c_str(), (long long)tid);
+    // Existing members get a roster notice; the additions themselves receive
+    // the invite above (which already carries the full member list).
+    queueMemberUpdate(account, rec, {}, added);
     return reply(outJson, outSize, {{"status", "success"}, {"added", (int)added.size()}, {"task_id", tid}, {"message_id", id}});
+}
+
+// Owner removed pending (not-yet-joined) members: update the roster and
+// broadcast a 2.0.6 member_update to every remaining member AND the removed
+// ones, so all clients converge on the same member list.
+extern "C" int group_broadcast_member_update(const char* account, const char* groupId, const char* removedJson,
+                                             char* outJson, int outSize) {
+    if (!account || !groupId || !removedJson) return -1;
+    GroupSessionRecord rec;
+    if (!g_groupRepo.loadGroup(groupId, rec)) return fail(outJson, outSize, -2, "group not found");
+    if (rec.owner != account) return fail(outJson, outSize, -3, "only the owner can update the roster");
+    std::vector<std::string> removed;
+    try {
+        for (auto& m : json::parse(removedJson)) {
+            if (!m.is_string()) continue;
+            std::string e = m.get<std::string>();
+            if (std::find(rec.members.begin(), rec.members.end(), e) != rec.members.end()) removed.push_back(e);
+        }
+    } catch (...) { return fail(outJson, outSize, -4, "invalid removedJson"); }
+    if (removed.empty()) return reply(outJson, outSize, {{"status", "success"}, {"removed", 0}});
+    for (auto& r : removed)
+        rec.members.erase(std::remove(rec.members.begin(), rec.members.end(), r), rec.members.end());
+    g_groupRepo.updateMembers(rec.groupId, rec.members);
+    queueMemberUpdate(account, rec, removed, {}, removed);
+    LOG_INFO("[MLS] group_broadcast_member_update: group=%s removed=%zu\n", rec.groupId.c_str(), removed.size());
+    return reply(outJson, outSize, {{"status", "success"}, {"removed", (int)removed.size()}});
 }
 
 extern "C" int group_get_info(const char* account, const char* groupId, char* outJson, int outSize) {
@@ -891,7 +1012,9 @@ extern "C" int group_handle_incoming(const char* account, const char* fromAddr, 
     else if (type == "mls_key_package" && xm == XMailer::MLS_KEY_PACKAGE)    rc = onKeyPackage(acc, from, body, msgId, parent, xSessionId, groupId);
     else if (type == "mls_welcome" && xm == XMailer::MLS_WELCOME)            rc = onWelcome(acc, body, parent, xSessionId, groupId);
     else if ((type == "mls_commit" || type == "mls_update_proposal") && xm == XMailer::MLS_COMMIT)
-                                                                              rc = onHandshake(acc, body, parent, xSessionId, groupId);
+                                                                              rc = onHandshake(acc, body, parent, xSessionId, groupId, plaintext);
+    else if (type == "mls_member_update" && xm == XMailer::MLS_MEMBER_UPDATE)
+                                                                              rc = onMemberUpdate(acc, from, body, parent, xSessionId, groupId, plaintext);
     else if ((type == "mls_app" && xm == XMailer::MLS_APP_MSG) ||
              (type == "mls_file_meta" && xm == XMailer::MLS_FILE_META) ||
              (type == "mls_file_chunk" && xm == XMailer::MLS_FILE_CHUNK))   rc = onAppMessage(acc, body, parent, xSessionId, groupId, plaintext);

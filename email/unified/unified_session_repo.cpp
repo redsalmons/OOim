@@ -333,7 +333,7 @@ std::vector<UnifiedSession> UnifiedSessionRepo::listByAccount(const std::string&
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
                       "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
-                      "FROM unified_session WHERE account=? AND status IN (0,2) "
+                      "FROM unified_session WHERE account=? AND status IN (0,2,3) "
                       "ORDER BY updated_at DESC;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;
@@ -358,7 +358,7 @@ std::vector<UnifiedSession> UnifiedSessionRepo::listAll() {
     const char* sql = "SELECT session_id, account, subject, mode, members, "
                       "signal_session_id, mls_group_id, root_message_id, status, "
                       "mailmen, mailman_cursor, pinned, hidden, created_at, updated_at "
-                      "FROM unified_session WHERE status IN (0,2) "
+                      "FROM unified_session WHERE status IN (0,2,3) "
                       "ORDER BY updated_at DESC;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return result;

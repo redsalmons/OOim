@@ -229,9 +229,11 @@ class _ConversationPageState extends State<ConversationPage> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         child: Center(
           child: Text(
-              isMe
-                  ? '${msg.sender} ${AppStrings.isZh ? "发送了握手信息" : "sent a handshake"}'
-                  : '${AppStrings.isZh ? "接收了" : "Received handshake from"} ${msg.sender}${AppStrings.isZh ? " 的握手信息" : ""}',
+              msg.text.isNotEmpty
+                  ? AppStrings.memberNotice(msg.text)
+                  : (isMe
+                      ? '${msg.sender} ${AppStrings.isZh ? "发送了握手信息" : "sent a handshake"}'
+                      : '${AppStrings.isZh ? "接收了" : "Received handshake from"} ${msg.sender}${AppStrings.isZh ? " 的握手信息" : ""}'),
               style: const TextStyle(fontSize: 11, color: Colors.grey)),
         ),
       );
@@ -412,6 +414,8 @@ class _ConversationPageState extends State<ConversationPage> {
                     focusNode: _inputFocus,
                     minLines: 2,
                     maxLines: 5,
+                    // Evicted members can read history but cannot type.
+                    enabled: !session.removed,
                     onTap: () {
                       if (_showEmoji) setState(() => _showEmoji = false);
                     },

@@ -139,6 +139,24 @@ class AppStrings {
   static String get sessionCreatedWaiting => isZh ? '会话已创建，等待邮件到达' : 'Session created, waiting for emails';
   static String get conversationMembers => isZh ? '会话成员' : 'Members';
   static String get sendMessageHint => isZh ? '发送消息...' : 'Send a message...';
+
+  /// Marker-row notices emitted by the native core as tokens ("oim:...").
+  /// Anything unrecognized is passed through verbatim.
+  static String memberNotice(String token) {
+    if (token == 'oim:removed-self') {
+      return isZh ? '你已被移出该群组' : 'You have been removed from this group';
+    }
+    const prefix = 'oim:removed:';
+    if (token.startsWith(prefix)) {
+      final raw = token.substring(prefix.length);
+      final names = raw.split(',').join(', ');
+      final plural = raw.contains(',');
+      return isZh
+          ? '$names 已被移出该群组'
+          : (plural ? '$names were removed from the group' : '$names was removed from the group');
+    }
+    return token;
+  }
   static String get noRecipients => isZh ? '没有可发送的收件人' : 'No recipients to send to';
   static String get sending => isZh ? '正在发送...' : 'Sending...';
   static String get messageSent => isZh ? '消息已发送' : 'Message sent';

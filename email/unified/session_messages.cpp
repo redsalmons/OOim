@@ -139,7 +139,8 @@ json fileEntry(const json& f) {
 
 bool isHandshakeMailer(const std::string& xm) {
     return xm == XMailer::PREKEY_BUNDLE || xm == XMailer::SESSION_INIT ||
-           xm == XMailer::MLS_KEY_PACKAGE || xm == XMailer::MLS_WELCOME || xm == XMailer::MLS_COMMIT;
+           xm == XMailer::MLS_KEY_PACKAGE || xm == XMailer::MLS_WELCOME || xm == XMailer::MLS_COMMIT ||
+           xm == XMailer::MLS_MEMBER_UPDATE;
 }
 
 json displayOf(const ChainRow& r) {
@@ -149,9 +150,14 @@ json displayOf(const ChainRow& r) {
               {"files", json::array()}};
 
     // Handshake / control messages carry no user content (SESSION_INIT only holds a
-    // fixed X3DH payload): render as a marker.
+    // fixed X3DH payload): render as a marker. A membership notice stored as the body
+    // text IS shown on the marker row — it always uses the oim: token prefix, which
+    // also excludes placeholders ([MLS handshake: ...]) and unprocessed wire JSON.
     if (isHandshakeMailer(r.xMailer)) {
         m["kind"] = "handshake";
+        std::string notice, html;
+        parse_stored_body_text(r.rowid, notice, html);
+        if (notice.rfind("oim:", 0) == 0) m["text"] = notice;
         return m;
     }
 

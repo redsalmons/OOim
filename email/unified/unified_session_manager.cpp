@@ -631,6 +631,16 @@ SendResult UnifiedSessionManager::removeMember(const std::string& account,
         result.error = "persist failed";
         return result;
     }
+    if (session.mode == SessionMode::Mls && !session.mlsGroupId.empty()) {
+        // Propagate the roster change: remaining members update their list and
+        // the removed member learns it was kicked (its session closes).
+        json removedJson = json::array({member});
+        char notifyBuf[4096];
+        if (group_broadcast_member_update(account.c_str(), session.mlsGroupId.c_str(),
+                                          removedJson.dump().c_str(), notifyBuf, sizeof(notifyBuf)) != 0) {
+            result.error = "member removed locally; roster notice not sent";
+        }
+    }
     result.success = true;
     return result;
 }
@@ -638,9 +648,10 @@ SendResult UnifiedSessionManager::removeMember(const std::string& account,
 bool UnifiedSessionManager::isReady(const std::string& account, const std::string& sessionId) {
     UnifiedSession session;
     if (!repo_.load(sessionId, session)) return false;
+    // Closed / identity-changed / removed sessions can never send.
+    if (session.status != kSessionActive) return false;
     // Evicted members keep the session for history but can no longer send.
-    if (session.status == kSessionRemoved ||
-        std::find(session.members.begin(), session.members.end(), account) == session.members.end()) {
+    if (std::find(session.members.begin(), session.members.end(), account) == session.members.end()) {
         return false;
     }
 

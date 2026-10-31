@@ -597,9 +597,11 @@ mixin ConversationViewMixin on State<EmailModule> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         child: Center(
           child: Text(
-              isMe
-                  ? '${msg.sender} ${AppStrings.isZh ? "发送了握手信息" : "sent a handshake"}'
-                  : '${AppStrings.isZh ? "接收了" : "Received handshake from"} ${msg.sender}${AppStrings.isZh ? " 的握手信息" : ""}',
+              msg.text.isNotEmpty
+                  ? AppStrings.memberNotice(msg.text)
+                  : (isMe
+                      ? '${msg.sender} ${AppStrings.isZh ? "发送了握手信息" : "sent a handshake"}'
+                      : '${AppStrings.isZh ? "接收了" : "Received handshake from"} ${msg.sender}${AppStrings.isZh ? " 的握手信息" : ""}'),
               style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
         ),
       );
@@ -877,6 +879,8 @@ mixin ConversationViewMixin on State<EmailModule> {
                                   controller: replyController,
                                   maxLines: 5,
                                   minLines: 2,
+                                  // Evicted members can read history but cannot type.
+                                  enabled: !session.removed,
                                   onTap: () {
                                     if (showEmojiPicker) {
                                       setState(() => showEmojiPicker = false);
