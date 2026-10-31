@@ -387,6 +387,65 @@ int onWelcome(const std::string& account, const json& body, const std::string& p
     return treeVerified(account, groupId) ? 0 : -31;
 }
 
+// Owner: evict a joined member. Produces a remove Commit, broadcasts it to the
+// pre-removal roster (the evicted member included so it can mark itself out),
+// then trims the group and unified rosters.
+extern "C" int group_remove_member(const char* account, const char* groupId,
+                                   const char* member, char* outJson, int outSize) {
+    if (!account || !groupId || !member || !outJson || outSize <= 0) return -1;
+    json resp;
+    auto finish = [&](int rc, const char* err) {
+        resp["status"] = rc == 0 ? "success" : "error";
+        if (err) resp["error"] = err;
+        snprintf(outJson, outSize, "%s", resp.dump().c_str());
+        return rc;
+    };
+
+    GroupSessionRecord rec;
+    if (!g_groupRepo.loadGroup(groupId, rec)) return finish(-51, "group not found");
+    if (rec.owner != account) return finish(-52, "owner required");
+
+    std::string victim = member;
+    if (std::find(rec.members.begin(), rec.members.end(), victim) == rec.members.end())
+        return finish(-53, "member not found");
+
+    std::vector<std::string> before = mls::memberEmails(account, groupId);
+    if (std::find(before.begin(), before.end(), victim) == before.end())
+        return finish(-54, "member not joined");
+
+    std::string commitB64 = mls::removeMemberByEmail(account, groupId, victim);
+    if (commitB64.empty()) return finish(-55, "remove commit failed");
+
+    // The evicted member is still in `before`: it receives this commit, merges
+    // it and detects its own removal.
+    std::string recipients = joinRecipients(before, account);
+    if (!recipients.empty()) {
+        std::string cId = newMessageId(account);
+        json body = {{"type", "mls_commit"}, {"x_session_id", rec.xSessionId},
+                     {"x_message_id", cId}, {"x_reply_to", rec.xReplyId},
+                     {"commit", commitB64}, {"removed", victim}};
+        int64_t tid = g_taskRepo.insert(account, recipients, rec.subject, body.dump(),
+                                        rec.xReplyId, cId, "", "", XMailer::MLS_COMMIT);
+        LOG_INFO("[MLS] queued remove commit group=%s removed=%s to=[%s] task=%lld\n",
+                 groupId, victim.c_str(), recipients.c_str(), (long long)tid);
+    }
+
+    auto erase = [&](std::vector<std::string>& v) {
+        v.erase(std::remove(v.begin(), v.end(), victim), v.end());
+    };
+    erase(rec.members);
+    g_groupRepo.updateMembers(groupId, rec.members);
+    g_groupRepo.incrementEpoch(groupId);
+
+    UnifiedSession us;
+    if (g_usRepo.loadByMlsGroupId(account, groupId, us)) {
+        erase(us.members);
+        g_usRepo.updateMembers(us.sessionId, us.members);
+    }
+    LOG_INFO("[MLS] removed %s group=%s\n", victim.c_str(), groupId);
+    return finish(0, nullptr);
+}
+
 // 2.0.2 mls_commit / mls_update_proposal: advance the epoch or queue the proposal.
 // Returns 1 (retry later) while the group is not joined or the message is out of order.
 int onHandshake(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId, std::string& groupId) {
@@ -401,7 +460,29 @@ int onHandshake(const std::string& account, const json& body, const std::string&
         if (cbrc != 0) return -33;
     }
     int rc = mls::processHandshake(account, groupId, body.value(isProposal ? "proposal" : "commit", ""));
-    if (rc < 0) return 1;
+    std::string removed = isProposal ? "" : body.value("removed", "");
+    if (rc < 0 && removed != account) return 1;
+    if (rc < 0) {
+        // We were evicted: merging our own remove commit may fail on some
+        // backends, but the mail is still authoritative — consume it and drop
+        // ourselves from the roster instead of retrying forever.
+        LOG_INFO("[MLS] evicted from group=%s (commit merge rc=%d)\n", groupId.c_str(), rc);
+    }
+    if (!removed.empty()) {
+        // Roster sync: drop the evicted member locally (group + unified).
+        GroupSessionRecord rm;
+        if (g_groupRepo.loadGroup(groupId, rm)) {
+            rm.members.erase(std::remove(rm.members.begin(), rm.members.end(), removed), rm.members.end());
+            g_groupRepo.updateMembers(groupId, rm.members);
+            g_groupRepo.incrementEpoch(groupId);
+        }
+        UnifiedSession us;
+        if (g_usRepo.loadByMlsGroupId(account, groupId, us)) {
+            us.members.erase(std::remove(us.members.begin(), us.members.end(), removed), us.members.end());
+            g_usRepo.updateMembers(us.sessionId, us.members);
+        }
+        if (removed == account) return 0;
+    }
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return -21;
     if (rc == 1) {

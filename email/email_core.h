@@ -551,6 +551,12 @@ int us_add_members(const char* account, const char* sessionId,
 int us_remove_member(const char* account, const char* sessionId,
                      const char* member, char* outJson, int outSize);
 
+// Owner: evict a joined member via a real MLS remove Commit (2.0.2). The
+// commit is broadcast to the pre-removal roster so the evicted member can
+// detect its own removal. outJson: {status, error?}
+int group_remove_member(const char* account, const char* groupId,
+                        const char* member, char* outJson, int outSize);
+
 // List all active sessions for an account.
 // outJson: {status, sessions: [{session_id, mode, members, ...}]}
 int us_list_sessions(const char* account, char* outJson, int outSize);

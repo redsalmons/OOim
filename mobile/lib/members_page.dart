@@ -197,7 +197,8 @@ class _MembersPageState extends State<MembersPage> {
                 overflow: TextOverflow.ellipsis,
               ),
               subtitle: Text(m, maxLines: 1, overflow: TextOverflow.ellipsis),
-              trailing: m.toLowerCase() == session.account.toLowerCase()
+              trailing: m.toLowerCase() == session.account.toLowerCase() ||
+                      members.length <= 2
                   ? null
                   : IconButton(
                       icon: const Icon(Icons.remove_circle_outline, size: 20),

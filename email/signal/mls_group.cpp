@@ -283,7 +283,7 @@ std::vector<Member> members(const std::string& account, const std::string& group
     if (rc < 0) return out;
     try {
         for (auto& m : json::parse(std::string(buf.begin(), buf.end())))
-            out.push_back({m.value("identity", ""), m.value("signature_key", "")});
+            out.push_back({m.value("identity", ""), m.value("signature_key", ""), m.value("index", -1)});
     } catch (...) {}
     return out;
 }
@@ -292,6 +292,36 @@ std::vector<std::string> memberEmails(const std::string& account, const std::str
     std::vector<std::string> out;
     for (auto& m : members(account, groupId)) out.push_back(m.identity);
     return out;
+}
+
+std::string removeMemberByEmail(const std::string& account, const std::string& groupId,
+                                const std::string& email) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!ensureLocked(account)) return "";
+    std::string gid = mlsGid(groupId);
+    if (gid.empty()) return "";
+
+    // members() locks g_mutex too, so resolve the leaf inline here.
+    int leaf = -1;
+    std::vector<uint8_t> mbuf;
+    int mrc = callOut([&](uint8_t* o, int n) { return mls_get_members(account.c_str(), gid.c_str(), o, n); }, mbuf);
+    if (mrc >= 0) {
+        try {
+            for (auto& m : json::parse(std::string(mbuf.begin(), mbuf.end()))) {
+                if (m.value("identity", "") == email) { leaf = m.value("index", -1); break; }
+            }
+        } catch (...) {}
+    }
+    if (leaf < 0) { LOG_INFO("[MLS] removeMember: %s not in tree group=%s\n", email.c_str(), groupId.c_str()); return ""; }
+
+    std::vector<uint8_t> commit(256 * 1024);
+    int cl = mls_remove_member(account.c_str(), gid.c_str(), leaf, commit.data(), (int)commit.size());
+    if (cl <= 0) { LOG_INFO("[MLS] removeMember: mls_remove_member rc=%d\n", cl); return ""; }
+    commit.resize(cl);
+
+    persist(account);
+    LOG_INFO("[MLS] removeMember: removed %s (leaf %d) group=%s\n", email.c_str(), leaf, groupId.c_str());
+    return b64(commit);
 }
 
 bool isReady(const std::string& account, const std::string& groupId) {
