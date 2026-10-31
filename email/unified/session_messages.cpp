@@ -226,10 +226,23 @@ json session_list_messages(const UnifiedSession& us) {
     return out;
 }
 
+// Body x-message-ids are locally generated as "<epoch_millis>.<hex>@<domain>".
+// A header Message-ID (e.g. "<tencent_...>") must never become an x_reply_to
+// parent: chain membership is derived from body fields only.
+static bool looksLikeXMessageId(const std::string& id) {
+    size_t lt = id.find('<'), at = id.find('@');
+    size_t dot = id.find('.');
+    if (lt == std::string::npos || at == std::string::npos || dot == std::string::npos) return false;
+    if (dot <= lt + 1 || at <= dot + 1) return false;
+    for (size_t i = lt + 1; i < dot; ++i) if (!isdigit((unsigned char)id[i])) return false;
+    for (size_t i = dot + 1; i < at; ++i) if (!isxdigit((unsigned char)id[i])) return false;
+    return true;
+}
+
 std::string session_last_message_id(const UnifiedSession& us) {
     std::string last;
     for (auto& r : chainRows(us)) {
-        if (!isChunk(r.xMailer)) last = r.messageId;
+        if (!isChunk(r.xMailer) && looksLikeXMessageId(r.messageId)) last = r.messageId;
     }
     if (last.empty()) last = us.rootMessageId;
 

@@ -137,7 +137,6 @@ class UnifiedSessionInfo {
   final String peerIdentityFp;
 
   bool get identityChanged => status == 2;
-  bool get removed => status == 3;
 
   /// Owner evicted this account: the session stays readable but input is disabled.
   bool get removed => status == 3;
