@@ -17,6 +17,9 @@ enum SessionStatus {
     // session is shown with a warning and refuses to process protocol mail until
     // the user resets trust (signal_peer_identity_reset).
     kSessionIdentityChanged = 2,
+    // The owner evicted us from a group: the session stays listed so the
+    // removal notice can be read, but input is disabled (isReady == false).
+    kSessionRemoved = 3,
 };
 
 inline const char* sessionModeToString(SessionMode m) {

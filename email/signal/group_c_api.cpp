@@ -475,7 +475,8 @@ extern "C" int group_remove_member(const char* account, const char* groupId,
 
 // 2.0.2 mls_commit / mls_update_proposal: advance the epoch or queue the proposal.
 // Returns 1 (retry later) while the group is not joined or the message is out of order.
-int onHandshake(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId, std::string& groupId) {
+int onHandshake(const std::string& account, const json& body, const std::string& parentId, const std::string& xSessionId,
+                std::string& groupId, std::string& plaintext) {
     groupId = resolveGroup(account, parentId, xSessionId);
     if (groupId.empty()) { LOG_INFO("[MLS] handshake: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
     if (!mls::isReady(account, groupId)) { LOG_INFO("[MLS] handshake before welcome for group=%s, retry later\n", groupId.c_str()); return 1; }
@@ -504,11 +505,23 @@ int onHandshake(const std::string& account, const json& body, const std::string&
             g_groupRepo.incrementEpoch(groupId);
         }
         UnifiedSession us;
-        if (g_usRepo.loadByMlsGroupId(account, groupId, us)) {
+        const bool haveUs = g_usRepo.loadByMlsGroupId(account, groupId, us);
+        if (haveUs) {
             us.members.erase(std::remove(us.members.begin(), us.members.end(), removed), us.members.end());
             g_usRepo.updateMembers(us.sessionId, us.members);
         }
-        if (removed == account) return 0;
+        if (removed == account) {
+            // Evicted: surface a conversation notice, then retire the session.
+            // close() cascade-deletes the group-scoped IK + pins; kSessionRemoved
+            // keeps the session listed (status IN (0,2,3)) but disables input.
+            plaintext = "oim:removed-self";  // localized by the UI layer
+            g_groupRepo.closeGroup(groupId);
+            if (haveUs) { g_usRepo.close(us.sessionId); g_usRepo.setStatus(us.sessionId, kSessionRemoved); }
+            LOG_INFO("[MLS] evicted from group=%s, session marked removed\n", groupId.c_str());
+            return 0;
+        }
+        plaintext = "oim:removed:" + removed;
+        LOG_INFO("[MLS] member_update: %s evicted from group=%s\n", removed.c_str(), groupId.c_str());
     }
     GroupSessionRecord rec;
     if (!g_groupRepo.loadGroup(groupId, rec)) return -21;
@@ -546,7 +559,8 @@ int onAppMessage(const std::string& account, const json& body, const std::string
 // 2.0.6 mls_member_update (member side): apply an owner roster change. The
 // removed member is notified too — its session is closed locally.
 int onMemberUpdate(const std::string& account, const std::string& from, const json& body,
-                   const std::string& parentId, const std::string& xSessionId, std::string& groupId) {
+                   const std::string& parentId, const std::string& xSessionId, std::string& groupId,
+                   std::string& plaintext) {
     groupId = resolveGroup(account, parentId, xSessionId);
     if (groupId.empty()) { LOG_INFO("[MLS] member_update: session %s parent %s unknown\n", xSessionId.c_str(), parentId.c_str()); return 1; }
     GroupSessionRecord rec;
@@ -559,13 +573,20 @@ int onMemberUpdate(const std::string& account, const std::string& from, const js
     const bool haveUs = g_usRepo.loadByMlsGroupId(account, groupId, us);
 
     if (std::find(removed.begin(), removed.end(), account) != removed.end()) {
-        // We were removed: close the session. UnifiedSessionRepo::close
-        // cascade-deletes this group's scoped identity key and pins.
+        // We were removed: close() cascade-deletes this group's scoped identity
+        // key + pins; kSessionRemoved keeps the session listed (readable) but
+        // disables input — same outcome as the in-tree eviction path.
         g_groupRepo.removeMember(groupId, account);
         g_groupRepo.closeGroup(groupId);
-        if (haveUs) g_usRepo.close(us.sessionId);
-        LOG_INFO("[MLS] member_update: removed from group=%s, session closed\n", groupId.c_str());
+        if (haveUs) { g_usRepo.close(us.sessionId); g_usRepo.setStatus(us.sessionId, kSessionRemoved); }
+        plaintext = "oim:removed-self";
+        LOG_INFO("[MLS] member_update: removed from group=%s, session marked removed\n", groupId.c_str());
         return 0;
+    }
+    if (!removed.empty()) {
+        std::string names;
+        for (auto& r : removed) names += (names.empty() ? "" : ",") + r;
+        plaintext = "oim:removed:" + names;  // localized by the UI layer
     }
 
     // The owner's roster is authoritative; fall back to the diff when absent.
@@ -990,9 +1011,9 @@ extern "C" int group_handle_incoming(const char* account, const char* fromAddr, 
     else if (type == "mls_key_package" && xm == XMailer::MLS_KEY_PACKAGE)    rc = onKeyPackage(acc, from, body, msgId, parent, xSessionId, groupId);
     else if (type == "mls_welcome" && xm == XMailer::MLS_WELCOME)            rc = onWelcome(acc, body, parent, xSessionId, groupId);
     else if ((type == "mls_commit" || type == "mls_update_proposal") && xm == XMailer::MLS_COMMIT)
-                                                                              rc = onHandshake(acc, body, parent, xSessionId, groupId);
+                                                                              rc = onHandshake(acc, body, parent, xSessionId, groupId, plaintext);
     else if (type == "mls_member_update" && xm == XMailer::MLS_MEMBER_UPDATE)
-                                                                              rc = onMemberUpdate(acc, from, body, parent, xSessionId, groupId);
+                                                                              rc = onMemberUpdate(acc, from, body, parent, xSessionId, groupId, plaintext);
     else if ((type == "mls_app" && xm == XMailer::MLS_APP_MSG) ||
              (type == "mls_file_meta" && xm == XMailer::MLS_FILE_META) ||
              (type == "mls_file_chunk" && xm == XMailer::MLS_FILE_CHUNK))   rc = onAppMessage(acc, body, parent, xSessionId, groupId, plaintext);

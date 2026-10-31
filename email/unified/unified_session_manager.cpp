@@ -648,6 +648,8 @@ SendResult UnifiedSessionManager::removeMember(const std::string& account,
 bool UnifiedSessionManager::isReady(const std::string& account, const std::string& sessionId) {
     UnifiedSession session;
     if (!repo_.load(sessionId, session)) return false;
+    // Closed / identity-changed / removed sessions can never send.
+    if (session.status != kSessionActive) return false;
 
     if (session.mode == SessionMode::Signal) {
         // The peer identifies the Signal session row: signal_session records are keyed
