@@ -466,6 +466,22 @@ int email_db_init(const char* path) {
     sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_contact_email ON contact(email);", NULL, NULL, &err_msg);
     if (err_msg) sqlite3_free(err_msg);
 
+    // Addressbook table (auto-populated from received emails). Mirrors the
+    // legacy re-init branch — without it fresh databases never get the table.
+    const char* sql_addressbook = "CREATE TABLE IF NOT EXISTS addressbook ("
+                                  "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                  "email TEXT NOT NULL UNIQUE,"
+                                  "name TEXT,"
+                                  "group_name TEXT,"
+                                  "notes TEXT,"
+                                  "created_at TEXT DEFAULT (datetime('now','localtime')),"
+                                  "updated_at TEXT DEFAULT (datetime('now','localtime'))"
+                                  ");";
+    sqlite3_exec(g_db, sql_addressbook, NULL, NULL, &err_msg);
+    if (err_msg) sqlite3_free(err_msg);
+    sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_addressbook_email ON addressbook(email);", NULL, NULL, &err_msg);
+    if (err_msg) sqlite3_free(err_msg);
+
     sqlite3_exec(g_db, "ALTER TABLE session ADD COLUMN encrypt_method INTEGER DEFAULT 0;", NULL, NULL, &err_msg);
     if (err_msg) sqlite3_free(err_msg);
 

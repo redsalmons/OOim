@@ -1514,6 +1514,23 @@ class EmailCore {
     return _addressbookMigrate();
   }
 
+  /// Returns an email→name map of all addressbook contacts with non-empty
+  /// names. Used to display contact names instead of raw addresses.
+  static Map<String, String> addressbookNameMap() {
+    final map = <String, String>{};
+    final jsonStr = addressbookQueryAll();
+    if (jsonStr == null) return map;
+    try {
+      for (final item in jsonDecode(jsonStr) as List) {
+        final m = item as Map<String, dynamic>;
+        final email = m['email'] as String? ?? '';
+        final name = m['name'] as String? ?? '';
+        if (email.isNotEmpty && name.isNotEmpty) map[email] = name;
+      }
+    } catch (_) {}
+    return map;
+  }
+
   /// Processes pending send tasks for an account using the given configIndex.
   /// Returns JSON with status, sent count, and task details.
   static String taskProcessPending(int configIndex, String account) {

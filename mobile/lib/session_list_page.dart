@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:oim_core/i18n/app_strings.dart';
+import 'package:oim_core/native/email_core.dart' as native;
 import 'package:oim_core/native/session_queries.dart';
 import 'package:oim_core/native/unified_session.dart';
 
@@ -18,6 +19,7 @@ class SessionListPage extends StatefulWidget {
 
 class _SessionListPageState extends State<SessionListPage> {
   List<UnifiedSessionInfo> _sessions = [];
+  Map<String, String> _contactNames = {};
 
   @override
   void initState() {
@@ -35,12 +37,13 @@ class _SessionListPageState extends State<SessionListPage> {
 
   void _reload() {
     if (!mounted) return;
+    _contactNames = native.EmailCore.addressbookNameMap();
     setState(() => _sessions = listAllSessions(widget.configPath));
   }
 
   String _title(UnifiedSessionInfo s) {
     if (s.subject.isNotEmpty) return s.subject;
-    final peers = s.members.where((m) => m != s.account).toList();
+    final peers = s.members.where((m) => m != s.account).map((m) => _contactNames[m] ?? m).toList();
     return peers.isNotEmpty ? peers.join(', ') : s.account;
   }
 

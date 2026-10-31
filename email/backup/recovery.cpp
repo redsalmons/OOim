@@ -233,8 +233,14 @@ extern "C" int oim_backup_action(const char* operation, const char* appRoot,
         auto root = fs::u8path(appRoot);
         backup::need(root.is_absolute(), "recovery_invalid_root");
         if (op == "startup") {
-            backup::need(!g_db, "recovery_requires_startup");
-            result = {{"status", "success"}, {"recovery", backup::applyPendingRestore(root)}};
+            // Warm relaunch: the process survived (foreground service, engine
+            // re-attach) so g_db is still open. A pending restore cannot be
+            // applied while the db is in use — there is nothing to do here.
+            if (g_db) {
+                result = {{"status", "success"}, {"recovery", "skipped_db_open"}};
+            } else {
+                result = {{"status", "success"}, {"recovery", backup::applyPendingRestore(root)}};
+            }
         } else if (op == "abort") {
             backup::need(!g_db, "recovery_requires_startup");
             if (fs::exists(root / backup::kJournal))

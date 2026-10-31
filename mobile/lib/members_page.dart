@@ -21,6 +21,7 @@ class MembersPage extends StatefulWidget {
 class _MembersPageState extends State<MembersPage> {
   UnifiedSessionInfo? _live;
   UnifiedSessionInfo get session => _live ?? widget.session;
+  Map<String, String> _contactNames = {};
 
   @override
   void initState() {
@@ -30,6 +31,7 @@ class _MembersPageState extends State<MembersPage> {
 
   void _load() {
     if (!mounted) return;
+    _contactNames = native.EmailCore.addressbookNameMap();
     try {
       final resp = jsonDecode(UnifiedSessionManager.getSession(session.sessionId));
       if (resp['status'] == 'success') {
@@ -192,7 +194,7 @@ class _MembersPageState extends State<MembersPage> {
               title: Text(
                 m.toLowerCase() == session.account.toLowerCase()
                     ? AppStrings.me
-                    : m.split('@').first,
+                    : (_contactNames[m] ?? m.split('@').first),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),

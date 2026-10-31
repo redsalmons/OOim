@@ -49,10 +49,14 @@ mixin EmailListViewMixin on State<EmailModule> {
     );
   }
 
+  Map<String, String>? _contactNames;
+  Map<String, String> get contactNames => _contactNames ??= native.EmailCore.addressbookNameMap();
+
   String _sessionTitle(UnifiedSessionInfo session) {
     String title = session.subject.isNotEmpty ? session.subject : '';
     if (title.isEmpty) {
-      final names = session.members.where((m) => m != session.account).take(3).toList();
+      final names = session.members.where((m) => m != session.account)
+          .take(3).map((m) => contactNames[m] ?? m).toList();
       title = names.join(', ');
       if (session.members.length - 1 > 3) title += ' ...';
     }

@@ -310,7 +310,17 @@ void supervisorEntryPoint(SendPort mainSendPort) {
           for (final port in childSendPorts.values) {
             port.send({'type': 'stop'});
           }
-          await Future.wait(exits);
+          // A child wedged inside a blocking native call (IMAP IDLE, SMTP
+          // connect) may never consume 'stop' — bound the drain and kill
+          // survivors so backup/restore can proceed. Resume respawns them.
+          await Future.wait(exits).timeout(const Duration(seconds: 40),
+              onTimeout: () {
+            log('Pause drain timed out; force-killing: ${childAlive.keys.join(",")}');
+            for (final key in childAlive.keys.toList()) {
+              childIsolates[key]?.kill(priority: Isolate.immediate);
+            }
+            return <void>[];
+          });
           childIsolates.clear();
           childSendPorts.clear();
           childAlive.clear();

@@ -24,6 +24,9 @@ class ConversationPage extends StatefulWidget {
 }
 
 class _ConversationPageState extends State<ConversationPage> {
+  Map<String, String>? _contactNames;
+  Map<String, String> get contactNames => _contactNames ??= native.EmailCore.addressbookNameMap();
+
   final _input = TextEditingController();
   final _inputFocus = FocusNode();
   final _scroll = ScrollController();
@@ -263,7 +266,7 @@ class _ConversationPageState extends State<ConversationPage> {
                   isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 if (!isMe && session.members.length > 2)
-                  Text(msg.sender.split('@').first,
+                  Text(contactNames[msg.sender] ?? msg.sender.split('@').first,
                       style: const TextStyle(fontSize: 11, color: Colors.grey)),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

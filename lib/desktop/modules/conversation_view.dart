@@ -131,6 +131,8 @@ class RichTextReplyController extends TextEditingController {
 }
 
 mixin ConversationViewMixin on State<EmailModule> {
+  Map<String, String>? _contactNames;
+  Map<String, String> get contactNames => _contactNames ??= native.EmailCore.addressbookNameMap();
   bool get showEmojiPicker;
   set showEmojiPicker(bool v);
   TextEditingController get replyController;
@@ -288,7 +290,7 @@ mixin ConversationViewMixin on State<EmailModule> {
     ];
     final members = session.members;
     final isGroup = members.length > 2;
-    final title = session.subject.isNotEmpty ? session.subject : members.where((m) => m != session.account).take(3).join(', ');
+    final title = session.subject.isNotEmpty ? session.subject : members.where((m) => m != session.account).take(3).map((m) => contactNames[m] ?? m).join(', ');
 
     // Build the conversation area
     final conversation = GestureDetector(
@@ -429,7 +431,7 @@ mixin ConversationViewMixin on State<EmailModule> {
               padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
               children: members.map((m) {
                 final isMe = m.toLowerCase() == session.account.toLowerCase();
-                final displayName = isMe ? AppStrings.me : m.split('@').first;
+                final displayName = isMe ? AppStrings.me : (contactNames[m] ?? m.split('@').first);
                 return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   child: Row(
@@ -628,7 +630,7 @@ mixin ConversationViewMixin on State<EmailModule> {
               crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 if (!isMe && members.length > 2)
-                  Text(msg.sender.split('@').first, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
+                  Text(contactNames[msg.sender] ?? msg.sender.split('@').first, style: TextStyle(fontSize: 11, color: context.oim.textMuted)),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(

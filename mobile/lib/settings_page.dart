@@ -3,6 +3,7 @@ import 'package:oim_core/backup_page.dart';
 import 'package:oim_core/i18n/app_strings.dart';
 
 import 'accounts_page.dart';
+import 'contacts_page.dart';
 import 'new_session_page.dart';
 
 class SettingsPage extends StatelessWidget {
@@ -31,6 +32,14 @@ class SettingsPage extends StatelessWidget {
           trailing: const Icon(Icons.chevron_right),
           onTap: () => Navigator.of(context).push(MaterialPageRoute(
             builder: (_) => AccountsPage(configPath: configPath),
+          )),
+        ),
+        ListTile(
+          leading: const Icon(Icons.contacts_outlined),
+          title: Text(AppStrings.contacts),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => const ContactsPage(),
           )),
         ),
         ListTile(
