@@ -61,10 +61,16 @@ std::string keyPackageSignatureKeyHex(const std::string& keyPackageB64);
 struct Member {
     std::string identity;      // email
     std::string signatureKey;  // hex
+    int index = -1;            // MLS leaf index
 };
 // Members currently in the MLS tree. Empty if group not joined yet.
 std::vector<Member> members(const std::string& account, const std::string& groupId);
 std::vector<std::string> memberEmails(const std::string& account, const std::string& groupId);
+
+// Remove `email` from the ratchet tree. Produces and merges the remove
+// Commit; returns its base64 serialization, or "" on error.
+std::string removeMemberByEmail(const std::string& account, const std::string& groupId,
+                                const std::string& email);
 
 // A group is "ready" when the account has a joined MLS group for it.
 bool isReady(const std::string& account, const std::string& groupId);

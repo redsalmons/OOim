@@ -450,7 +450,7 @@ mixin ConversationViewMixin on State<EmailModule> {
                           ],
                         ),
                       ),
-                      if (!isMe)
+                      if (!isMe && members.length > 2)
                         GestureDetector(
                           onTap: () => _unifiedRemoveMember(session, m),
                           child: Icon(Icons.remove_circle_outline, size: 18, color: context.oim.textMuted),

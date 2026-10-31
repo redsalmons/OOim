@@ -604,12 +604,21 @@ SendResult UnifiedSessionManager::removeMember(const std::string& account,
         result.error = "member not found";
         return result;
     }
-    // Guard: an in-tree member is already an encryption recipient — removing it
-    // requires an MLS remove commit, not a roster edit.
+    // Guard: an in-tree member is already an encryption recipient — the owner
+    // evicts it via a real MLS remove commit (also trims both rosters there).
     if (session.mode == SessionMode::Mls && !session.mlsGroupId.empty()) {
         std::vector<std::string> tree = mls::memberEmails(account, session.mlsGroupId);
         if (std::find(tree.begin(), tree.end(), member) != tree.end()) {
-            result.error = "member already joined";
+            char buf[1024];
+            int rc = group_remove_member(account.c_str(), session.mlsGroupId.c_str(),
+                                         member.c_str(), buf, sizeof(buf));
+            if (rc != 0) {
+                try {
+                    result.error = json::parse(buf).value("error", "remove failed");
+                } catch (...) { result.error = "remove failed"; }
+                return result;
+            }
+            result.success = true;
             return result;
         }
     }
