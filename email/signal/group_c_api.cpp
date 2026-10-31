@@ -480,6 +480,7 @@ int onHandshake(const std::string& account, const json& body, const std::string&
         if (g_usRepo.loadByMlsGroupId(account, groupId, us)) {
             us.members.erase(std::remove(us.members.begin(), us.members.end(), removed), us.members.end());
             g_usRepo.updateMembers(us.sessionId, us.members);
+            if (removed == account) g_usRepo.setStatus(us.sessionId, kSessionRemoved);
         }
         if (removed == account) return 0;
     }

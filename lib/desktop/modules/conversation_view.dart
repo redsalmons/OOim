@@ -797,6 +797,14 @@ mixin ConversationViewMixin on State<EmailModule> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (session.identityChanged) _buildIdentityBanner(session),
+          if (session.removed)
+            Container(
+              width: double.infinity,
+              color: context.oim.inputField,
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+              child: Text(AppStrings.removedNotice,
+                  style: TextStyle(fontSize: 12, color: context.oim.textMuted)),
+            ),
           Row(
             children: [
               Expanded(
@@ -1007,9 +1015,9 @@ mixin ConversationViewMixin on State<EmailModule> {
     final hasFiles = droppedFiles.isNotEmpty;
     if (bodyText.isEmpty && !hasFiles) return;
 
-    if (session.identityChanged) {
+    if (session.identityChanged || session.removed) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(AppStrings.identityChangedBlocked), duration: const Duration(seconds: 2)),
+        SnackBar(content: Text(session.removed ? AppStrings.removedNotice : AppStrings.identityChangedBlocked), duration: const Duration(seconds: 2)),
       );
       return;
     }

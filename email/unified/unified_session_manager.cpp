@@ -638,6 +638,11 @@ SendResult UnifiedSessionManager::removeMember(const std::string& account,
 bool UnifiedSessionManager::isReady(const std::string& account, const std::string& sessionId) {
     UnifiedSession session;
     if (!repo_.load(sessionId, session)) return false;
+    // Evicted members keep the session for history but can no longer send.
+    if (session.status == kSessionRemoved ||
+        std::find(session.members.begin(), session.members.end(), account) == session.members.end()) {
+        return false;
+    }
 
     if (session.mode == SessionMode::Signal) {
         // The peer identifies the Signal session row: signal_session records are keyed

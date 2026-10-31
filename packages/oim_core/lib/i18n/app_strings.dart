@@ -68,6 +68,7 @@ class AppStrings {
       ? '这可能是对方重装了应用，也可能是有人在冒充对方。请通过其他渠道核对下方指纹后再继续。'
       : 'They may have reinstalled the app, or someone may be impersonating them. Verify the fingerprint below over another channel before continuing.';
   static String get identityChangedBlocked => isZh ? '对方身份密钥已变化，已暂停发送' : 'Identity key changed; sending is paused';
+  static String get removedNotice => isZh ? '你已被移出该会话' : 'You were removed from this session';
   static String get trustNewIdentity => isZh ? '我已核对，信任新密钥' : 'Verified, trust new key';
   static String get myFingerprint => isZh ? '我的指纹' : 'My fingerprint';
   static String get peerFingerprint => isZh ? '对方指纹' : 'Their fingerprint';

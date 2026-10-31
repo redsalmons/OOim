@@ -915,8 +915,11 @@ extern "C" int email_download_pending_bodies(int configIndex, const char* accoun
                         results.push_back({{"uuid", pe}, {"folder", dep->folder}, {"file", storedFile}});
                         continue;
                     } else if (mlsRc == 1) {
-                        // Retry later (e.g. Commit arrived before Welcome). This is
-                        // a hold, not a failure — do not consume the retry budget.
+                        // Retry later (e.g. Commit arrived before Welcome). Bounded:
+                        // retry_count still increments so a permanently dead group
+                        // cannot starve the pending queue forever — the query caps
+                        // protocol-mail retries well past real delivery delays.
+                        s_emailRepo.incrementRetryCount(pe, accountStr);
                         LOG_INFO("[DB] download_pending: MLS %s deferred (rc=1), will retry\n", x_session_chart.c_str());
                         continue;
                     } else {

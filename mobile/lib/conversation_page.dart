@@ -112,7 +112,7 @@ class _ConversationPageState extends State<ConversationPage> {
       if (resp['status'] == 'success') {
         _live = UnifiedSessionInfo.fromJson(resp['session'] as Map<String, dynamic>);
       }
-      _ready = !session.identityChanged &&
+      _ready = !session.identityChanged && !session.removed &&
           UnifiedSessionManager.isReady(session.account, session.sessionId);
     } catch (_) {}
     final prevCount = _messages.length + _pending.length;
@@ -557,6 +557,14 @@ class _ConversationPageState extends State<ConversationPage> {
             ),
           ),
           if (session.identityChanged) _identityBanner(),
+          if (session.removed)
+            Container(
+              width: double.infinity,
+              color: Colors.grey[200],
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text(AppStrings.removedNotice,
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            ),
           _inputBar(),
         ]),
       ),

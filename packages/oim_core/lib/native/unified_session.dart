@@ -137,6 +137,7 @@ class UnifiedSessionInfo {
   final String peerIdentityFp;
 
   bool get identityChanged => status == 2;
+  bool get removed => status == 3;
 
   UnifiedSessionInfo({
     this.sessionId = '',
